@@ -1,16 +1,17 @@
-// @ts-nocheck
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import postgres from "postgres";
 import { randomUUID, createHash } from "node:crypto";
 import { z } from "zod";
+import { initAuth } from "./auth.js";
+import { registerHealthChecks } from "./health.js";
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/agentpact";
 const PLATFORM_FEE_PCT = Number(process.env.PLATFORM_FEE_PCT ?? 10);
 const PLATFORM_WALLET = process.env.PLATFORM_WALLET ?? "0xAgentPactPlatformUSDC";
-const sql = postgres(DATABASE_URL, { max: 10 });
-const app = Fastify({ logger: true });
+export const sql = postgres(DATABASE_URL, { max: 10 });
+export const app = Fastify({ logger: true });
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
 const milestoneSchema = z.object({
     idx: z.number().int().positive(),
@@ -160,31 +161,39 @@ async function releaseMilestonePayment(milestoneId) {
     const sellerAmount = Number((gross * (100 - PLATFORM_FEE_PCT) / 100).toFixed(6));
     const feeAmount = Number((gross - sellerAmount).toFixed(6));
     await sql.begin(async (txn) => {
-        await txn `
-      UPDATE payment_intents
-      SET status = 'released', released_at = NOW(), updated_at = NOW(), tx_hash = ${`release_${randomUUID().slice(0, 8)}`}
-      WHERE id = ${payment.id}
-    `;
-        await txn `
-      UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = ${milestoneId}
-    `;
-        await txn `
-      UPDATE deals SET status = 'completed', updated_at = NOW()
-      WHERE id = (SELECT deal_id FROM milestones WHERE id = ${milestoneId})
-    `;
-        await txn `
-      INSERT INTO audit_log (action, object_type, object_id, payload_json)
-      VALUES (
-        'payment.release',
-        'milestone',
-        ${milestoneId},
-        ${JSON.stringify({ gross, sellerAmount, feeAmount, platformWallet: PLATFORM_WALLET })}::jsonb
-      )
-    `;
+        await txn.unsafe(`
+        UPDATE payment_intents
+        SET status = 'released', released_at = NOW(), updated_at = NOW(), tx_hash = $1
+        WHERE id = $2
+      `, [`release_${randomUUID().slice(0, 8)}`, payment.id]);
+        await txn.unsafe(`
+        UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = $1
+      `, [milestoneId]);
+        await txn.unsafe(`
+        UPDATE deals SET status = 'completed', updated_at = NOW()
+        WHERE id = (SELECT deal_id FROM milestones WHERE id = $1)
+      `, [milestoneId]);
+        await txn.unsafe(`
+        INSERT INTO audit_log (action, object_type, object_id, payload_json)
+        VALUES ('payment.release', 'milestone', $1, $2::jsonb)
+      `, [milestoneId, JSON.stringify({ gross, sellerAmount, feeAmount, platformWallet: PLATFORM_WALLET })]);
     });
 }
-await app.register(cors, { origin: true });
-app.get("/health", async () => ({ ok: true, service: "agentpact-api" }));
+await app.register(cors, {
+    origin: (process.env.CORS_ORIGINS ?? "http://localhost:3000").split(",")
+});
+await initAuth(app);
+registerHealthChecks(app, sql);
+app.addHook("preHandler", async (request, reply) => {
+    const routePath = (request.url.split("?")[0] ?? request.url);
+    const publicRoutes = new Set(["/health", "/api/auth/register", "/api/auth/verify"]);
+    if (publicRoutes.has(routePath)) {
+        return;
+    }
+    if (routePath.startsWith("/api/")) {
+        await app.authenticate(request, reply);
+    }
+});
 app.post("/api/agents", async (request, reply) => {
     const body = z
         .object({
@@ -241,16 +250,24 @@ app.post("/api/offers", async (request, reply) => {
 app.patch("/api/offers/:id", async (request) => {
     const { id } = request.params;
     const body = createOfferSchema.partial().parse(request.body);
+    const title = body.title ?? null;
+    const descriptionMd = body.descriptionMd ?? null;
+    const category = body.category ?? null;
+    const tags = body.tags ?? null;
+    const basePrice = body.basePrice ?? null;
+    const maxPriceDeltaPct = body.maxPriceDeltaPct ?? null;
+    const slaDays = body.slaDays ?? null;
+    const proofsJson = body.proofs ? JSON.stringify(body.proofs) : null;
     const [offer] = await sql `
     UPDATE offers SET
-      title = COALESCE(${body.title}, title),
-      description_md = COALESCE(${body.descriptionMd}, description_md),
-      category = COALESCE(${body.category}, category),
-      tags = COALESCE(${body.tags}, tags),
-      base_price = COALESCE(${body.basePrice}, base_price),
-      max_price_delta_pct = COALESCE(${body.maxPriceDeltaPct}, max_price_delta_pct),
-      sla_days = COALESCE(${body.slaDays}, sla_days),
-      proofs_json = COALESCE(${body.proofs ? JSON.stringify(body.proofs) : undefined}::jsonb, proofs_json),
+      title = COALESCE(${title}, title),
+      description_md = COALESCE(${descriptionMd}, description_md),
+      category = COALESCE(${category}, category),
+      tags = COALESCE(${tags}, tags),
+      base_price = COALESCE(${basePrice}, base_price),
+      max_price_delta_pct = COALESCE(${maxPriceDeltaPct}, max_price_delta_pct),
+      sla_days = COALESCE(${slaDays}, sla_days),
+      proofs_json = COALESCE(${proofsJson}::jsonb, proofs_json),
       updated_at = NOW()
     WHERE id = ${id}
     RETURNING *
@@ -290,12 +307,15 @@ app.get("/api/offers/:id", async (request, reply) => {
 app.post("/api/needs", async (request, reply) => {
     const idem = idempotencyKey(request.headers);
     const body = createNeedSchema.parse(request.body);
+    const budgetMin = body.budgetMin ?? null;
+    const budgetMax = body.budgetMax ?? null;
+    const deadlineAt = body.deadlineAt ?? null;
     const [need] = await sql `
     INSERT INTO needs (
       agent_id, title, description_md, category, tags, budget_min, budget_max, currency, acceptance_criteria, deadline_at
     ) VALUES (
       ${body.agentId}, ${body.title}, ${body.descriptionMd}, ${body.category}, ${body.tags},
-      ${body.budgetMin}, ${body.budgetMax}, ${body.currency}, ${JSON.stringify(body.acceptanceCriteria)}::jsonb, ${body.deadlineAt}
+      ${budgetMin}, ${budgetMax}, ${body.currency}, ${JSON.stringify(body.acceptanceCriteria)}::jsonb, ${deadlineAt}
     ) RETURNING *
   `;
     await audit(body.agentId, "need.create", "need", need.id, idem, body);
@@ -305,16 +325,24 @@ app.post("/api/needs", async (request, reply) => {
 app.patch("/api/needs/:id", async (request) => {
     const { id } = request.params;
     const body = createNeedSchema.partial().parse(request.body);
+    const title = body.title ?? null;
+    const descriptionMd = body.descriptionMd ?? null;
+    const category = body.category ?? null;
+    const tags = body.tags ?? null;
+    const budgetMin = body.budgetMin ?? null;
+    const budgetMax = body.budgetMax ?? null;
+    const acceptanceCriteria = body.acceptanceCriteria ? JSON.stringify(body.acceptanceCriteria) : null;
+    const deadlineAt = body.deadlineAt ?? null;
     const [need] = await sql `
     UPDATE needs SET
-      title = COALESCE(${body.title}, title),
-      description_md = COALESCE(${body.descriptionMd}, description_md),
-      category = COALESCE(${body.category}, category),
-      tags = COALESCE(${body.tags}, tags),
-      budget_min = COALESCE(${body.budgetMin}, budget_min),
-      budget_max = COALESCE(${body.budgetMax}, budget_max),
-      acceptance_criteria = COALESCE(${body.acceptanceCriteria ? JSON.stringify(body.acceptanceCriteria) : undefined}::jsonb, acceptance_criteria),
-      deadline_at = COALESCE(${body.deadlineAt}, deadline_at),
+      title = COALESCE(${title}, title),
+      description_md = COALESCE(${descriptionMd}, description_md),
+      category = COALESCE(${category}, category),
+      tags = COALESCE(${tags}, tags),
+      budget_min = COALESCE(${budgetMin}, budget_min),
+      budget_max = COALESCE(${budgetMax}, budget_max),
+      acceptance_criteria = COALESCE(${acceptanceCriteria}::jsonb, acceptance_criteria),
+      deadline_at = COALESCE(${deadlineAt}, deadline_at),
       updated_at = NOW()
     WHERE id = ${id}
     RETURNING *
@@ -375,9 +403,10 @@ app.post("/api/alerts/subscribe", async (request, reply) => {
         webhookUrl: z.string().url().optional()
     })
         .parse(request.body);
+    const webhookUrl = body.webhookUrl ?? null;
     const [subscription] = await sql `
     INSERT INTO alert_subscriptions (agent_id, kind, filter_json, webhook_url)
-    VALUES (${body.agentId}, ${body.kind}, ${JSON.stringify(body.filter)}::jsonb, ${body.webhookUrl})
+    VALUES (${body.agentId}, ${body.kind}, ${JSON.stringify(body.filter)}::jsonb, ${webhookUrl})
     RETURNING *
   `;
     return reply.code(201).send(subscription);
@@ -386,49 +415,50 @@ app.post("/api/deals/propose", async (request, reply) => {
     const idem = idempotencyKey(request.headers);
     const body = proposeDealSchema.parse(request.body);
     await sql.begin(async (txn) => {
-        const [deal] = await txn `
-      INSERT INTO deals (
-        buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days
-      ) VALUES (
-        ${body.buyerAgentId}, ${body.sellerAgentId}, ${body.offerId}, ${body.needId}, 'proposed', ${body.negotiatedTotal}, 'USDC', ${body.maxPriceDeltaPct}, ${body.acceptanceTimeoutDays}
-      )
-      RETURNING *
-    `;
+        const [deal] = await txn.unsafe(`
+        INSERT INTO deals (
+          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days
+        ) VALUES ($1, $2, $3, $4, 'proposed', $5, 'USDC', $6, $7)
+        RETURNING *
+      `, [body.buyerAgentId, body.sellerAgentId, body.offerId, body.needId, body.negotiatedTotal, body.maxPriceDeltaPct, body.acceptanceTimeoutDays]);
         for (const milestone of body.milestones) {
-            await txn `
-        INSERT INTO milestones (deal_id, idx, title, amount, currency, acceptance_criteria, due_at)
-        VALUES (${deal.id}, ${milestone.idx}, ${milestone.title}, ${milestone.amount}, 'USDC', ${JSON.stringify(milestone.acceptanceCriteria)}::jsonb, ${milestone.dueAt})
-      `;
+            const dueAt = milestone.dueAt ?? null;
+            await txn.unsafe(`
+          INSERT INTO milestones (deal_id, idx, title, amount, currency, acceptance_criteria, due_at)
+          VALUES ($1, $2, $3, $4, 'USDC', $5::jsonb, $6)
+        `, [deal.id, milestone.idx, milestone.title, milestone.amount, JSON.stringify(milestone.acceptanceCriteria), dueAt]);
         }
-        await txn `
-      INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-      VALUES (${deal.id}, ${body.buyerAgentId}, 'propose', ${JSON.stringify(body)}::jsonb)
-    `;
+        await txn.unsafe(`
+        INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+        VALUES ($1, $2, 'propose', $3::jsonb)
+      `, [deal.id, body.buyerAgentId, JSON.stringify(body)]);
         await audit(body.buyerAgentId, "deal.propose", "deal", deal.id, idem, body);
     });
     return reply.code(201).send({ ok: true });
 });
 app.post("/api/deals/:id/counter", async (request) => {
     const { id } = request.params;
-    const body = counterDealSchema.parse({ ...request.body, dealId: id });
+    const requestBody = request.body && typeof request.body === "object" ? request.body : {};
+    const body = counterDealSchema.parse({ ...requestBody, dealId: id });
     await enforceDealDelta(id, body.negotiatedTotal);
     await sql.begin(async (txn) => {
-        await txn `DELETE FROM milestones WHERE deal_id = ${id}`;
+        await txn.unsafe("DELETE FROM milestones WHERE deal_id = $1", [id]);
         for (const milestone of body.milestones) {
-            await txn `
-        INSERT INTO milestones (deal_id, idx, title, amount, acceptance_criteria, due_at)
-        VALUES (${id}, ${milestone.idx}, ${milestone.title}, ${milestone.amount}, ${JSON.stringify(milestone.acceptanceCriteria)}::jsonb, ${milestone.dueAt})
-      `;
+            const dueAt = milestone.dueAt ?? null;
+            await txn.unsafe(`
+          INSERT INTO milestones (deal_id, idx, title, amount, acceptance_criteria, due_at)
+          VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+        `, [id, milestone.idx, milestone.title, milestone.amount, JSON.stringify(milestone.acceptanceCriteria), dueAt]);
         }
-        await txn `
-      UPDATE deals
-      SET status = 'countered', negotiated_total = ${body.negotiatedTotal}, updated_at = NOW()
-      WHERE id = ${id}
-    `;
-        await txn `
-      INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-      VALUES (${id}, ${body.actorAgentId}, 'counter', ${JSON.stringify(body)}::jsonb)
-    `;
+        await txn.unsafe(`
+        UPDATE deals
+        SET status = 'countered', negotiated_total = $1, updated_at = NOW()
+        WHERE id = $2
+      `, [body.negotiatedTotal, id]);
+        await txn.unsafe(`
+        INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+        VALUES ($1, $2, 'counter', $3::jsonb)
+      `, [id, body.actorAgentId, JSON.stringify(body)]);
     });
     return { ok: true };
 });
@@ -436,12 +466,12 @@ app.post("/api/deals/:id/accept", async (request) => {
     const { id } = request.params;
     const body = z.object({ actorAgentId: z.string().uuid() }).parse(request.body);
     await sql.begin(async (txn) => {
-        await txn `UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = ${id}`;
-        await txn `UPDATE milestones SET status = 'in_progress' WHERE deal_id = ${id} AND status = 'pending'`;
-        await txn `
-      INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-      VALUES (${id}, ${body.actorAgentId}, 'accept', ${JSON.stringify(body)}::jsonb)
-    `;
+        await txn.unsafe("UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = $1", [id]);
+        await txn.unsafe("UPDATE milestones SET status = 'in_progress' WHERE deal_id = $1 AND status = 'pending'", [id]);
+        await txn.unsafe(`
+        INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+        VALUES ($1, $2, 'accept', $3::jsonb)
+      `, [id, body.actorAgentId, JSON.stringify(body)]);
     });
     return { ok: true };
 });
@@ -449,12 +479,12 @@ app.post("/api/deals/:id/cancel", async (request) => {
     const { id } = request.params;
     const body = z.object({ actorAgentId: z.string().uuid(), reason: z.string().optional() }).parse(request.body);
     await sql.begin(async (txn) => {
-        await txn `UPDATE deals SET status = 'cancelled', updated_at = NOW() WHERE id = ${id}`;
-        await txn `UPDATE milestones SET status = 'cancelled' WHERE deal_id = ${id}`;
-        await txn `
-      INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-      VALUES (${id}, ${body.actorAgentId}, 'cancel', ${JSON.stringify(body)}::jsonb)
-    `;
+        await txn.unsafe("UPDATE deals SET status = 'cancelled', updated_at = NOW() WHERE id = $1", [id]);
+        await txn.unsafe("UPDATE milestones SET status = 'cancelled' WHERE deal_id = $1", [id]);
+        await txn.unsafe(`
+        INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+        VALUES ($1, $2, 'cancel', $3::jsonb)
+      `, [id, body.actorAgentId, JSON.stringify(body)]);
     });
     return { ok: true };
 });
@@ -535,9 +565,10 @@ app.post("/api/payments/refund", async (request) => {
 app.post("/api/deliveries/submit", async (request, reply) => {
     const body = submitDeliverySchema.parse(request.body);
     const checksum = createHash("sha256").update(JSON.stringify(body.artifacts)).digest("hex");
+    const notes = body.notes ?? null;
     const [delivery] = await sql `
     INSERT INTO deliveries (milestone_id, submitted_by, artifact_manifest, checksum, verification_notes)
-    VALUES (${body.milestoneId}, ${body.submittedBy}, ${JSON.stringify(body.artifacts)}::jsonb, ${checksum}, ${body.notes})
+    VALUES (${body.milestoneId}, ${body.submittedBy}, ${JSON.stringify(body.artifacts)}::jsonb, ${checksum}, ${notes})
     RETURNING *
   `;
     await sql `UPDATE milestones SET status = 'delivered' WHERE id = ${body.milestoneId}`;
@@ -549,10 +580,11 @@ app.post("/api/deliveries/submit", async (request, reply) => {
 });
 app.post("/api/deliveries/verify", async (request, reply) => {
     const body = verifyDeliverySchema.parse(request.body);
+    const verificationNotes = body.verificationNotes ?? null;
     if (!body.accepted) {
         await sql `
       UPDATE deliveries
-      SET status = 'rejected', verified_at = NOW(), verification_notes = COALESCE(${body.verificationNotes}, verification_notes)
+      SET status = 'rejected', verified_at = NOW(), verification_notes = COALESCE(${verificationNotes}, verification_notes)
       WHERE milestone_id = ${body.milestoneId}
     `;
         await sql `UPDATE milestones SET status = 'in_progress' WHERE id = ${body.milestoneId}`;
@@ -560,7 +592,7 @@ app.post("/api/deliveries/verify", async (request, reply) => {
     }
     await sql `
     UPDATE deliveries
-    SET status = 'verified', verified_at = NOW(), verification_notes = COALESCE(${body.verificationNotes}, verification_notes)
+    SET status = 'verified', verified_at = NOW(), verification_notes = COALESCE(${verificationNotes}, verification_notes)
     WHERE milestone_id = ${body.milestoneId}
   `;
     await releaseMilestonePayment(body.milestoneId);
@@ -597,13 +629,14 @@ app.post("/api/disputes/resolve-timeouts", async () => {
 });
 app.post("/api/feedback", async (request, reply) => {
     const body = feedbackSchema.parse(request.body);
+    const comment = body.comment ?? null;
     const [entry] = await sql `
     INSERT INTO feedback (
       deal_id, from_agent_id, to_agent_id,
       rating_quality, rating_timeliness, rating_communication, rating_accuracy, comment
     ) VALUES (
       ${body.dealId}, ${body.fromAgentId}, ${body.toAgentId},
-      ${body.ratingQuality}, ${body.ratingTimeliness}, ${body.ratingCommunication}, ${body.ratingAccuracy}, ${body.comment}
+      ${body.ratingQuality}, ${body.ratingTimeliness}, ${body.ratingCommunication}, ${body.ratingAccuracy}, ${comment}
     )
     ON CONFLICT (deal_id, from_agent_id, to_agent_id)
     DO UPDATE SET
@@ -633,16 +666,10 @@ app.get("/api/public/overview", async () => {
 });
 app.setErrorHandler((error, _request, reply) => {
     app.log.error(error);
-    reply.code(400).send({ error: error.message });
+    const message = error instanceof Error ? error.message : "Unknown error";
+    reply.code(400).send({ error: message });
 });
-const shutdown = async () => {
+export const shutdown = async () => {
     await app.close();
     await sql.end({ timeout: 5 });
 };
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-app.listen({ port: PORT, host: HOST }).catch(async (error) => {
-    app.log.error(error);
-    await shutdown();
-    process.exit(1);
-});

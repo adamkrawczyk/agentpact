@@ -1,4 +1,3 @@
-// @ts-nocheck
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 const PORT = Number(process.env.WEB_PORT ?? 3000);

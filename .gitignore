@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+apps/*/node_modules/
+
+# Build output
+coverage/
+apps/*/coverage/
+artifacts/
+cache/
+
+# Logs
+*.log
+build.log
+build-errors.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Runtime / misc
+.DS_Store
+*.tmp
+
+# Hardhat
+typechain-types/
+contracts/typechain-types/
+
+# Generated tests output
+apps/api/dist/__tests__/
