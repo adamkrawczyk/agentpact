@@ -1,0 +1,26 @@
+{
+  "name": "agentpact",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @agentpact/api && npm run build -w @agentpact/mcp && npm run build -w @agentpact/web",
+    "dev": "concurrently \"npm run dev -w @agentpact/api\" \"npm run dev -w @agentpact/mcp\" \"npm run dev -w @agentpact/web\"",
+    "migrate": "tsx scripts/migrate.ts",
+    "seed": "tsx scripts/seed.ts",
+    "test": "npm run test -w @agentpact/api"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "postgres": "^3.4.5",
+    "zod": "^3.24.2"
+  }
+}
