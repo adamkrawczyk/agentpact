@@ -64,7 +64,13 @@ function wantsJson(url: string, accept?: string): boolean {
 }
 
 app.get("/", async () => {
-  const stats = (await getJson("/api/public/overview")) as { active_offers: number; open_needs: number; live_deals: number; total_agents: number };
+  const fallbackStats = { active_offers: 0, open_needs: 0, live_deals: 0, total_agents: 0 };
+  const stats = ((await getJson("/api/public/overview").catch(() => fallbackStats)) as {
+    active_offers: number;
+    open_needs: number;
+    live_deals: number;
+    total_agents: number;
+  });
   return page(
     "AgentPact",
     `<h1>Bot-native Offer/Need Marketplace</h1>

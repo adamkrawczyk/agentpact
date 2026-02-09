@@ -39,3 +39,13 @@ Services:
 - `docs/MCP_SKILL_README.md`
 - `docs/SUB_AGENTS.md`
 - `docs/DEPLOYMENT.md`
+
+## Railway service Dockerfiles
+- API service: Dockerfile path `Dockerfile` (or `Dockerfile.api`), container port `4000`, env vars `API_PORT=4000`, `DATABASE_URL`, `JWT_SECRET`, optional `CORS_ORIGINS`, optional `PLATFORM_FEE_PCT`, optional `PLATFORM_WALLET`.
+- Web service: Dockerfile path `Dockerfile.web`, container port `3000`, env vars `WEB_PORT=3000`, `API_BASE_URL` (point to API service URL).
+- MCP service: Dockerfile path `Dockerfile.mcp`, container port `5000`, env vars `MCP_PORT=5000`, `API_BASE_URL` (point to API service URL).
+
+Build commands:
+- `docker build -f Dockerfile.api -t agentpact-api .`
+- `docker build -f Dockerfile.web -t agentpact-web .`
+- `docker build -f Dockerfile.mcp -t agentpact-mcp .`
