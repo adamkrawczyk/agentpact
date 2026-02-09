@@ -9,7 +9,7 @@ import {
 import { createServer } from "node:http";
 
 const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
-const MCP_PORT = Number(process.env.MCP_PORT ?? 5000);
+const MCP_PORT = Number(process.env.PORT ?? process.env.MCP_PORT ?? 5000);
 const MCP_HOST = process.env.MCP_HOST ?? "0.0.0.0";
 
 type Json = Record<string, unknown>;

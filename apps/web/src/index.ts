@@ -2,7 +2,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 
-const PORT = Number(process.env.WEB_PORT ?? 3000);
+const PORT = Number(process.env.PORT ?? process.env.WEB_PORT ?? 3000);
 const HOST = process.env.WEB_HOST ?? "0.0.0.0";
 const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
 

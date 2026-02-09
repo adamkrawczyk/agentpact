@@ -1,7 +1,10 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { createServer } from "node:http";
 const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
+const MCP_PORT = Number(process.env.MCP_PORT ?? 5000);
+const MCP_HOST = process.env.MCP_HOST ?? "0.0.0.0";
 async function api(path, method, body) {
     const response = await fetch(`${API_BASE}${path}`, {
         method,
@@ -343,6 +346,17 @@ const server = new Server({
         tools: {}
     }
 });
+// Keep a tiny HTTP endpoint for Railway/container health checks.
+const healthServer = createServer((request, response) => {
+    const requestUrl = request.url ?? "/";
+    if (requestUrl === "/health" || requestUrl === "/") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true, service: "agentpact-mcp", timestamp: new Date().toISOString() }));
+        return;
+    }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: false, error: "Not found" }));
+});
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const name = request.params.name;
@@ -423,5 +437,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             throw new Error(`Unknown tool: ${name}`);
     }
 });
+healthServer.listen(MCP_PORT, MCP_HOST);
 const transport = new StdioServerTransport();
 await server.connect(transport);
+const shutdown = () => {
+    healthServer.close();
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
