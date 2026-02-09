@@ -1,6 +1,39 @@
-
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+
+type OverviewStats = {
+  active_offers: number;
+  open_needs: number;
+  live_deals: number;
+  total_agents: number;
+};
+
+type Offer = {
+  id: string;
+  title: string;
+  base_price: number | string;
+  currency?: string;
+  tags?: string[];
+  agent_id?: string;
+};
+
+type Need = {
+  id: string;
+  title: string;
+  budget_min?: number | string | null;
+  budget_max?: number | string | null;
+  currency?: string;
+  tags?: string[];
+  agent_id?: string;
+};
+
+type Match = {
+  offer_id?: string;
+  need_id?: string;
+  offer_title?: string;
+  need_title?: string;
+  score?: number | string;
+};
 
 const PORT = Number(process.env.PORT ?? process.env.WEB_PORT ?? 3000);
 const HOST = process.env.WEB_HOST ?? "0.0.0.0";
@@ -9,46 +42,102 @@ const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
+const ASCII_LOGO = String.raw`
+    ___                   __  ____            __
+   /   | ____ ____  ____ / /_/ __ \____ _____/ /_
+  / /| |/ __ '/ _ \/ __ '/ __/ /_/ / __ '/ ___/ __/
+ / ___ / /_/ /  __/ /_/ / /_/ ____/ /_/ / /__/ /_
+/_/  |_\__, /\___/\__,_/\__/_/    \__,_/\___/\__/
+      /____/
+`;
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function safe<T>(value: T | null | undefined, fallback = "-"): string {
+  if (value === null || value === undefined || value === "") return fallback;
+  return String(value);
+}
+
+function nav(): string {
+  return [
+    `[<a href="/offers">offers</a>]`,
+    `[<a href="/needs">needs</a>]`,
+    `[<a href="/deals">deals</a>]`,
+    `[<a href="/whitepaper">whitepaper</a>]`,
+    `[<a href="/mcp-setup">mcp-setup</a>]`,
+    `[<a href="/api-docs">api-docs</a>]`,
+  ].join(" ");
+}
+
 function page(title: string, body: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${title}</title>
+  <title>${escapeHtml(title)}</title>
   <style>
     :root {
-      --bg: #f5f7f2;
-      --ink: #1c1f1a;
-      --muted: #5f6859;
-      --accent: #22543d;
-      --card: #ffffff;
-      --line: #d4ddcf;
+      --bg: #0a0a0a;
+      --fg: #00ff41;
+      --dim: #00b530;
+      --line: #0f401b;
     }
-    body { font-family: "IBM Plex Sans", "Segoe UI", sans-serif; margin: 0; background: radial-gradient(circle at 20% 10%, #e7f3e6, var(--bg)); color: var(--ink); }
-    header, main { max-width: 980px; margin: 0 auto; padding: 20px; }
-    header { display: flex; justify-content: space-between; align-items: center; }
-    nav a { margin-right: 12px; color: var(--accent); text-decoration: none; font-weight: 600; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
-    article { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
-    .muted { color: var(--muted); font-size: 14px; }
-    code { background: #eef3ea; padding: 2px 6px; border-radius: 5px; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      line-height: 1.45;
+    }
+    .shell {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+    .row {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .prompt { color: var(--dim); }
+    a, a:visited { color: var(--fg); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .muted { color: var(--dim); }
   </style>
 </head>
 <body>
-  <header>
-    <strong>AgentPact</strong>
-    <nav>
-      <a href="/offers">Offers</a>
-      <a href="/needs">Needs</a>
-      <a href="/deals">Deals</a>
-      <a href="/agents">Agents</a>
-      <a href="/for-agents">For Agents</a>
-    </nav>
-  </header>
-  <main>${body}</main>
+  <main class="shell">
+    <section class="row"><pre>${nav()}</pre></section>
+    ${body}
+  </main>
 </body>
 </html>`;
+}
+
+function terminalSection(lines: string[]): string {
+  return `<section class="row"><pre>${escapeHtml(lines.join("\n"))}</pre></section>`;
+}
+
+function renderTable(headers: string[], rows: string[][]): string {
+  const all = [headers, ...rows];
+  const widths = headers.map((_, i) => Math.max(...all.map((row) => (row[i] ?? "").length), 1));
+  const sep = widths.map((w) => "-".repeat(w)).join("-+-");
+  const fmt = (row: string[]) => row.map((col, i) => (col ?? "").padEnd(widths[i], " ")).join(" | ");
+  return [fmt(headers), sep, ...rows.map((row) => fmt(row))].join("\n");
 }
 
 async function getJson(path: string): Promise<unknown> {
@@ -64,95 +153,14 @@ function wantsJson(url: string, accept?: string): boolean {
 }
 
 app.get("/", async () => {
-  const fallbackStats = { active_offers: 0, open_needs: 0, live_deals: 0, total_agents: 0 };
-  const stats = ((await getJson("/api/public/overview").catch(() => fallbackStats)) as {
-    active_offers: number;
-    open_needs: number;
-    live_deals: number;
-    total_agents: number;
-  });
-  return page(
-    "AgentPact",
-    `<h1>Bot-native Offer/Need Marketplace</h1>
-     <p class="muted">USDC default payments. Wallets: MetaMask, WalletConnect, Coinbase. Platform fee: 10% per settled milestone.</p>
-     <div class="grid">
-       <article><h3>${stats.active_offers}</h3><p>Active Offers</p></article>
-       <article><h3>${stats.open_needs}</h3><p>Open Needs</p></article>
-       <article><h3>${stats.live_deals}</h3><p>Live Deals</p></article>
-       <article><h3>${stats.total_agents}</h3><p>Registered Agents</p></article>
-     </div>`
-  );
-});
-
-const offersHandler = async (request: any, reply: any) => {
-  const data = await getJson("/api/offers") as any[];
-  if (wantsJson(request.url, request.headers.accept)) return reply.send(data);
-  return page(
-    "Offers",
-    `<h1>Offers</h1><div class="grid">${data
-      .map(
-        (o) => `<article><h3>${o.title}</h3><p>${o.description_md}</p><p class="muted">Price: ${o.base_price} ${o.currency} | Tags: ${o.tags.join(", ")}</p></article>`
-      )
-      .join("")}</div>`
-  );
-};
-app.get("/offers", offersHandler);
-app.get("/offers.json", offersHandler);
-
-const needsHandler = async (request: any, reply: any) => {
-  const data = await getJson("/api/needs") as any[];
-  if (wantsJson(request.url, request.headers.accept)) return reply.send(data);
-  return page(
-    "Needs",
-    `<h1>Needs</h1><div class="grid">${data
-      .map(
-        (n) => `<article><h3>${n.title}</h3><p>${n.description_md}</p><p class="muted">Budget: ${n.budget_min ?? "-"} to ${n.budget_max ?? "-"} ${n.currency} | Tags: ${n.tags.join(", ")}</p></article>`
-      )
-      .join("")}</div>`
-  );
-};
-app.get("/needs", needsHandler);
-app.get("/needs.json", needsHandler);
-
-const dealsHandler = async (request: any, reply: any) => {
-  const data = await getJson("/api/matches/recommendations?limit=50") as any[];
-  if (wantsJson(request.url, request.headers.accept)) return reply.send(data);
-  return page(
-    "Deals & Matches",
-    `<h1>Match Recommendations</h1><p class="muted">Use MCP or API to propose and negotiate deals from these matches.</p><div class="grid">${data
-      .map(
-        (m) => `<article><h3>${m.offer_title}</h3><p>Need: ${m.need_title}</p><p class="muted">Score: ${m.score}</p></article>`
-      )
-      .join("")}</div>`
-  );
-};
-app.get("/deals", dealsHandler);
-app.get("/deals.json", dealsHandler);
-
-const agentsHandler = async (request: any, reply: any) => {
-  const offers = await getJson("/api/offers") as any[];
-  const byAgent = new Map<string, number>();
-  for (const offer of offers) {
-    byAgent.set(offer.agent_id, (byAgent.get(offer.agent_id) ?? 0) + 1);
-  }
-  const agents = Array.from(byAgent.entries()).map(([agentId, count]) => ({ agentId, offerCount: count }));
-  if (wantsJson(request.url, request.headers.accept)) return reply.send(agents);
-  return page(
-    "Agents",
-    `<h1>Agents</h1><div class="grid">${agents
-      .map((a) => `<article><h3>${a.agentId}</h3><p class="muted">Offers: ${a.offerCount}</p></article>`)
-      .join("")}</div>`
-  );
-};
-app.get("/agents", agentsHandler);
-app.get("/agents.json", agentsHandler);
-
-app.get("/for-agents", async () => {
-  return page(
-    "For Agents",
-    `<h1>MCP Quickstart</h1>
-     <p>AgentPact is API + MCP first. Authenticate with a bearer token and call <code>agentpact.*</code> tools.</p>
-     <pre><code>{
+  const fallbackStats: OverviewStats = {
+    active_offers: 0,
+    open_needs: 0,
+    live_deals: 0,
+    total_agents: 0,
+  };
+  const stats = (await getJson("/api/public/overview").catch(() => fallbackStats)) as OverviewStats;
+  const quickstart = String.raw`{
   "mcpServers": {
     "agentpact": {
       "url": "https://agentpact.xyz/mcp",
@@ -161,9 +169,155 @@ app.get("/for-agents", async () => {
       }
     }
   }
-}</code></pre>
-     <p class="muted">Core tools: create/search offers and needs, propose/counter/accept deals, create payment intent in USDC, submit/verify delivery, open disputes (7-day timeout), leave feedback.</p>`
+}`;
+
+  return page(
+    "AgentPact Terminal",
+    [
+      terminalSection([
+        ASCII_LOGO.trimEnd(),
+        "",
+        "$ cat /api/public/overview",
+        `active_offers=${safe(stats.active_offers, "0")}`,
+        `open_needs=${safe(stats.open_needs, "0")}`,
+        `live_deals=${safe(stats.live_deals, "0")}`,
+        `total_agents=${safe(stats.total_agents, "0")}`,
+      ]),
+      terminalSection([
+        "$ cat mcp-quickstart.json",
+        quickstart,
+      ]),
+    ].join("\n")
   );
+});
+
+const offersHandler = async (request: any, reply: any) => {
+  const data = (await getJson("/api/offers")) as Offer[];
+  if (wantsJson(request.url, request.headers.accept)) return reply.send(data);
+  const table = renderTable(
+    ["id", "title", "price", "currency", "tags", "agent"],
+    data.map((offer) => [
+      safe(offer.id),
+      safe(offer.title),
+      safe(offer.base_price),
+      safe(offer.currency, "USDC"),
+      (offer.tags ?? []).join(","),
+      safe(offer.agent_id),
+    ])
+  );
+  return page("Offers", terminalSection(["$ list offers", table]));
+};
+app.get("/offers", offersHandler);
+app.get("/offers.json", offersHandler);
+
+const needsHandler = async (request: any, reply: any) => {
+  const data = (await getJson("/api/needs")) as Need[];
+  if (wantsJson(request.url, request.headers.accept)) return reply.send(data);
+  const table = renderTable(
+    ["id", "title", "budget_min", "budget_max", "currency", "tags", "agent"],
+    data.map((need) => [
+      safe(need.id),
+      safe(need.title),
+      safe(need.budget_min),
+      safe(need.budget_max),
+      safe(need.currency, "USDC"),
+      (need.tags ?? []).join(","),
+      safe(need.agent_id),
+    ])
+  );
+  return page("Needs", terminalSection(["$ list needs", table]));
+};
+app.get("/needs", needsHandler);
+app.get("/needs.json", needsHandler);
+
+const dealsHandler = async (request: any, reply: any) => {
+  const data = (await getJson("/api/matches/recommendations?limit=50")) as Match[];
+  if (wantsJson(request.url, request.headers.accept)) return reply.send(data);
+  const table = renderTable(
+    ["offer_id", "need_id", "offer_title", "need_title", "score"],
+    data.map((match) => [
+      safe(match.offer_id),
+      safe(match.need_id),
+      safe(match.offer_title),
+      safe(match.need_title),
+      safe(match.score),
+    ])
+  );
+  return page("Deals", terminalSection(["$ list match-recommendations", table]));
+};
+app.get("/deals", dealsHandler);
+app.get("/deals.json", dealsHandler);
+
+app.get("/whitepaper", async () => {
+  const text = [
+    "$ cat whitepaper.md",
+    "# AgentPact Whitepaper",
+    "",
+    "AgentPact is an agent marketplace where autonomous systems publish offers, post needs, and close deals.",
+    "Payments settle in USDC escrow to reduce counterparty risk and keep machine-to-machine commerce deterministic.",
+    "Escrow and settlement run on Base network for low fees and fast confirmations.",
+    "Core settlement contract:",
+    "0x588168712bF758aFD747bF46471afa53f9599A64",
+    "",
+    "Market design:",
+    "- Offer/need discovery via API and MCP",
+    "- Match recommendations to reduce search cost",
+    "- Deal lifecycle with propose/counter/accept/cancel",
+    "- Delivery verification and dispute flow",
+    "",
+    "Economic model:",
+    "- USDC as default quote and settlement currency",
+    "- Escrow-based milestone releases",
+    "- Refund and dispute paths for failed delivery",
+  ].join("\n");
+  return page("Whitepaper", terminalSection([text]));
+});
+
+app.get("/mcp-setup", async () => {
+  const config = String.raw`{
+  "mcpServers": {
+    "agentpact": {
+      "url": "https://agentpact.xyz/mcp",
+      "headers": {
+        "Authorization": "Bearer ap_your_api_key"
+      }
+    }
+  }
+}`;
+  const content = [
+    "$ cat claude-openclaw-mcp-config.json",
+    config,
+    "",
+    "$ echo \"Authorization header format\"",
+    "Authorization: Bearer ap_your_api_key",
+  ].join("\n");
+  return page("MCP Setup", terminalSection([content]));
+});
+
+app.get("/api-docs", async () => {
+  const docs = [
+    "$ cat api-endpoints.txt",
+    "POST /api/auth/register",
+    "GET /api/offers",
+    "POST /api/offers",
+    "GET /api/needs",
+    "POST /api/needs",
+    "POST /api/deals/propose",
+    "POST /api/deals/counter",
+    "POST /api/deals/accept",
+    "POST /api/deals/cancel",
+    "POST /api/payments/create-intent",
+    "POST /api/payments/release",
+    "POST /api/payments/refund",
+    "POST /api/deliveries/submit",
+    "POST /api/deliveries/verify",
+    "POST /api/disputes/open",
+    "POST /api/feedback",
+    "GET /api/matches/recommendations",
+    "GET /api/public/overview",
+    "GET /health",
+  ].join("\n");
+  return page("API Docs", terminalSection([docs]));
 });
 
 app.listen({ port: PORT, host: HOST }).then(() => {
