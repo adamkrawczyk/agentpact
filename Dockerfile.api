@@ -1,0 +1,34 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy workspace root files
+COPY package*.json ./
+COPY tsconfig.base.json ./
+
+# Copy API package.json
+COPY apps/api/package*.json ./apps/api/
+
+# Install all dependencies (workspaces need root package.json)
+RUN npm install
+
+# Copy shared code
+COPY db ./db
+COPY migrations ./migrations
+COPY scripts ./scripts
+
+# Copy API source
+COPY apps/api ./apps/api
+
+# Build API
+RUN npm run build -w @agentpact/api
+
+# Expose API port
+EXPOSE 4000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:4000/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1); });"
+
+# Start API server
+CMD ["node", "apps/api/dist/server.js"]
