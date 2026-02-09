@@ -458,10 +458,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-healthServer.listen(MCP_PORT, MCP_HOST);
+healthServer.listen(MCP_PORT, MCP_HOST, () => {
+  console.log(`MCP health server listening on ${MCP_HOST}:${MCP_PORT}`);
+});
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// Only start stdio transport if stdin is a TTY or piped (not in Railway/Docker)
+if (!process.stdin.isTTY && process.stdin.readable) {
+  try {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.log("MCP stdio transport connected");
+  } catch (err) {
+    console.warn("MCP stdio transport unavailable (running in HTTP-only mode):", err);
+  }
+} else {
+  console.log("MCP running in HTTP-only mode (no stdin detected)");
+}
 
 const shutdown = () => {
   healthServer.close();

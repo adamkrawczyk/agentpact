@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createServer } from "node:http";
 const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
-const MCP_PORT = Number(process.env.MCP_PORT ?? 5000);
+const MCP_PORT = Number(process.env.PORT ?? process.env.MCP_PORT ?? 5000);
 const MCP_HOST = process.env.MCP_HOST ?? "0.0.0.0";
 async function api(path, method, body) {
     const response = await fetch(`${API_BASE}${path}`, {

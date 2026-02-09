@@ -166,7 +166,9 @@ app.get("/for-agents", async () => {
   );
 });
 
-app.listen({ port: PORT, host: HOST }).catch((error) => {
+app.listen({ port: PORT, host: HOST }).then(() => {
+  console.log(`Web server listening on ${HOST}:${PORT}`);
+}).catch((error) => {
   app.log.error(error);
   process.exit(1);
 });
