@@ -11,16 +11,22 @@ import { createServer } from "node:http";
 const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
 const MCP_PORT = Number(process.env.PORT ?? process.env.MCP_PORT ?? 5000);
 const MCP_HOST = process.env.MCP_HOST ?? "0.0.0.0";
+const MCP_API_KEY = process.env.MCP_API_KEY ?? "";
 
 type Json = Record<string, unknown>;
 
-async function api(path: string, method: string, body?: Json): Promise<unknown> {
+async function api(path: string, method: string, body?: Json, apiKey?: string): Promise<unknown> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "idempotency-key": crypto.randomUUID()
+  };
+  const key = apiKey || MCP_API_KEY;
+  if (key) {
+    headers["x-api-key"] = key;
+  }
   const response = await fetch(`${API_BASE}${path}`, {
     method,
-    headers: {
-      "content-type": "application/json",
-      "idempotency-key": crypto.randomUUID()
-    },
+    headers,
     body: body ? JSON.stringify(body) : undefined
   });
 
@@ -379,77 +385,79 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const name = request.params.name;
-  const args = (request.params.arguments ?? {}) as Json;
+  const rawArgs = (request.params.arguments ?? {}) as Json;
+  // Extract apiKey from args — agents pass their key to authenticate write operations
+  const { apiKey, ...args } = rawArgs as Json & { apiKey?: string };
 
   switch (name) {
     case "agentpact.create_offer":
-      return { content: [{ type: "text", text: JSON.stringify(await api("/api/offers", "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api("/api/offers", "POST", args, apiKey), null, 2) }] };
     case "agentpact.update_offer": {
       const { id, ...rest } = args;
-      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/offers/${id}`, "PATCH", rest), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/offers/${id}`, "PATCH", rest, apiKey), null, 2) }] };
     }
     case "agentpact.archive_offer":
-      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/offers/${args.id}`, "POST"), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/offers/${args.id}`, "POST", undefined, apiKey), null, 2) }] };
     case "agentpact.create_need":
-      return { content: [{ type: "text", text: JSON.stringify(await api("/api/needs", "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api("/api/needs", "POST", args, apiKey), null, 2) }] };
     case "agentpact.update_need": {
       const { id, ...rest } = args;
-      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/needs/${id}`, "PATCH", rest), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/needs/${id}`, "PATCH", rest, apiKey), null, 2) }] };
     }
     case "agentpact.archive_need":
-      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/needs/${args.id}/archive`, "POST"), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/needs/${args.id}/archive`, "POST", undefined, apiKey), null, 2) }] };
     case "agentpact.search_offers": {
       const query = new URLSearchParams(args as Record<string, string>).toString();
-      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/offers?${query}`, "GET"), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/offers?${query}`, "GET", undefined, apiKey), null, 2) }] };
     }
     case "agentpact.search_needs": {
       const query = new URLSearchParams(args as Record<string, string>).toString();
-      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/needs?${query}`, "GET"), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/needs?${query}`, "GET", undefined, apiKey), null, 2) }] };
     }
     case "agentpact.subscribe_alerts":
-      return { content: [{ type: "text", text: JSON.stringify(await api("/api/alerts/subscribe", "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api("/api/alerts/subscribe", "POST", args, apiKey), null, 2) }] };
     case "agentpact.get_match_recommendations": {
       const query = new URLSearchParams(args as Record<string, string>).toString();
-      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/matches/recommendations?${query}`, "GET"), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/matches/recommendations?${query}`, "GET", undefined, apiKey), null, 2) }] };
     }
     case "agentpact.propose_deal":
-      return { content: [{ type: "text", text: JSON.stringify(await api("/api/deals/propose", "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api("/api/deals/propose", "POST", args, apiKey), null, 2) }] };
     case "agentpact.counter_deal": {
       const dealId = String(args.dealId);
-      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/deals/${dealId}/counter`, "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/deals/${dealId}/counter`, "POST", args, apiKey), null, 2) }] };
     }
     case "agentpact.accept_deal": {
       const dealId = String(args.dealId);
-      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/deals/${dealId}/accept`, "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/deals/${dealId}/accept`, "POST", args, apiKey), null, 2) }] };
     }
     case "agentpact.cancel_deal": {
       const dealId = String(args.dealId);
-      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/deals/${dealId}/cancel`, "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/deals/${dealId}/cancel`, "POST", args, apiKey), null, 2) }] };
     }
     case "agentpact.create_payment_intent":
-      return { content: [{ type: "text", text: JSON.stringify(await api("/api/payments/create-intent", "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api("/api/payments/create-intent", "POST", args, apiKey), null, 2) }] };
     case "agentpact.get_payment_status": {
       const query = new URLSearchParams(args as Record<string, string>).toString();
-      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/payments/status?${query}`, "GET"), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api(`/api/payments/status?${query}`, "GET", undefined, apiKey), null, 2) }] };
     }
     case "agentpact.release_payment":
-      return { content: [{ type: "text", text: JSON.stringify(await api("/api/payments/release", "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api("/api/payments/release", "POST", args, apiKey), null, 2) }] };
     case "agentpact.request_refund":
-      return { content: [{ type: "text", text: JSON.stringify(await api("/api/payments/refund", "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api("/api/payments/refund", "POST", args, apiKey), null, 2) }] };
     case "agentpact.open_dispute":
-      return { content: [{ type: "text", text: JSON.stringify(await api("/api/disputes/open", "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api("/api/disputes/open", "POST", args, apiKey), null, 2) }] };
     case "agentpact.submit_delivery":
-      return { content: [{ type: "text", text: JSON.stringify(await api("/api/deliveries/submit", "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api("/api/deliveries/submit", "POST", args, apiKey), null, 2) }] };
     case "agentpact.verify_delivery":
-      return { content: [{ type: "text", text: JSON.stringify(await api("/api/deliveries/verify", "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api("/api/deliveries/verify", "POST", args, apiKey), null, 2) }] };
     case "agentpact.leave_feedback":
-      return { content: [{ type: "text", text: JSON.stringify(await api("/api/feedback", "POST", args), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await api("/api/feedback", "POST", args, apiKey), null, 2) }] };
     case "agentpact.get_reputation":
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(await api(`/api/agents/${String(args.agentId)}/reputation`, "GET"), null, 2)
+            text: JSON.stringify(await api(`/api/agents/${String(args.agentId)}/reputation`, "GET", undefined, apiKey), null, 2)
           }
         ]
       };
