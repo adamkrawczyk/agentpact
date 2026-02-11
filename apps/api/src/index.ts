@@ -241,7 +241,7 @@ app.addHook("preHandler", async (request, reply) => {
     return;
   }
 
-  const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations"];
+  const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents"];
   if (request.method === "GET" && publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
     return;
   }
