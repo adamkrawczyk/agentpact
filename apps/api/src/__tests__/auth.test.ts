@@ -151,7 +151,7 @@ describe("Auth", () => {
 
   it("Rate Limiting blocks after limit exceeded", async () => {
     const app = Fastify();
-    await initAuth(app, { sql: createMockSql(), rateLimitMax: 5, rateLimitWindowMs: 60000 });
+    await initAuth(app, { sql: createMockSql() });
 
     const apiKey = "test_key";
 

@@ -212,6 +212,12 @@ await app.register(cors, {
         ],
     credentials: true
 });
+await app.register(import('@fastify/rate-limit'), {
+    max: 100,
+    timeWindow: '1 minute',
+    allowList: ['127.0.0.1'],
+    keyGenerator: (request) => request.headers['x-api-key'] || request.ip
+});
 await initAuth(app);
 registerHealthChecks(app, sql);
 app.addHook("preHandler", async (request, reply) => {
@@ -812,8 +818,12 @@ app.get("/api/leaderboard", async (request) => {
 });
 app.setErrorHandler((error, _request, reply) => {
     app.log.error(error);
-    const message = error instanceof Error ? error.message : "Unknown error";
-    reply.code(400).send({ error: message });
+    if (error.validation) {
+        return reply.code(400).send({ error: 'Validation error', details: error.validation });
+    }
+    const statusCode = error.statusCode ?? 500;
+    const message = statusCode < 500 ? (error.message ?? 'Unknown error') : 'Internal server error';
+    reply.code(statusCode).send({ error: message });
 });
 export const shutdown = async () => {
     await app.close();

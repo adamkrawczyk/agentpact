@@ -5,6 +5,13 @@ const HOST = process.env.WEB_HOST ?? "0.0.0.0";
 const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
+app.addHook('onSend', async (_request, reply) => {
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('X-XSS-Protection', '1; mode=block');
+    reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+    reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+});
 const ASCII_LOGO = String.raw `
     ___                   __  ____            __
    /   | ____ ____  ____ / /_/ __ \____ _____/ /_

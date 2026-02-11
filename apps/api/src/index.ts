@@ -6,6 +6,17 @@ import { randomUUID, createHash } from "node:crypto";
 import { z } from "zod";
 import { initAuth } from "./auth.js";
 import { registerHealthChecks } from "./health.js";
+import {
+  isOnChainMode,
+  generateFundingTransaction,
+  generateAcceptTransaction,
+  verifyFunding,
+  resolveDisputeOnChain,
+  getMilestoneStatus,
+  ESCROW_ADDRESS,
+  USDC_ADDRESS,
+} from "./chain.js";
+import type { Hex, Address } from "viem";
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -251,6 +262,14 @@ await app.register(cors, {
       ],
   credentials: true
 });
+
+await app.register(import('@fastify/rate-limit'), {
+  max: 100,
+  timeWindow: '1 minute',
+  allowList: ['127.0.0.1'],
+  keyGenerator: (request) => request.headers['x-api-key'] as string || request.ip
+});
+
 await initAuth(app);
 registerHealthChecks(app, sql);
 
@@ -692,9 +711,10 @@ app.get("/api/deals/:id", async (request, reply) => {
 app.post("/api/payments/create-intent", async (request, reply) => {
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
   const body = createPaymentIntentSchema.parse(request.body);
+  const mode = isOnChainMode() ? "on-chain" : "simulation";
 
   const [milestone] = await sql`
-    SELECT m.*, d.seller_agent_id, d.buyer_agent_id, d.status AS deal_status, a.owner_wallet_address AS seller_wallet_address
+    SELECT m.*, d.seller_agent_id, d.buyer_agent_id, d.id AS deal_id, d.status AS deal_status, a.owner_wallet_address AS seller_wallet_address
     FROM milestones m
     JOIN deals d ON d.id = m.deal_id
     JOIN agents a ON a.id = d.seller_agent_id
@@ -706,13 +726,66 @@ app.post("/api/payments/create-intent", async (request, reply) => {
     return reply.code(400).send({ error: `Milestone status ${milestone.status} cannot be funded` });
   }
 
+  if (mode === "on-chain") {
+    // Generate unsigned transaction data for the buyer to sign
+    const txData = generateFundingTransaction(
+      milestone.deal_id,
+      body.milestoneId,
+      Number(milestone.amount),
+      milestone.seller_wallet_address as Address,
+    );
+
+    const [intent] = await sql`
+      INSERT INTO payment_intents (
+        milestone_id, buyer_agent_id, seller_agent_id, amount, currency, chain, status,
+        buyer_wallet_provider, buyer_wallet_address, seller_wallet_address, platform_wallet_address
+      ) VALUES (
+        ${body.milestoneId}, ${body.buyerAgentId}, ${milestone.seller_agent_id}, ${milestone.amount}, 'USDC', ${body.chain}, 'pending_funding',
+        ${body.walletProvider}, ${body.buyerWalletAddress}, ${milestone.seller_wallet_address}, ${PLATFORM_WALLET}
+      )
+      RETURNING *
+    `;
+
+    await audit(body.buyerAgentId, "payment.create_intent", "payment_intent", intent.id, idem, body);
+
+    return reply.code(201).send({
+      paymentIntentId: intent.id,
+      status: "pending_funding",
+      mode,
+      chain: intent.chain,
+      amount: intent.amount,
+      currency: "USDC",
+      feePct: PLATFORM_FEE_PCT,
+      platformWallet: PLATFORM_WALLET,
+      provider: "usdc",
+      escrowContract: ESCROW_ADDRESS,
+      usdcContract: USDC_ADDRESS,
+      txData: {
+        step1_approve: {
+          to: txData.approveTo,
+          data: txData.approveCalldata,
+          value: txData.value,
+          description: "Approve USDC spending by escrow contract",
+        },
+        step2_fund: {
+          to: txData.fundTo,
+          data: txData.fundCalldata,
+          value: txData.value,
+          description: "Fund milestone via escrow contract (createMilestone)",
+        },
+        amountRaw: txData.amountRaw,
+      },
+    });
+  }
+
+  // Simulation mode — immediate funding (legacy behavior)
   const [intent] = await sql`
     INSERT INTO payment_intents (
       milestone_id, buyer_agent_id, seller_agent_id, amount, currency, chain, status,
       buyer_wallet_provider, buyer_wallet_address, seller_wallet_address, platform_wallet_address, tx_hash
     ) VALUES (
       ${body.milestoneId}, ${body.buyerAgentId}, ${milestone.seller_agent_id}, ${milestone.amount}, 'USDC', ${body.chain}, 'funded',
-      ${body.walletProvider}, ${body.buyerWalletAddress}, ${milestone.seller_wallet_address}, ${PLATFORM_WALLET}, ${`fund_${randomUUID().slice(0, 8)}`}
+      ${body.walletProvider}, ${body.buyerWalletAddress}, ${milestone.seller_wallet_address}, ${PLATFORM_WALLET}, ${`sim_fund_${randomUUID().slice(0, 8)}`}
     )
     RETURNING *
   `;
@@ -723,12 +796,13 @@ app.post("/api/payments/create-intent", async (request, reply) => {
   return reply.code(201).send({
     paymentIntentId: intent.id,
     status: intent.status,
+    mode,
     chain: intent.chain,
     amount: intent.amount,
     currency: "USDC",
     feePct: PLATFORM_FEE_PCT,
     platformWallet: PLATFORM_WALLET,
-    provider: "usdc"
+    provider: "usdc",
   });
 });
 
@@ -743,13 +817,98 @@ app.get("/api/payments/status", async (request, reply) => {
       AND (${q.paymentIntentId ?? null}::uuid IS NULL OR id = ${q.paymentIntentId ?? null}::uuid)
     ORDER BY created_at DESC
   `;
-  return rows;
+  return rows.map((r: Record<string, unknown>) => ({ ...r, mode: isOnChainMode() ? "on-chain" : "simulation" }));
 });
 
-app.post("/api/payments/release", async (request) => {
+// ── Confirm on-chain funding ─────────────────────────────────────────
+const confirmFundingSchema = z.object({
+  paymentIntentId: z.string().uuid(),
+  txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+});
+
+app.post("/api/payments/confirm-funding", async (request, reply) => {
+  const body = confirmFundingSchema.parse(request.body);
+  const idem = idempotencyKey(request.headers as Record<string, unknown>);
+
+  const [intent] = await sql`
+    SELECT * FROM payment_intents WHERE id = ${body.paymentIntentId}
+  `;
+
+  if (!intent) return reply.code(404).send({ error: "Payment intent not found" });
+  if (intent.status !== "pending_funding") {
+    return reply.code(400).send({ error: `Intent status is ${intent.status}, expected pending_funding` });
+  }
+
+  // Verify on-chain
+  const verification = await verifyFunding(body.txHash as Hex);
+
+  if (!verification.verified) {
+    return reply.code(400).send({ error: "Transaction not verified on-chain — failed or not confirmed" });
+  }
+
+  // Update intent + milestone status
+  await sql.begin(async (txn) => {
+    await txn`
+      UPDATE payment_intents
+      SET status = 'funded', tx_hash = ${body.txHash}, updated_at = NOW()
+      WHERE id = ${body.paymentIntentId}
+    `;
+    await txn`
+      UPDATE milestones SET status = 'funded' WHERE id = ${intent.milestone_id}
+    `;
+  });
+
+  await audit(intent.buyer_agent_id, "payment.confirm_funding", "payment_intent", intent.id, idem, { txHash: body.txHash });
+
+  return reply.code(200).send({
+    paymentIntentId: intent.id,
+    status: "funded",
+    txHash: body.txHash,
+    mode: "on-chain",
+    verified: true,
+  });
+});
+
+// ── On-chain milestone status ────────────────────────────────────────
+app.get("/api/payments/on-chain-status", async (request, reply) => {
+  const q = request.query as { milestoneId?: string };
+  if (!q.milestoneId) return reply.code(400).send({ error: "Provide milestoneId" });
+
+  if (!isOnChainMode()) {
+    return { mode: "simulation", message: "On-chain status not available in simulation mode" };
+  }
+
+  const status = await getMilestoneStatus(q.milestoneId);
+  return { mode: "on-chain", ...status };
+});
+
+app.post("/api/payments/release", async (request, reply) => {
   const body = z.object({ milestoneId: z.string().uuid() }).parse(request.body);
+  const mode = isOnChainMode() ? "on-chain" : "simulation";
+
+  if (mode === "on-chain") {
+    // In the on-chain model, release = buyer calls acceptMilestone on-chain.
+    // The platform can't call acceptMilestone (only buyer can).
+    // So we return the unsigned tx data for the buyer to sign.
+    const txData = generateAcceptTransaction(body.milestoneId);
+
+    return reply.code(200).send({
+      ok: true,
+      mode,
+      action: "buyer_sign_required",
+      message: "Buyer must call acceptMilestone on-chain to release funds to seller",
+      txData: {
+        to: txData.to,
+        data: txData.calldata,
+        value: "0",
+        description: "Accept milestone — releases USDC to seller (minus platform fee)",
+      },
+    });
+  }
+
+  // Simulation mode — direct release
   await releaseMilestonePayment(body.milestoneId);
-  return { ok: true };
+  return { ok: true, mode };
 });
 
 app.post("/api/payments/refund", async (request) => {
@@ -950,10 +1109,14 @@ app.get("/api/leaderboard", async (request) => {
   });
 });
 
-app.setErrorHandler((error, _request, reply) => {
+app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message?: string }, _request, reply) => {
   app.log.error(error);
-  const message = error instanceof Error ? error.message : "Unknown error";
-  reply.code(400).send({ error: message });
+  if (error.validation) {
+    return reply.code(400).send({ error: 'Validation error', details: error.validation });
+  }
+  const statusCode = error.statusCode ?? 500;
+  const message = statusCode < 500 ? (error.message ?? 'Unknown error') : 'Internal server error';
+  reply.code(statusCode).send({ error: message });
 });
 
 export const shutdown = async () => {
