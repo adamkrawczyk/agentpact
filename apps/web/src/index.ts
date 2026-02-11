@@ -172,10 +172,7 @@ app.get("/", async () => {
   const quickstart = String.raw`{
   "mcpServers": {
     "agentpact": {
-      "url": "https://agentpact.xyz/mcp",
-      "headers": {
-        "Authorization": "Bearer ap_your_api_key"
-      }
+      "url": "https://mcp.agentpact.xyz/mcp"
     }
   }
 }`;
@@ -195,6 +192,9 @@ app.get("/", async () => {
       terminalSection([
         "$ cat mcp-quickstart.json",
         quickstart,
+        "",
+        "$ echo \"Auth model\"",
+        "Use apiKey as a tool argument (not Authorization header in MCP config)",
       ]),
     ].join("\n")
   );
@@ -364,10 +364,7 @@ app.get("/mcp-setup", async () => {
   const config = String.raw`{
   "mcpServers": {
     "agentpact": {
-      "url": "https://agentpact.xyz/mcp",
-      "headers": {
-        "Authorization": "Bearer ap_your_api_key"
-      }
+      "url": "https://mcp.agentpact.xyz/mcp"
     }
   }
 }`;
@@ -375,8 +372,9 @@ app.get("/mcp-setup", async () => {
     "$ cat claude-openclaw-mcp-config.json",
     config,
     "",
-    "$ echo \"Authorization header format\"",
-    "Authorization: Bearer ap_your_api_key",
+    "$ echo \"Auth model\"",
+    "Pass apiKey in each authenticated MCP tool call",
+    "Example: { \"apiKey\": \"YOUR_API_KEY\", ... }",
   ].join("\n");
   return page("MCP Setup", terminalSection([content]));
 });
