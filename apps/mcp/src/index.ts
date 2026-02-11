@@ -640,7 +640,7 @@ function handleToolCall(name: string, rawArgs: Json) {
   const { apiKey, ...args } = rawArgs as Json & { apiKey?: string };
 
   const textResult = async (data: unknown) => ({
-    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+    content: [{ type: "text" as const, text: JSON.stringify(await data, null, 2) }],
   });
 
   switch (name) {

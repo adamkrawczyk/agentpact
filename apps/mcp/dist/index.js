@@ -600,7 +600,7 @@ const tools = [
 function handleToolCall(name, rawArgs) {
     const { apiKey, ...args } = rawArgs;
     const textResult = async (data) => ({
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify(await data, null, 2) }],
     });
     switch (name) {
         // Auth & agents
