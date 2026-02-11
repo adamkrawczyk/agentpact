@@ -180,7 +180,14 @@ async function releaseMilestonePayment(milestoneId) {
     });
 }
 await app.register(cors, {
-    origin: (process.env.CORS_ORIGINS ?? "http://localhost:3000").split(",")
+    origin: process.env.CORS_ORIGINS
+        ? process.env.CORS_ORIGINS.split(",").map(s => s.trim())
+        : [
+            "http://localhost:3000",
+            "https://agentpact.xyz",
+            "https://www.agentpact.xyz"
+        ],
+    credentials: true
 });
 await initAuth(app);
 registerHealthChecks(app, sql);
@@ -188,6 +195,14 @@ app.addHook("preHandler", async (request, reply) => {
     const routePath = (request.url.split("?")[0] ?? request.url);
     const publicRoutes = new Set(["/health", "/api/auth/register", "/api/auth/verify"]);
     if (publicRoutes.has(routePath)) {
+        return;
+    }
+    // Public read-only routes: anything under /api/public/ or GET requests to browsable endpoints
+    if (routePath.startsWith("/api/public/")) {
+        return;
+    }
+    const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations"];
+    if (request.method === "GET" && publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
         return;
     }
     if (routePath.startsWith("/api/")) {
@@ -215,6 +230,26 @@ app.post("/api/agents", async (request, reply) => {
     RETURNING *
   `;
     return reply.code(201).send(agent);
+});
+app.get("/api/agents/:id", async (request, reply) => {
+    const { id } = request.params;
+    const [agent] = await sql `SELECT * FROM agents WHERE id = ${id}`;
+    if (!agent)
+        return reply.code(404).send({ error: "Agent not found" });
+    const [reputation] = await sql `
+    SELECT
+      COALESCE(AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0), 0) AS score,
+      COUNT(*)::int AS review_count
+    FROM feedback
+    WHERE to_agent_id = ${id}
+  `;
+    return {
+        ...agent,
+        reputation: {
+            score: Number(reputation.score ?? 0),
+            reviewCount: Number(reputation.review_count ?? 0)
+        }
+    };
 });
 app.get("/api/agents/:id/reputation", async (request) => {
     const { id } = request.params;
@@ -414,27 +449,31 @@ app.post("/api/alerts/subscribe", async (request, reply) => {
 app.post("/api/deals/propose", async (request, reply) => {
     const idem = idempotencyKey(request.headers);
     const body = proposeDealSchema.parse(request.body);
-    await sql.begin(async (txn) => {
+    const result = await sql.begin(async (txn) => {
         const [deal] = await txn.unsafe(`
         INSERT INTO deals (
           buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days
         ) VALUES ($1, $2, $3, $4, 'proposed', $5, 'USDC', $6, $7)
         RETURNING *
       `, [body.buyerAgentId, body.sellerAgentId, body.offerId, body.needId, body.negotiatedTotal, body.maxPriceDeltaPct, body.acceptanceTimeoutDays]);
+        const milestones = [];
         for (const milestone of body.milestones) {
             const dueAt = milestone.dueAt ?? null;
-            await txn.unsafe(`
+            const [ms] = await txn.unsafe(`
           INSERT INTO milestones (deal_id, idx, title, amount, currency, acceptance_criteria, due_at)
           VALUES ($1, $2, $3, $4, 'USDC', $5::jsonb, $6)
+          RETURNING *
         `, [deal.id, milestone.idx, milestone.title, milestone.amount, JSON.stringify(milestone.acceptanceCriteria), dueAt]);
+            milestones.push(ms);
         }
         await txn.unsafe(`
         INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
         VALUES ($1, $2, 'propose', $3::jsonb)
       `, [deal.id, body.buyerAgentId, JSON.stringify(body)]);
         await audit(body.buyerAgentId, "deal.propose", "deal", deal.id, idem, body);
+        return { ...deal, milestones };
     });
-    return reply.code(201).send({ ok: true });
+    return reply.code(201).send(result);
 });
 app.post("/api/deals/:id/counter", async (request) => {
     const { id } = request.params;
@@ -487,6 +526,20 @@ app.post("/api/deals/:id/cancel", async (request) => {
       `, [id, body.actorAgentId, JSON.stringify(body)]);
     });
     return { ok: true };
+});
+app.get("/api/deals", async (request) => {
+    const q = request.query;
+    const rows = await sql `
+    SELECT d.*,
+      (SELECT json_agg(m ORDER BY m.idx) FROM milestones m WHERE m.deal_id = d.id) AS milestones
+    FROM deals d
+    WHERE (${q.buyerAgentId ?? null}::uuid IS NULL OR d.buyer_agent_id = ${q.buyerAgentId ?? null}::uuid)
+      AND (${q.sellerAgentId ?? null}::uuid IS NULL OR d.seller_agent_id = ${q.sellerAgentId ?? null}::uuid)
+      AND (${q.status ?? null}::text IS NULL OR d.status = ${q.status ?? null}::text)
+    ORDER BY d.created_at DESC
+    LIMIT 200
+  `;
+    return rows;
 });
 app.get("/api/deals/:id", async (request, reply) => {
     const { id } = request.params;

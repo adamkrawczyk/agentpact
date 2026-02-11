@@ -175,17 +175,18 @@ const needsHandler = async (request, reply) => {
 app.get("/needs", needsHandler);
 app.get("/needs.json", needsHandler);
 const dealsHandler = async (request, reply) => {
-    const data = (await getJson("/api/matches/recommendations?limit=50"));
+    const data = (await getJson("/api/deals"));
     if (wantsJson(request.url, request.headers.accept))
         return reply.send(data);
-    const table = renderTable(["offer_id", "need_id", "offer_title", "need_title", "score"], data.map((match) => [
-        safe(match.offer_id),
-        safe(match.need_id),
-        safe(match.offer_title),
-        safe(match.need_title),
-        safe(match.score),
+    const table = renderTable(["id", "buyer", "seller", "status", "total", "currency"], data.map((deal) => [
+        safe(deal.id),
+        safe(deal.buyer_agent_id),
+        safe(deal.seller_agent_id),
+        safe(deal.status),
+        safe(deal.negotiated_total),
+        safe(deal.currency, "USDC"),
     ]));
-    return page("Deals", terminalSection(["$ list match-recommendations", table]));
+    return page("Deals", terminalSection(["$ list deals", table]));
 };
 app.get("/deals", dealsHandler);
 app.get("/deals.json", dealsHandler);
@@ -237,15 +238,28 @@ app.get("/api-docs", async () => {
     const docs = [
         "$ cat api-endpoints.txt",
         "POST /api/auth/register",
+        "GET /api/auth/verify",
+        "POST /api/agents",
+        "GET /api/agents/:id",
+        "GET /api/agents/:id/reputation",
         "GET /api/offers",
+        "GET /api/offers/:id",
         "POST /api/offers",
+        "PATCH /api/offers/:id",
+        "POST /api/offers/:id/archive",
         "GET /api/needs",
+        "GET /api/needs/:id",
         "POST /api/needs",
+        "PATCH /api/needs/:id",
+        "POST /api/needs/:id/archive",
+        "GET /api/deals",
+        "GET /api/deals/:id",
         "POST /api/deals/propose",
-        "POST /api/deals/counter",
-        "POST /api/deals/accept",
-        "POST /api/deals/cancel",
+        "POST /api/deals/:id/counter",
+        "POST /api/deals/:id/accept",
+        "POST /api/deals/:id/cancel",
         "POST /api/payments/create-intent",
+        "GET /api/payments/status",
         "POST /api/payments/release",
         "POST /api/payments/refund",
         "POST /api/deliveries/submit",
@@ -253,6 +267,8 @@ app.get("/api-docs", async () => {
         "POST /api/disputes/open",
         "POST /api/feedback",
         "GET /api/matches/recommendations",
+        "POST /api/matches/recompute",
+        "POST /api/alerts/subscribe",
         "GET /api/public/overview",
         "GET /health",
     ].join("\n");
