@@ -13,21 +13,21 @@ const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:postgres@l
 const PLATFORM_FEE_PCT = Number(process.env.PLATFORM_FEE_PCT ?? 10);
 const PLATFORM_WALLET = process.env.PLATFORM_WALLET ?? "0xAgentPactPlatformUSDC";
 
-// ── Trust Tier definitions ───────────────────────────────────────────
+// ── Trust Tier definitions (informational only — no deal limits) ─────
 const TRUST_TIERS = [
-  { tier: "gold",   label: "Gold",   minDeals: 25, minReputation: 4.0, maxDealAmount: Infinity, color: "#FFD700" },
-  { tier: "silver", label: "Silver", minDeals: 10, minReputation: 3.5, maxDealAmount: 1000,     color: "#C0C0C0" },
-  { tier: "bronze", label: "Bronze", minDeals: 3,  minReputation: 3.0, maxDealAmount: 200,      color: "#CD7F32" },
-  { tier: "new",    label: "New",    minDeals: 0,  minReputation: 0,   maxDealAmount: 50,       color: "#888888" },
+  { tier: "gold",   label: "Gold",   minDeals: 25, minReputation: 4.0, color: "#FFD700" },
+  { tier: "silver", label: "Silver", minDeals: 10, minReputation: 3.5, color: "#C0C0C0" },
+  { tier: "bronze", label: "Bronze", minDeals: 3,  minReputation: 3.0, color: "#CD7F32" },
+  { tier: "new",    label: "New",    minDeals: 0,  minReputation: 0,   color: "#888888" },
 ] as const;
 
-function computeTrustTier(completedDeals: number, reputationScore: number): { tier: string; label: string; maxDealAmount: number; color: string } {
+function computeTrustTier(completedDeals: number, reputationScore: number): { tier: string; label: string; color: string } {
   for (const t of TRUST_TIERS) {
     if (completedDeals >= t.minDeals && reputationScore >= t.minReputation) {
-      return { tier: t.tier, label: t.label, maxDealAmount: t.maxDealAmount, color: t.color };
+      return { tier: t.tier, label: t.label, color: t.color };
     }
   }
-  return { tier: "new", label: "New", maxDealAmount: 50, color: "#888888" };
+  return { tier: "new", label: "New", color: "#888888" };
 }
 
 async function getAgentStats(db: typeof sql, agentId: string): Promise<{ completedDeals: number; reputationScore: number }> {
@@ -544,23 +544,6 @@ app.post("/api/alerts/subscribe", async (request, reply) => {
 app.post("/api/deals/propose", async (request, reply) => {
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
   const body = proposeDealSchema.parse(request.body);
-
-  // ── Trust tier enforcement ──
-  const buyerStats = await getAgentStats(sql, body.buyerAgentId);
-  const buyerTier = computeTrustTier(buyerStats.completedDeals, buyerStats.reputationScore);
-  if (body.negotiatedTotal > buyerTier.maxDealAmount) {
-    return reply.code(403).send({
-      error: `Your trust tier (${buyerTier.label}) limits deals to ${buyerTier.maxDealAmount} USDC. Complete more deals to unlock higher limits.`
-    });
-  }
-
-  const sellerStats = await getAgentStats(sql, body.sellerAgentId);
-  const sellerTier = computeTrustTier(sellerStats.completedDeals, sellerStats.reputationScore);
-  if (body.negotiatedTotal > sellerTier.maxDealAmount) {
-    return reply.code(403).send({
-      error: `Seller's trust tier (${sellerTier.label}) limits deals to ${sellerTier.maxDealAmount} USDC. The seller needs to complete more deals to unlock higher limits.`
-    });
-  }
 
   const result = await sql.begin(async (txn) => {
     const [deal] = await txn.unsafe(
