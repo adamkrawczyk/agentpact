@@ -1,7 +1,7 @@
 import fastifyJWT from "@fastify/jwt";
 import postgres from "postgres";
 import { createHash, randomBytes } from "node:crypto";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 import { z } from "zod";
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/agentpact";
 const JWT_SECRET = process.env.JWT_SECRET ?? "dev_secret_change_in_production";
