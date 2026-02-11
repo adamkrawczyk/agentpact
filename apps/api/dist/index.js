@@ -5,6 +5,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { z } from "zod";
 import { initAuth } from "./auth.js";
 import { registerHealthChecks } from "./health.js";
+import { registerWebhookRoutes, notifyAgents } from "./webhooks.js";
 import { isOnChainMode, generateFundingTransaction, generateAcceptTransaction, verifyFunding, resolveDisputeOnChain, getMilestoneStatus, ESCROW_ADDRESS, USDC_ADDRESS, } from "./chain.js";
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -175,9 +176,12 @@ async function enforceDealDelta(dealId, negotiatedTotal) {
 }
 async function releaseMilestonePayment(milestoneId) {
     const [payment] = await sql `
-    SELECT * FROM payment_intents
-    WHERE milestone_id = ${milestoneId} AND status = 'funded'
-    ORDER BY created_at DESC LIMIT 1
+    SELECT pi.*, d.seller_agent_id, d.buyer_agent_id, d.id AS deal_id
+    FROM payment_intents pi
+    JOIN milestones m ON m.id = pi.milestone_id
+    JOIN deals d ON d.id = m.deal_id
+    WHERE pi.milestone_id = ${milestoneId} AND pi.status = 'funded'
+    ORDER BY pi.created_at DESC LIMIT 1
   `;
     if (!payment)
         return;
@@ -202,6 +206,13 @@ async function releaseMilestonePayment(milestoneId) {
         VALUES ('payment.release', 'milestone', $1, $2::jsonb)
       `, [milestoneId, JSON.stringify({ gross, sellerAmount, feeAmount, platformWallet: PLATFORM_WALLET })]);
     });
+    notifyAgents(sql, [payment.seller_agent_id], "payment.released", {
+        dealId: payment.deal_id,
+        milestoneId,
+        gross,
+        sellerAmount,
+        feeAmount,
+    });
 }
 await app.register(cors, {
     origin: process.env.CORS_ORIGINS
@@ -221,6 +232,7 @@ await app.register(import('@fastify/rate-limit'), {
 });
 await initAuth(app);
 registerHealthChecks(app, sql);
+registerWebhookRoutes(app, sql);
 app.addHook("preHandler", async (request, reply) => {
     const routePath = (request.url.split("?")[0] ?? request.url);
     const publicRoutes = new Set(["/health", "/api/auth/register", "/api/auth/verify"]);
@@ -506,6 +518,12 @@ app.post("/api/deals/propose", async (request, reply) => {
         await audit(body.buyerAgentId, "deal.propose", "deal", deal.id, idem, body);
         return { ...deal, milestones };
     });
+    notifyAgents(sql, [body.sellerAgentId], "deal.proposed", {
+        dealId: result.id,
+        buyerAgentId: body.buyerAgentId,
+        sellerAgentId: body.sellerAgentId,
+        negotiatedTotal: body.negotiatedTotal,
+    });
     return reply.code(201).send(result);
 });
 app.post("/api/deals/:id/counter", async (request) => {
@@ -537,6 +555,7 @@ app.post("/api/deals/:id/counter", async (request) => {
 app.post("/api/deals/:id/accept", async (request) => {
     const { id } = request.params;
     const body = z.object({ actorAgentId: z.string().uuid() }).parse(request.body);
+    const [deal] = await sql `SELECT buyer_agent_id, seller_agent_id FROM deals WHERE id = ${id}`;
     await sql.begin(async (txn) => {
         await txn.unsafe("UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = $1", [id]);
         await txn.unsafe("UPDATE milestones SET status = 'in_progress' WHERE deal_id = $1 AND status = 'pending'", [id]);
@@ -545,11 +564,18 @@ app.post("/api/deals/:id/accept", async (request) => {
         VALUES ($1, $2, 'accept', $3::jsonb)
       `, [id, body.actorAgentId, JSON.stringify(body)]);
     });
+    if (deal) {
+        notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.accepted", {
+            dealId: id,
+            acceptedBy: body.actorAgentId,
+        });
+    }
     return { ok: true };
 });
 app.post("/api/deals/:id/cancel", async (request) => {
     const { id } = request.params;
     const body = z.object({ actorAgentId: z.string().uuid(), reason: z.string().optional() }).parse(request.body);
+    const [deal] = await sql `SELECT buyer_agent_id, seller_agent_id FROM deals WHERE id = ${id}`;
     await sql.begin(async (txn) => {
         await txn.unsafe("UPDATE deals SET status = 'cancelled', updated_at = NOW() WHERE id = $1", [id]);
         await txn.unsafe("UPDATE milestones SET status = 'cancelled' WHERE deal_id = $1", [id]);
@@ -558,6 +584,13 @@ app.post("/api/deals/:id/cancel", async (request) => {
         VALUES ($1, $2, 'cancel', $3::jsonb)
       `, [id, body.actorAgentId, JSON.stringify(body)]);
     });
+    if (deal) {
+        notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.cancelled", {
+            dealId: id,
+            cancelledBy: body.actorAgentId,
+            reason: body.reason,
+        });
+    }
     return { ok: true };
 });
 app.get("/api/deals", async (request) => {
@@ -655,6 +688,12 @@ app.post("/api/payments/create-intent", async (request, reply) => {
   `;
     await sql `UPDATE milestones SET status = 'funded' WHERE id = ${body.milestoneId}`;
     await audit(body.buyerAgentId, "payment.create_intent", "payment_intent", intent.id, idem, body);
+    notifyAgents(sql, [milestone.seller_agent_id], "payment.funded", {
+        dealId: milestone.deal_id,
+        milestoneId: body.milestoneId,
+        amount: milestone.amount,
+        buyerAgentId: body.buyerAgentId,
+    });
     return reply.code(201).send({
         paymentIntentId: intent.id,
         status: intent.status,
@@ -707,6 +746,12 @@ app.post("/api/payments/confirm-funding", async (request, reply) => {
         await txn.unsafe(`UPDATE milestones SET status = 'funded' WHERE id = $1`, [intent.milestone_id]);
     });
     await audit(intent.buyer_agent_id, "payment.confirm_funding", "payment_intent", intent.id, idem, { txHash: body.txHash });
+    notifyAgents(sql, [intent.seller_agent_id], "payment.funded", {
+        milestoneId: intent.milestone_id,
+        amount: intent.amount,
+        buyerAgentId: intent.buyer_agent_id,
+        txHash: body.txHash,
+    });
     return reply.code(200).send({
         paymentIntentId: intent.id,
         status: "funded",
@@ -833,7 +878,20 @@ app.post("/api/deliveries/verify", async (request, reply) => {
     SET status = 'verified', verified_at = NOW(), verification_notes = COALESCE(${verificationNotes}, verification_notes)
     WHERE milestone_id = ${body.milestoneId}
   `;
+    // Look up deal to notify buyer
+    const [milestoneInfo] = await sql `
+    SELECT d.buyer_agent_id, d.id AS deal_id
+    FROM milestones m JOIN deals d ON d.id = m.deal_id
+    WHERE m.id = ${body.milestoneId}
+  `;
     await releaseMilestonePayment(body.milestoneId);
+    if (milestoneInfo) {
+        notifyAgents(sql, [milestoneInfo.buyer_agent_id], "milestone.completed", {
+            dealId: milestoneInfo.deal_id,
+            milestoneId: body.milestoneId,
+            verifiedBy: body.buyerAgentId,
+        });
+    }
     return { accepted: true, payoutReleased: true };
 });
 app.post("/api/disputes/open", async (request, reply) => {
@@ -890,6 +948,14 @@ app.post("/api/feedback", async (request, reply) => {
     FROM feedback WHERE to_agent_id = ${body.toAgentId}
   `;
     await sql `UPDATE agents SET reputation_score = ${Number(aggregate.score)} WHERE id = ${body.toAgentId}`;
+    notifyAgents(sql, [body.toAgentId], "feedback.received", {
+        dealId: body.dealId,
+        fromAgentId: body.fromAgentId,
+        ratingQuality: body.ratingQuality,
+        ratingTimeliness: body.ratingTimeliness,
+        ratingCommunication: body.ratingCommunication,
+        ratingAccuracy: body.ratingAccuracy,
+    });
     return reply.code(201).send(entry);
 });
 app.get("/api/public/overview", async () => {
