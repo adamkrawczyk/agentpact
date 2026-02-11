@@ -48,7 +48,7 @@ function createMockSql() {
 describe("Auth", () => {
   it("Register agent API key", async () => {
     const app = Fastify();
-    await initAuth(app, { sql: createMockSql() });
+    await initAuth(app, createMockSql());
 
     const response = await app.inject({
       method: "POST",
@@ -68,7 +68,7 @@ describe("Auth", () => {
 
   it("Verify valid API key", async () => {
     const app = Fastify();
-    await initAuth(app, { sql: createMockSql() });
+    await initAuth(app, createMockSql());
 
     const registerRes = await app.inject({
       method: "POST",
@@ -96,7 +96,7 @@ describe("Auth", () => {
 
   it("Reject invalid API key", async () => {
     const app = Fastify();
-    await initAuth(app, { sql: createMockSql() });
+    await initAuth(app, createMockSql());
 
     const response = await app.inject({
       method: "GET",
@@ -112,7 +112,7 @@ describe("Auth", () => {
 
   it("Protected route requires API key", async () => {
     const app = Fastify();
-    await initAuth(app, { sql: createMockSql() });
+    await initAuth(app, createMockSql());
 
     app.get(
       "/api/protected",
@@ -151,7 +151,7 @@ describe("Auth", () => {
 
   it("Rate Limiting blocks after limit exceeded", async () => {
     const app = Fastify();
-    await initAuth(app, { sql: createMockSql() });
+    await initAuth(app, createMockSql());
 
     const apiKey = "test_key";
 

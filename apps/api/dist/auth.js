@@ -1,7 +1,6 @@
 import fastifyJWT from "@fastify/jwt";
 import postgres from "postgres";
 import { createHash, randomBytes } from "node:crypto";
-import bcrypt from "bcryptjs";
 import { z } from "zod";
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/agentpact";
 const JWT_SECRET = process.env.JWT_SECRET ?? "dev_secret_change_in_production";
@@ -9,96 +8,57 @@ const registerSchema = z.object({
     agentId: z.string().uuid(),
     walletAddress: z.string().min(4)
 });
+/**
+ * SHA-256 hash for API keys. API keys are 32 random bytes (256 bits of entropy),
+ * so SHA-256 is perfectly safe — this isn't a password, it's a random token.
+ * Using SHA-256 allows O(1) DB lookups instead of scanning all credentials with bcrypt.
+ */
 function hashApiKey(apiKey) {
-    return bcrypt.hashSync(apiKey, 10);
-}
-function hashApiKeyLegacy(apiKey) {
     return createHash("sha256").update(apiKey).digest("hex");
 }
-async function verifyApiKey(apiKey, storedHash) {
-    // Try bcrypt first (new format)
-    try {
-        if (storedHash.startsWith("$2")) {
-            return bcrypt.compareSync(apiKey, storedHash);
-        }
-    }
-    catch {
-        // Not a bcrypt hash, fall through
-    }
-    // Fallback: legacy SHA-256 comparison
-    const legacyHash = hashApiKeyLegacy(apiKey);
-    return legacyHash === storedHash;
-}
-export async function initAuth(app, options) {
-    const db = options?.sql ?? postgres(DATABASE_URL);
-    const ownsDbConnection = !options?.sql;
-    const memoryCredentials = new Map();
-    await app.register(fastifyJWT, {
-        secret: JWT_SECRET
-    });
-    app.decorate("authenticate", async function authenticate(request, reply) {
+const memoryCredentials = new Map();
+export async function initAuth(app, injectedDb) {
+    const db = injectedDb ?? postgres(DATABASE_URL, { max: 3 });
+    await app.register(fastifyJWT, { secret: JWT_SECRET });
+    app.decorate("authenticate", async (request, reply) => {
         const rawApiKey = request.headers["x-api-key"];
-        if (typeof rawApiKey !== "string" || rawApiKey.length === 0) {
-            reply.code(401).send({ error: "Missing API key" });
+        if (typeof rawApiKey !== "string" || rawApiKey.length < 16) {
+            return reply.code(401).send({ error: "Missing API key" });
+        }
+        const apiKeyHash = hashApiKey(rawApiKey);
+        // Check in-memory cache first
+        const cached = memoryCredentials.get(apiKeyHash);
+        if (cached && !cached.revokedAt) {
+            cached.lastUsedAt = new Date();
+            request.agentId = cached.agentId;
+            request.apiKeyHash = apiKeyHash;
             return;
         }
-        // Check in-memory cache first (keyed by legacy hash for fast lookup)
-        const legacyHash = hashApiKeyLegacy(rawApiKey);
-        for (const [storedHash, cached] of memoryCredentials) {
-            if (cached.revokedAt)
-                continue;
-            const match = await verifyApiKey(rawApiKey, storedHash);
-            if (match) {
-                cached.lastUsedAt = new Date();
-                request.agentId = cached.agentId;
-                request.apiKeyHash = storedHash;
-                return;
-            }
-        }
         try {
-            // Try bcrypt hashes first
-            const allRows = await db `
+            const rows = await db `
         SELECT agent_id, wallet_address, api_key_hash
         FROM agent_credentials
-        WHERE revoked_at IS NULL
+        WHERE api_key_hash = ${apiKeyHash} AND revoked_at IS NULL
       `;
-            for (const row of allRows) {
-                const credential = row;
-                const match = await verifyApiKey(rawApiKey, credential.api_key_hash);
-                if (match) {
-                    // If it was a legacy SHA-256 hash, rehash with bcrypt and update DB
-                    if (!credential.api_key_hash.startsWith("$2")) {
-                        const newHash = hashApiKey(rawApiKey);
-                        try {
-                            await db `
-                UPDATE agent_credentials
-                SET api_key_hash = ${newHash}
-                WHERE api_key_hash = ${credential.api_key_hash}
-              `;
-                            credential.api_key_hash = newHash;
-                        }
-                        catch {
-                            app.log.warn("Failed to upgrade API key hash to bcrypt");
-                        }
-                    }
-                    request.agentId = credential.agent_id;
-                    request.apiKeyHash = credential.api_key_hash;
-                    memoryCredentials.set(credential.api_key_hash, {
-                        agentId: credential.agent_id,
-                        walletAddress: credential.wallet_address,
-                        apiKeyHash: credential.api_key_hash,
-                        revokedAt: null,
-                        lastUsedAt: new Date()
-                    });
-                    return;
-                }
+            if (rows.length === 0) {
+                return reply.code(401).send({ error: "Invalid API key" });
             }
-            reply.code(401).send({ error: "Invalid API key" });
+            const credential = rows[0];
+            request.agentId = credential.agent_id;
+            request.apiKeyHash = apiKeyHash;
+            memoryCredentials.set(apiKeyHash, {
+                agentId: credential.agent_id,
+                walletAddress: credential.wallet_address,
+                apiKeyHash: apiKeyHash,
+                revokedAt: null,
+                lastUsedAt: new Date()
+            });
         }
         catch {
-            reply.code(401).send({ error: "Invalid API key" });
+            return reply.code(401).send({ error: "Invalid API key" });
         }
     });
+    // Register endpoint — public, creates API key for an agent
     app.post("/api/auth/register", {
         config: {
             rateLimit: {
@@ -111,60 +71,50 @@ export async function initAuth(app, options) {
         const body = registerSchema.parse(request.body);
         const apiKey = randomBytes(32).toString("hex");
         const apiKeyHash = hashApiKey(apiKey);
+        try {
+            await db `
+          INSERT INTO agent_credentials (agent_id, wallet_address, api_key_hash)
+          VALUES (${body.agentId}, ${body.walletAddress}, ${apiKeyHash})
+          ON CONFLICT (agent_id) DO UPDATE
+            SET api_key_hash = EXCLUDED.api_key_hash,
+                wallet_address = EXCLUDED.wallet_address,
+                revoked_at = NULL,
+                created_at = NOW()
+        `;
+        }
+        catch {
+            return reply.code(500).send({ error: "Registration failed" });
+        }
         memoryCredentials.set(apiKeyHash, {
             agentId: body.agentId,
             walletAddress: body.walletAddress,
             apiKeyHash,
             revokedAt: null,
-            lastUsedAt: null
+            lastUsedAt: new Date()
         });
-        try {
-            await db `
-        INSERT INTO agent_credentials (agent_id, wallet_address, api_key_hash)
-        VALUES (${body.agentId}, ${body.walletAddress}, ${apiKeyHash})
-        ON CONFLICT (agent_id) DO UPDATE
-          SET api_key_hash = EXCLUDED.api_key_hash,
-              wallet_address = EXCLUDED.wallet_address,
-              created_at = NOW(),
-              revoked_at = NULL
-      `;
-        }
-        catch {
-            app.log.warn("agent_credentials table unavailable or agent missing; using in-memory auth record");
-        }
-        reply.code(200).send({ apiKey, agentId: body.agentId });
+        return reply.code(201).send({ agentId: body.agentId, apiKey });
     });
-    app.get("/api/auth/verify", {
-        preHandler: app.authenticate
-    }, async (request) => {
-        return {
-            agentId: request.agentId,
-            authenticated: true
-        };
+    // Verify — check if API key is valid
+    app.get("/api/auth/verify", { preHandler: app.authenticate }, async (request) => {
+        return { valid: true, agentId: request.agentId };
     });
-    app.post("/api/auth/revoke", {
-        preHandler: app.authenticate
-    }, async (request) => {
+    // Revoke — invalidate current key
+    app.post("/api/auth/revoke", { preHandler: app.authenticate }, async (request) => {
         const apiKeyHash = request.apiKeyHash;
-        if (!apiKeyHash) {
+        if (!apiKeyHash)
             return { revoked: false };
-        }
         const cached = memoryCredentials.get(apiKeyHash);
-        if (cached) {
+        if (cached)
             cached.revokedAt = new Date();
-        }
         try {
-            await db `
-          UPDATE agent_credentials
-          SET revoked_at = NOW()
-          WHERE api_key_hash = ${apiKeyHash}
-        `;
+            await db `UPDATE agent_credentials SET revoked_at = NOW() WHERE api_key_hash = ${apiKeyHash}`;
         }
         catch {
-            app.log.warn("Unable to persist credential revocation");
+            // best effort
         }
         return { revoked: true };
     });
+    // Rotate — revoke old key, issue new one
     app.post("/api/auth/rotate-key", {
         preHandler: app.authenticate,
         config: {
@@ -175,42 +125,35 @@ export async function initAuth(app, options) {
             }
         }
     }, async (request, reply) => {
-        const oldApiKeyHash = request.apiKeyHash;
+        const oldHash = request.apiKeyHash;
         const agentId = request.agentId;
-        if (!oldApiKeyHash || !agentId) {
+        if (!oldHash || !agentId)
             return reply.code(401).send({ error: "Missing credentials" });
-        }
-        // Revoke old key
-        const cached = memoryCredentials.get(oldApiKeyHash);
-        if (cached) {
+        // Revoke old
+        const cached = memoryCredentials.get(oldHash);
+        if (cached)
             cached.revokedAt = new Date();
-        }
-        // Generate new key
+        memoryCredentials.delete(oldHash);
+        // Generate new
         const newApiKey = randomBytes(32).toString("hex");
-        const newApiKeyHash = hashApiKey(newApiKey);
+        const newHash = hashApiKey(newApiKey);
         try {
             await db `
           UPDATE agent_credentials
-          SET api_key_hash = ${newApiKeyHash}, revoked_at = NULL, created_at = NOW()
+          SET api_key_hash = ${newHash}, revoked_at = NULL, created_at = NOW()
           WHERE agent_id = ${agentId}
         `;
         }
         catch {
-            app.log.warn("Unable to persist key rotation");
+            return reply.code(500).send({ error: "Key rotation failed" });
         }
-        memoryCredentials.delete(oldApiKeyHash);
-        memoryCredentials.set(newApiKeyHash, {
+        memoryCredentials.set(newHash, {
             agentId,
             walletAddress: cached?.walletAddress ?? "",
-            apiKeyHash: newApiKeyHash,
+            apiKeyHash: newHash,
             revokedAt: null,
             lastUsedAt: new Date()
         });
         return reply.code(200).send({ apiKey: newApiKey, agentId });
     });
-    if (ownsDbConnection && typeof db.end === "function") {
-        app.addHook("onClose", async () => {
-            await db.end?.({ timeout: 5 });
-        });
-    }
 }
