@@ -116,6 +116,13 @@ export async function initAuth(
       const apiKeyHash = hashApiKey(apiKey);
 
       try {
+        // Auto-create agent if it doesn't exist (agents table FK required)
+        await db`
+          INSERT INTO agents (id, handle, display_name, owner_wallet_address, wallet_provider)
+          VALUES (${body.agentId}, ${'agent-' + body.agentId}, ${'Agent ' + body.agentId.slice(0, 8)}, ${body.walletAddress}, 'metamask')
+          ON CONFLICT (id) DO NOTHING
+        `;
+
         await db`
           INSERT INTO agent_credentials (agent_id, wallet_address, api_key_hash)
           VALUES (${body.agentId}, ${body.walletAddress}, ${apiKeyHash})
