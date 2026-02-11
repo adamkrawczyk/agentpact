@@ -740,7 +740,7 @@ app.post("/api/payments/create-intent", async (request, reply) => {
         milestone_id, buyer_agent_id, seller_agent_id, amount, currency, chain, status,
         buyer_wallet_provider, buyer_wallet_address, seller_wallet_address, platform_wallet_address
       ) VALUES (
-        ${body.milestoneId}, ${body.buyerAgentId}, ${milestone.seller_agent_id}, ${milestone.amount}, 'USDC', ${body.chain}, 'pending_funding',
+        ${body.milestoneId}, ${body.buyerAgentId}, ${milestone.seller_agent_id}, ${milestone.amount}, 'USDC', ${body.chain}, 'created',
         ${body.walletProvider}, ${body.buyerWalletAddress}, ${milestone.seller_wallet_address}, ${PLATFORM_WALLET}
       )
       RETURNING *
@@ -750,7 +750,7 @@ app.post("/api/payments/create-intent", async (request, reply) => {
 
     return reply.code(201).send({
       paymentIntentId: intent.id,
-      status: "pending_funding",
+      status: "created",
       mode,
       chain: intent.chain,
       amount: intent.amount,
@@ -835,8 +835,8 @@ app.post("/api/payments/confirm-funding", async (request, reply) => {
   `;
 
   if (!intent) return reply.code(404).send({ error: "Payment intent not found" });
-  if (intent.status !== "pending_funding") {
-    return reply.code(400).send({ error: `Intent status is ${intent.status}, expected pending_funding` });
+  if (intent.status !== "created") {
+    return reply.code(400).send({ error: `Intent status is ${intent.status}, expected created` });
   }
 
   // Verify on-chain
