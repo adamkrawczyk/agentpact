@@ -13,6 +13,32 @@ const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:postgres@l
 const PLATFORM_FEE_PCT = Number(process.env.PLATFORM_FEE_PCT ?? 10);
 const PLATFORM_WALLET = process.env.PLATFORM_WALLET ?? "0xAgentPactPlatformUSDC";
 
+// ── Trust Tier definitions ───────────────────────────────────────────
+const TRUST_TIERS = [
+  { tier: "gold",   label: "Gold",   minDeals: 25, minReputation: 4.0, maxDealAmount: Infinity, color: "#FFD700" },
+  { tier: "silver", label: "Silver", minDeals: 10, minReputation: 3.5, maxDealAmount: 1000,     color: "#C0C0C0" },
+  { tier: "bronze", label: "Bronze", minDeals: 3,  minReputation: 3.0, maxDealAmount: 200,      color: "#CD7F32" },
+  { tier: "new",    label: "New",    minDeals: 0,  minReputation: 0,   maxDealAmount: 50,       color: "#888888" },
+] as const;
+
+function computeTrustTier(completedDeals: number, reputationScore: number): { tier: string; label: string; maxDealAmount: number; color: string } {
+  for (const t of TRUST_TIERS) {
+    if (completedDeals >= t.minDeals && reputationScore >= t.minReputation) {
+      return { tier: t.tier, label: t.label, maxDealAmount: t.maxDealAmount, color: t.color };
+    }
+  }
+  return { tier: "new", label: "New", maxDealAmount: 50, color: "#888888" };
+}
+
+async function getAgentStats(db: typeof sql, agentId: string): Promise<{ completedDeals: number; reputationScore: number }> {
+  const [stats] = await db`
+    SELECT
+      (SELECT COUNT(*)::int FROM deals WHERE (buyer_agent_id = ${agentId} OR seller_agent_id = ${agentId}) AND status = 'completed') AS completed_deals,
+      COALESCE((SELECT AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0) FROM feedback WHERE to_agent_id = ${agentId}), 0) AS reputation_score
+  `;
+  return { completedDeals: Number(stats.completed_deals), reputationScore: Number(stats.reputation_score) };
+}
+
 export const sql = postgres(DATABASE_URL, { max: 10 });
 export const app = Fastify({ logger: true });
 
@@ -241,7 +267,7 @@ app.addHook("preHandler", async (request, reply) => {
     return;
   }
 
-  const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents"];
+  const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/leaderboard"];
   if (request.method === "GET" && publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
     return;
   }
@@ -288,12 +314,16 @@ app.get("/api/agents/:id", async (request, reply) => {
     WHERE to_agent_id = ${id}
   `;
 
+  const agentStats = await getAgentStats(sql, id);
+  const trustTier = computeTrustTier(agentStats.completedDeals, agentStats.reputationScore);
+
   return {
     ...agent,
     reputation: {
       score: Number(reputation.score ?? 0),
       reviewCount: Number(reputation.review_count ?? 0)
-    }
+    },
+    trustTier
   };
 });
 
@@ -514,6 +544,23 @@ app.post("/api/alerts/subscribe", async (request, reply) => {
 app.post("/api/deals/propose", async (request, reply) => {
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
   const body = proposeDealSchema.parse(request.body);
+
+  // ── Trust tier enforcement ──
+  const buyerStats = await getAgentStats(sql, body.buyerAgentId);
+  const buyerTier = computeTrustTier(buyerStats.completedDeals, buyerStats.reputationScore);
+  if (body.negotiatedTotal > buyerTier.maxDealAmount) {
+    return reply.code(403).send({
+      error: `Your trust tier (${buyerTier.label}) limits deals to ${buyerTier.maxDealAmount} USDC. Complete more deals to unlock higher limits.`
+    });
+  }
+
+  const sellerStats = await getAgentStats(sql, body.sellerAgentId);
+  const sellerTier = computeTrustTier(sellerStats.completedDeals, sellerStats.reputationScore);
+  if (body.negotiatedTotal > sellerTier.maxDealAmount) {
+    return reply.code(403).send({
+      error: `Seller's trust tier (${sellerTier.label}) limits deals to ${sellerTier.maxDealAmount} USDC. The seller needs to complete more deals to unlock higher limits.`
+    });
+  }
 
   const result = await sql.begin(async (txn) => {
     const [deal] = await txn.unsafe(
@@ -850,6 +897,74 @@ app.get("/api/public/overview", async () => {
       (SELECT COUNT(*) FROM agents)::int AS total_agents
   `;
   return stats;
+});
+
+// ── Leaderboard ──────────────────────────────────────────────────────
+app.get("/api/leaderboard", async (request) => {
+  const q = request.query as { sortBy?: string; limit?: string; period?: string };
+  const sortBy = q.sortBy ?? "reputation";
+  const limit = Math.min(Math.max(Number(q.limit ?? 50), 1), 200);
+  const period = q.period ?? "all";
+
+  let periodFilter = "";
+  if (period === "30d") periodFilter = "AND d.created_at >= NOW() - INTERVAL '30 days'";
+  else if (period === "7d") periodFilter = "AND d.created_at >= NOW() - INTERVAL '7 days'";
+
+  let orderClause = "reputation_score DESC";
+  if (sortBy === "deals") orderClause = "completed_deals DESC";
+  else if (sortBy === "volume") orderClause = "total_volume DESC";
+
+  const rows = await sql.unsafe(`
+    SELECT
+      a.id AS agent_id,
+      a.display_name AS name,
+      a.created_at AS member_since,
+      COALESCE(f.avg_score, 0) AS reputation_score,
+      COALESCE(f.review_count, 0)::int AS review_count,
+      COALESCE(ds.completed_deals, 0)::int AS completed_deals,
+      COALESCE(ds.total_volume, 0) AS total_volume,
+      COALESCE(ds.disputed_deals, 0)::int AS disputed_deals,
+      COALESCE(ds.total_deals, 0)::int AS total_deals
+    FROM agents a
+    LEFT JOIN LATERAL (
+      SELECT
+        AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0) AS avg_score,
+        COUNT(*)::int AS review_count
+      FROM feedback WHERE to_agent_id = a.id
+    ) f ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) FILTER (WHERE d.status = 'completed')::int AS completed_deals,
+        COALESCE(SUM(d.negotiated_total) FILTER (WHERE d.status = 'completed'), 0) AS total_volume,
+        COUNT(*) FILTER (WHERE d.status = 'disputed')::int AS disputed_deals,
+        COUNT(*)::int AS total_deals
+      FROM deals d
+      WHERE (d.buyer_agent_id = a.id OR d.seller_agent_id = a.id)
+        ${periodFilter}
+    ) ds ON true
+    ORDER BY ${orderClause}
+    LIMIT ${limit}
+  `);
+
+  return rows.map((row: Record<string, unknown>, idx: number) => {
+    const completedDeals = Number(row.completed_deals);
+    const reputationScore = Number(Number(row.reputation_score).toFixed(2));
+    const totalDeals = Number(row.total_deals);
+    const disputedDeals = Number(row.disputed_deals);
+    const trustTier = computeTrustTier(completedDeals, reputationScore);
+    return {
+      rank: idx + 1,
+      agentId: row.agent_id,
+      name: row.name,
+      trustTier: trustTier.tier,
+      reputationScore,
+      reviewCount: Number(row.review_count),
+      completedDeals,
+      totalVolume: Number(Number(row.total_volume).toFixed(2)),
+      disputeRate: totalDeals > 0 ? Number((disputedDeals / totalDeals).toFixed(4)) : 0,
+      memberSince: row.member_since,
+    };
+  });
 });
 
 app.setErrorHandler((error, _request, reply) => {

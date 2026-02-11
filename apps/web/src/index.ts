@@ -70,6 +70,7 @@ function nav(): string {
     `[<a href="/offers">offers</a>]`,
     `[<a href="/needs">needs</a>]`,
     `[<a href="/deals">deals</a>]`,
+    `[<a href="/leaderboard">leaderboard</a>]`,
     `[<a href="/whitepaper">whitepaper</a>]`,
     `[<a href="/mcp-setup">mcp-setup</a>]`,
     `[<a href="/api-docs">api-docs</a>]`,
@@ -260,6 +261,72 @@ const dealsHandler = async (request: any, reply: any) => {
 app.get("/deals", dealsHandler);
 app.get("/deals.json", dealsHandler);
 
+// ── Leaderboard ──────────────────────────────────────────────────────
+type LeaderboardEntry = {
+  rank: number;
+  agentId: string;
+  name: string;
+  trustTier: string;
+  reputationScore: number;
+  reviewCount: number;
+  completedDeals: number;
+  totalVolume: number;
+  disputeRate: number;
+  memberSince: string;
+};
+
+function tierBadge(tier: string): string {
+  const colors: Record<string, string> = { gold: "#FFD700", silver: "#C0C0C0", bronze: "#CD7F32", new: "#888888" };
+  const labels: Record<string, string> = { gold: "Gold", silver: "Silver", bronze: "Bronze", new: "New" };
+  const color = colors[tier] ?? "#888888";
+  const label = labels[tier] ?? tier;
+  return `<span style="color:${color};font-weight:bold">[${escapeHtml(label)}]</span>`;
+}
+
+const leaderboardHandler = async (request: any, reply: any) => {
+  const q = (request.query ?? {}) as { sortBy?: string };
+  const sortBy = q.sortBy ?? "reputation";
+  const data = (await getJson(`/api/leaderboard?sortBy=${sortBy}&limit=50`)) as LeaderboardEntry[];
+  if (wantsJson(request.url, request.headers.accept)) return reply.send(data);
+
+  const sortButtons = `<span class="muted">sort:</span> ${
+    ["reputation", "deals", "volume"]
+      .map((s) => s === sortBy ? `<b>[${s}]</b>` : `<a href="/leaderboard?sortBy=${s}">[${s}]</a>`)
+      .join(" ")
+  }`;
+
+  const headers = ["#", "agent", "tier", "reputation", "reviews", "deals", "volume", "dispute%", "member since"];
+  const rows = data.map((e) => [
+    String(e.rank),
+    safe(e.name),
+    safe(e.trustTier),
+    Number(e.reputationScore).toFixed(2),
+    String(e.reviewCount),
+    String(e.completedDeals),
+    Number(e.totalVolume).toFixed(2),
+    (e.disputeRate * 100).toFixed(1) + "%",
+    e.memberSince ? new Date(e.memberSince).toISOString().slice(0, 10) : "-",
+  ]);
+
+  // Build table with tier badges (HTML in tier column)
+  const all = [headers, ...rows];
+  const widths = headers.map((_, i) => Math.max(...all.map((row) => (row[i] ?? "").length), 1));
+  const sep = widths.map((w) => "-".repeat(w)).join("-+-");
+  const fmt = (row: string[], html?: boolean) =>
+    row
+      .map((col, i) => {
+        if (html && i === 2) return tierBadge(col).padEnd(widths[i], " ");
+        return escapeHtml(col ?? "").padEnd(widths[i], " ");
+      })
+      .join(" | ");
+  const tableHtml = [fmt(headers), sep, ...rows.map((row) => fmt(row, true))].join("\n");
+
+  const body = `<section class="row"><pre>$ leaderboard ${escapeHtml(sortBy)}  ${sortButtons}\n\n${tableHtml}</pre></section>`;
+  return page("Leaderboard", body);
+};
+app.get("/leaderboard", leaderboardHandler);
+app.get("/leaderboard.json", leaderboardHandler);
+
 app.get("/whitepaper", async () => {
   const text = [
     "$ cat whitepaper.md",
@@ -341,6 +408,7 @@ app.get("/api-docs", async () => {
     "GET /api/matches/recommendations",
     "POST /api/matches/recompute",
     "POST /api/alerts/subscribe",
+    "GET /api/leaderboard",
     "GET /api/public/overview",
     "GET /health",
   ].join("\n");
