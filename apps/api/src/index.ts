@@ -227,7 +227,7 @@ async function releaseMilestonePayment(milestoneId: string): Promise<void> {
         SET status = 'released', released_at = NOW(), updated_at = NOW(), tx_hash = $1
         WHERE id = $2
       `,
-      [`release_${randomUUID().slice(0, 8)}`, payment.id]
+      [`sim_release_${randomUUID().slice(0, 8)}`, payment.id]
     );
     await txn.unsafe(
       `
@@ -848,14 +848,14 @@ app.post("/api/payments/confirm-funding", async (request, reply) => {
 
   // Update intent + milestone status
   await sql.begin(async (txn) => {
-    await txn`
-      UPDATE payment_intents
-      SET status = 'funded', tx_hash = ${body.txHash}, updated_at = NOW()
-      WHERE id = ${body.paymentIntentId}
-    `;
-    await txn`
-      UPDATE milestones SET status = 'funded' WHERE id = ${intent.milestone_id}
-    `;
+    await txn.unsafe(
+      `UPDATE payment_intents SET status = 'funded', tx_hash = $1, updated_at = NOW() WHERE id = $2`,
+      [body.txHash, body.paymentIntentId]
+    );
+    await txn.unsafe(
+      `UPDATE milestones SET status = 'funded' WHERE id = $1`,
+      [intent.milestone_id]
+    );
   });
 
   await audit(intent.buyer_agent_id, "payment.confirm_funding", "payment_intent", intent.id, idem, { txHash: body.txHash });
@@ -911,14 +911,56 @@ app.post("/api/payments/release", async (request, reply) => {
   return { ok: true, mode };
 });
 
-app.post("/api/payments/refund", async (request) => {
+app.post("/api/payments/refund", async (request, reply) => {
   const body = z.object({ paymentIntentId: z.string().uuid(), reason: z.string().optional() }).parse(request.body);
+  const mode = isOnChainMode() ? "on-chain" : "simulation";
+
+  const [intent] = await sql`SELECT * FROM payment_intents WHERE id = ${body.paymentIntentId}`;
+  if (!intent) return reply.code(404).send({ error: "Payment intent not found" });
+
+  if (mode === "on-chain") {
+    // On-chain refund: the milestone must first be disputed (buyer calls openDispute),
+    // then the platform resolves the dispute in the buyer's favor.
+    // Check if we can do it:
+    try {
+      const onChainStatus = await getMilestoneStatus(intent.milestone_id);
+      if (onChainStatus.exists && onChainStatus.status === "Disputed") {
+        // Platform resolves dispute — refund buyer
+        const { txHash } = await resolveDisputeOnChain(intent.milestone_id, true);
+        await sql`
+          UPDATE payment_intents
+          SET status = 'refunded', updated_at = NOW(), tx_hash = ${txHash}
+          WHERE id = ${body.paymentIntentId}
+        `;
+        await sql`UPDATE milestones SET status = 'cancelled' WHERE id = ${intent.milestone_id}`;
+        return { ok: true, mode, txHash, action: "refunded_on_chain" };
+      }
+
+      // Milestone not disputed — can't refund on-chain yet; mark as pending
+      await sql`
+        UPDATE payment_intents
+        SET status = 'pending_refund', updated_at = NOW()
+        WHERE id = ${body.paymentIntentId}
+      `;
+      return {
+        ok: true,
+        mode,
+        action: "pending_refund",
+        message: "Milestone must be disputed on-chain before platform can refund. Buyer should call openDispute first.",
+      };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return reply.code(500).send({ error: `On-chain refund failed: ${message}` });
+    }
+  }
+
+  // Simulation mode
   await sql`
     UPDATE payment_intents
-    SET status = 'refunded', updated_at = NOW(), tx_hash = ${`refund_${randomUUID().slice(0, 8)}`}
+    SET status = 'refunded', updated_at = NOW(), tx_hash = ${`sim_refund_${randomUUID().slice(0, 8)}`}
     WHERE id = ${body.paymentIntentId}
   `;
-  return { ok: true };
+  return { ok: true, mode };
 });
 
 app.post("/api/deliveries/submit", async (request, reply) => {
