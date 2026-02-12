@@ -288,7 +288,7 @@ registerWebhookRoutes(app, sql);
 
 app.addHook("preHandler", async (request, reply) => {
   const routePath = (request.url.split("?")[0] ?? request.url);
-  const publicRoutes = new Set(["/health", "/api/auth/register", "/api/auth/verify", "/api/admin/reset"]);
+  const publicRoutes = new Set(["/health", "/api/auth/register", "/api/auth/verify"]);
 
   if (publicRoutes.has(routePath)) {
     return;
@@ -1227,50 +1227,6 @@ app.get("/api/leaderboard", async (request) => {
       memberSince: row.member_since,
     };
   });
-});
-
-// ── Temporary Admin Reset (remove after cleanup) ─────────────────────
-const ADMIN_SECRET = process.env.JWT_SECRET ?? "dev_secret_change_in_production";
-
-app.post("/api/admin/reset", async (request, reply) => {
-  const authHeader = request.headers["x-admin-secret"];
-  if (authHeader !== ADMIN_SECRET) {
-    return reply.code(403).send({ error: "Forbidden" });
-  }
-
-  const results: Record<string, number> = {};
-
-  await sql.begin(async (txn) => {
-    // Delete in FK-safe order
-    const tables = [
-      "feedback",
-      "deliveries",
-      "disputes",
-      "payment_intents",
-      "negotiation_events",
-      "milestones",
-      "deals",
-      "matches",
-      "needs",
-      "offers",
-      "alert_subscriptions",
-      "audit_log",
-      "api_usage",
-      "agent_credentials",
-      "agents",
-    ];
-
-    for (const table of tables) {
-      try {
-        const rows = await txn.unsafe(`DELETE FROM ${table} RETURNING 1`);
-        results[table] = rows.length;
-      } catch (e: unknown) {
-        results[table] = -1;
-      }
-    }
-  });
-
-  return { ok: true, deleted: results };
 });
 
 app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message?: string }, _request, reply) => {
