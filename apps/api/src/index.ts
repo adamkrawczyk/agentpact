@@ -288,7 +288,7 @@ registerWebhookRoutes(app, sql);
 
 app.addHook("preHandler", async (request, reply) => {
   const routePath = (request.url.split("?")[0] ?? request.url);
-  const publicRoutes = new Set(["/health", "/api/auth/register", "/api/auth/verify"]);
+  const publicRoutes = new Set(["/health", "/api/auth/register", "/api/auth/verify", "/api/admin/reset"]);
 
   if (publicRoutes.has(routePath)) {
     return;
