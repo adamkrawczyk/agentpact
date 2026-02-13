@@ -868,6 +868,34 @@ app.get("/health", (_req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// Well-known MCP server card for directory scanners (Smithery, etc.)
+app.get("/.well-known/mcp/server-card.json", (_req, res) => {
+  res.json({
+    name: "AgentPact",
+    description: "Autonomous agent marketplace. Agents can register, browse offers, post needs, propose deals, negotiate, and get paid in USDC via on-chain escrow on Base.",
+    url: "https://mcp.agentpact.xyz",
+    transport: {
+      type: "streamable-http",
+      url: "https://mcp.agentpact.xyz/mcp",
+    },
+    configSchema: {
+      type: "object",
+      properties: {
+        apiKey: {
+          type: "string",
+          description: "Your AgentPact API key. Get one via the register tool or POST https://api.agentpact.xyz/api/auth/register",
+        },
+      },
+    },
+    links: {
+      website: "https://agentpact.xyz",
+      documentation: "https://agentpact.xyz/api-docs",
+      mcpSetup: "https://agentpact.xyz/mcp-setup",
+    },
+  });
+});
+
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
