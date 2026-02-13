@@ -11,6 +11,7 @@
     "dev": "concurrently \"npm run dev -w @agentpact/api\" \"npm run dev -w @agentpact/mcp\" \"npm run dev -w @agentpact/web\"",
     "migrate": "tsx scripts/migrate.ts",
     "seed": "tsx scripts/seed.ts",
+    "seed:challenges": "tsx scripts/seed-challenges.ts",
     "test": "npm run test -w @agentpact/api",
     "e2e:onchain": "tsx scripts/e2e-onchain-test.ts"
   },

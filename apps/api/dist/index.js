@@ -121,11 +121,78 @@ const disputeSchema = z.object({
     reason: z.string().min(5),
     evidence: z.array(z.record(z.any())).default([])
 });
+const challengeIdParamSchema = z.object({
+    id: z.string().uuid(),
+});
+const listChallengesQuerySchema = z.object({
+    category: z.string().min(2).optional(),
+});
+const startChallengeSchema = z.object({
+    agentId: z.string().uuid(),
+});
+const submitChallengeSchema = z.object({
+    agentId: z.string().uuid(),
+    submission: z.record(z.any()),
+});
 function idempotencyKey(headers) {
     return String(headers["idempotency-key"] ?? randomUUID());
 }
 function toNumber(v) {
     return Number(v);
+}
+function parseBooleanish(value) {
+    if (typeof value !== "string")
+        return false;
+    const normalized = value.trim().toLowerCase();
+    return normalized === "true" || normalized === "1" || normalized === "yes";
+}
+function gradeSkillSubmission(expectedCriteria, submission) {
+    const mode = typeof expectedCriteria.mode === "string" ? expectedCriteria.mode : "";
+    if (mode === "keyword") {
+        const keywords = Array.isArray(expectedCriteria.keywords)
+            ? expectedCriteria.keywords.filter((k) => typeof k === "string")
+            : [];
+        const minMatches = typeof expectedCriteria.minMatches === "number" ? expectedCriteria.minMatches : keywords.length;
+        const haystack = JSON.stringify(submission ?? {}).toLowerCase();
+        const matched = keywords.filter((kw) => haystack.includes(kw.toLowerCase()));
+        const passed = matched.length >= minMatches;
+        const score = keywords.length > 0 ? Number(((matched.length / keywords.length) * 100).toFixed(2)) : 0;
+        return {
+            deterministic: true,
+            passed,
+            score,
+            gradingNotes: `Matched ${matched.length}/${keywords.length} required keywords`,
+        };
+    }
+    if (mode === "required_json_keys") {
+        if (!submission || typeof submission !== "object" || Array.isArray(submission)) {
+            return {
+                deterministic: true,
+                passed: false,
+                score: 0,
+                gradingNotes: "Submission must be a JSON object",
+            };
+        }
+        const requiredKeys = Array.isArray(expectedCriteria.requiredKeys)
+            ? expectedCriteria.requiredKeys.filter((k) => typeof k === "string")
+            : [];
+        const submissionRecord = submission;
+        const present = requiredKeys.filter((key) => submissionRecord[key] !== undefined);
+        const passed = requiredKeys.length > 0 && present.length === requiredKeys.length;
+        const score = requiredKeys.length > 0 ? Number(((present.length / requiredKeys.length) * 100).toFixed(2)) : 0;
+        return {
+            deterministic: true,
+            passed,
+            score,
+            gradingNotes: `Found ${present.length}/${requiredKeys.length} required keys`,
+        };
+    }
+    return {
+        deterministic: false,
+        passed: false,
+        score: null,
+        gradingNotes: "Submission queued for manual/AI grading",
+    };
 }
 async function audit(actorId, action, objectType, objectId, idem, payload) {
     await sql `
@@ -134,7 +201,12 @@ async function audit(actorId, action, objectType, objectId, idem, payload) {
   `;
 }
 async function recomputeMatches() {
-    const offers = await sql `SELECT * FROM offers WHERE status = 'active'`;
+    const offers = await sql `
+    SELECT o.*, COALESCE(a.skill_verification_count, 0)::int AS seller_skill_verification_count
+    FROM offers o
+    JOIN agents a ON a.id = o.agent_id
+    WHERE o.status = 'active'
+  `;
     const needs = await sql `SELECT * FROM needs WHERE status = 'open'`;
     let writes = 0;
     for (const offer of offers) {
@@ -146,10 +218,11 @@ async function recomputeMatches() {
                 ? 1
                 : Math.max(0, 1 - Math.abs(toNumber(offer.base_price) - toNumber(need.budget_max)) / Math.max(toNumber(need.budget_max), 1));
             const tagScore = Math.min(1, overlap.length / Math.max(offer.tags.length, 1));
-            const score = Number((0.7 * tagScore + 0.3 * budgetFit).toFixed(3));
+            const skillBoost = Number(offer.seller_skill_verification_count) > 0 ? 0.2 : 0;
+            const score = Number((0.7 * tagScore + 0.3 * budgetFit + skillBoost).toFixed(3));
             await sql `
         INSERT INTO matches (offer_id, need_id, score, reason_json)
-        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit })}::jsonb)
+        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, skillBoost })}::jsonb)
         ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
       `;
             writes += 1;
@@ -243,7 +316,7 @@ app.addHook("preHandler", async (request, reply) => {
     if (routePath.startsWith("/api/public/")) {
         return;
     }
-    const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/leaderboard"];
+    const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills"];
     if (request.method === "GET" && publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
         return;
     }
@@ -311,6 +384,199 @@ app.get("/api/agents/:id/reputation", async (request) => {
         reviewCount: Number(aggregate.review_count ?? 0)
     };
 });
+app.get("/api/skills/challenges", async (request) => {
+    const q = listChallengesQuerySchema.parse(request.query ?? {});
+    const rows = await sql `
+    SELECT
+      id,
+      category,
+      title,
+      description_md,
+      difficulty,
+      time_limit_minutes,
+      active,
+      created_at
+    FROM skill_challenges
+    WHERE active = TRUE
+      AND (${q.category ?? null}::text IS NULL OR category = ${q.category ?? null}::text)
+    ORDER BY created_at DESC
+  `;
+    return rows;
+});
+app.post("/api/skills/challenges/:id/start", async (request, reply) => {
+    const { id } = challengeIdParamSchema.parse(request.params);
+    const body = startChallengeSchema.parse(request.body);
+    const [challenge] = await sql `
+    SELECT * FROM skill_challenges
+    WHERE id = ${id} AND active = TRUE
+  `;
+    if (!challenge)
+        return reply.code(404).send({ error: "Challenge not found" });
+    const [existing] = await sql `
+    SELECT *
+    FROM skill_verifications
+    WHERE challenge_id = ${id}
+      AND agent_id = ${body.agentId}
+  `;
+    if (existing) {
+        if (existing.status === "in_progress" && new Date(existing.expires_at).getTime() > Date.now()) {
+            return {
+                verificationId: existing.id,
+                challengeId: id,
+                category: challenge.category,
+                title: challenge.title,
+                inputPayload: challenge.input_payload,
+                deadline: existing.expires_at,
+                status: existing.status,
+            };
+        }
+        const retryAt = new Date(existing.started_at);
+        retryAt.setHours(retryAt.getHours() + 24);
+        if (retryAt.getTime() > Date.now()) {
+            return reply.code(429).send({
+                error: "Challenge retry cooldown active",
+                retryAfter: retryAt.toISOString(),
+            });
+        }
+        await sql `DELETE FROM skill_verifications WHERE id = ${existing.id}`;
+    }
+    const [verification] = await sql `
+    INSERT INTO skill_verifications (agent_id, challenge_id, status, expires_at)
+    VALUES (
+      ${body.agentId},
+      ${id},
+      'in_progress',
+      NOW() + (${challenge.time_limit_minutes}::text || ' minutes')::interval
+    )
+    RETURNING *
+  `;
+    return reply.code(201).send({
+        verificationId: verification.id,
+        challengeId: id,
+        category: challenge.category,
+        title: challenge.title,
+        inputPayload: challenge.input_payload,
+        deadline: verification.expires_at,
+        status: verification.status,
+    });
+});
+app.post("/api/skills/challenges/:id/submit", async (request, reply) => {
+    const { id } = challengeIdParamSchema.parse(request.params);
+    const body = submitChallengeSchema.parse(request.body);
+    const [attempt] = await sql `
+    SELECT sv.*, sc.category, sc.expected_criteria
+    FROM skill_verifications sv
+    JOIN skill_challenges sc ON sc.id = sv.challenge_id
+    WHERE sv.challenge_id = ${id}
+      AND sv.agent_id = ${body.agentId}
+    LIMIT 1
+  `;
+    if (!attempt)
+        return reply.code(404).send({ error: "No challenge attempt found" });
+    if (attempt.status !== "in_progress") {
+        return reply.code(400).send({ error: `Attempt status is ${attempt.status}, expected in_progress` });
+    }
+    if (new Date(attempt.expires_at).getTime() <= Date.now()) {
+        await sql `
+      UPDATE skill_verifications
+      SET status = 'expired', submitted_at = NOW()
+      WHERE id = ${attempt.id}
+    `;
+        return reply.code(400).send({ error: "Challenge attempt expired" });
+    }
+    const criteria = typeof attempt.expected_criteria === "object" && attempt.expected_criteria !== null
+        ? attempt.expected_criteria
+        : {};
+    const grade = gradeSkillSubmission(criteria, body.submission);
+    let updatedAttempt;
+    if (grade.deterministic) {
+        const status = grade.passed ? "passed" : "failed";
+        [updatedAttempt] = await sql `
+      UPDATE skill_verifications
+      SET
+        submission = ${JSON.stringify(body.submission)}::jsonb,
+        status = ${status},
+        score = ${grade.score},
+        grading_notes = ${grade.gradingNotes},
+        submitted_at = NOW(),
+        graded_at = NOW()
+      WHERE id = ${attempt.id}
+      RETURNING *
+    `;
+        if (grade.passed) {
+            await sql `
+        UPDATE agents
+        SET
+          skills_verified = CASE
+            WHEN ${attempt.category} = ANY(skills_verified) THEN skills_verified
+            ELSE array_append(skills_verified, ${attempt.category})
+          END,
+          skill_verification_count = cardinality(
+            CASE
+              WHEN ${attempt.category} = ANY(skills_verified) THEN skills_verified
+              ELSE array_append(skills_verified, ${attempt.category})
+            END
+          )
+        WHERE id = ${body.agentId}
+      `;
+        }
+    }
+    else {
+        [updatedAttempt] = await sql `
+      UPDATE skill_verifications
+      SET
+        submission = ${JSON.stringify(body.submission)}::jsonb,
+        status = 'submitted',
+        grading_notes = ${grade.gradingNotes},
+        submitted_at = NOW()
+      WHERE id = ${attempt.id}
+      RETURNING *
+    `;
+    }
+    return {
+        verificationId: updatedAttempt?.id,
+        challengeId: id,
+        status: updatedAttempt?.status,
+        passed: updatedAttempt?.status === "passed",
+        score: updatedAttempt?.score ?? null,
+        gradingNotes: updatedAttempt?.grading_notes ?? null,
+    };
+});
+app.get("/api/agents/:id/skills", async (request, reply) => {
+    const { id } = challengeIdParamSchema.parse(request.params);
+    const [agent] = await sql `
+    SELECT id, COALESCE(skills_verified, '{}'::text[]) AS skills_verified, COALESCE(skill_verification_count, 0)::int AS skill_verification_count
+    FROM agents
+    WHERE id = ${id}
+  `;
+    if (!agent)
+        return reply.code(404).send({ error: "Agent not found" });
+    const history = await sql `
+    SELECT
+      sv.id,
+      sv.challenge_id,
+      sc.category,
+      sc.title,
+      sc.difficulty,
+      sv.status,
+      sv.score,
+      sv.grading_notes,
+      sv.started_at,
+      sv.submitted_at,
+      sv.graded_at,
+      sv.expires_at
+    FROM skill_verifications sv
+    JOIN skill_challenges sc ON sc.id = sv.challenge_id
+    WHERE sv.agent_id = ${id}
+    ORDER BY sv.started_at DESC
+  `;
+    return {
+        agentId: id,
+        skillsVerified: agent.skills_verified,
+        verificationCount: Number(agent.skill_verification_count),
+        history,
+    };
+});
 app.post("/api/offers", async (request, reply) => {
     const idem = idempotencyKey(request.headers);
     const body = createOfferSchema.parse(request.body);
@@ -361,18 +627,27 @@ app.post("/api/offers/:id/archive", async (request) => {
     return offer;
 });
 app.get("/api/offers", async (request) => {
-    const q = request.query;
+    const q = z.object({
+        query: z.string().optional(),
+        tags: z.string().optional(),
+        minPrice: z.string().optional(),
+        maxPrice: z.string().optional(),
+        verifiedOnly: z.string().optional(),
+    }).parse(request.query ?? {});
     const tags = q.tags ? q.tags.split(",").filter(Boolean) : [];
     const query = `%${q.query ?? ""}%`;
     const min = q.minPrice ? Number(q.minPrice) : 0;
     const max = q.maxPrice ? Number(q.maxPrice) : Number.MAX_SAFE_INTEGER;
+    const verifiedOnly = parseBooleanish(q.verifiedOnly);
     const rows = await sql `
-    SELECT * FROM offers
-    WHERE status = 'active'
-      AND (title ILIKE ${query} OR description_md ILIKE ${query})
-      AND base_price BETWEEN ${min} AND ${max}
-      AND (${tags.length} = 0 OR tags && ${tags})
-    ORDER BY created_at DESC
+    SELECT o.* FROM offers o
+    JOIN agents a ON a.id = o.agent_id
+    WHERE o.status = 'active'
+      AND (o.title ILIKE ${query} OR o.description_md ILIKE ${query})
+      AND o.base_price BETWEEN ${min} AND ${max}
+      AND (${tags.length} = 0 OR o.tags && ${tags})
+      AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)
+    ORDER BY o.created_at DESC
     LIMIT 200
   `;
     return rows;
@@ -457,14 +732,21 @@ app.get("/api/needs/:id", async (request, reply) => {
     return need;
 });
 app.get("/api/matches/recommendations", async (request) => {
-    const q = request.query;
+    const q = z.object({
+        agentId: z.string().uuid().optional(),
+        limit: z.string().optional(),
+        verifiedOnly: z.string().optional(),
+    }).parse(request.query ?? {});
     const limit = Number(q.limit ?? 20);
+    const verifiedOnly = parseBooleanish(q.verifiedOnly);
     const rows = await sql `
     SELECT m.*, o.title AS offer_title, n.title AS need_title
     FROM matches m
     JOIN offers o ON o.id = m.offer_id
     JOIN needs n ON n.id = m.need_id
+    JOIN agents a ON a.id = o.agent_id
     WHERE (${q.agentId ?? null}::uuid IS NULL OR o.agent_id = ${q.agentId ?? null}::uuid OR n.agent_id = ${q.agentId ?? null}::uuid)
+      AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)
     ORDER BY m.score DESC
     LIMIT ${limit}
   `;
@@ -984,11 +1266,15 @@ app.get("/api/leaderboard", async (request) => {
         orderClause = "completed_deals DESC";
     else if (sortBy === "volume")
         orderClause = "total_volume DESC";
+    else if (sortBy === "skills")
+        orderClause = "skill_verification_count DESC";
     const rows = await sql.unsafe(`
     SELECT
       a.id AS agent_id,
       a.display_name AS name,
       a.created_at AS member_since,
+      COALESCE(a.skills_verified, '{}'::text[]) AS skills_verified,
+      COALESCE(a.skill_verification_count, 0)::int AS skill_verification_count,
       COALESCE(f.avg_score, 0) AS reputation_score,
       COALESCE(f.review_count, 0)::int AS review_count,
       COALESCE(ds.completed_deals, 0)::int AS completed_deals,
@@ -1029,6 +1315,8 @@ app.get("/api/leaderboard", async (request) => {
             reputationScore,
             reviewCount: Number(row.review_count),
             completedDeals,
+            skillsVerified: row.skills_verified,
+            verificationCount: Number(row.skill_verification_count),
             totalVolume: Number(Number(row.total_volume).toFixed(2)),
             disputeRate: totalDeals > 0 ? Number((disputedDeals / totalDeals).toFixed(4)) : 0,
             memberSince: row.member_since,
