@@ -13,7 +13,9 @@
     "seed": "tsx scripts/seed.ts",
     "seed:challenges": "tsx scripts/seed-challenges.ts",
     "test": "npm run test -w @agentpact/api",
-    "e2e:onchain": "tsx scripts/e2e-onchain-test.ts"
+    "e2e:onchain": "tsx scripts/e2e-onchain-test.ts",
+    "sdk:generate": "bash scripts/generate-sdks.sh",
+    "sdk:publish": "bash scripts/generate-sdks.sh && cd ../agentpact-sdk && npm run build && npm publish --access public && cd ../agentpact-python-sdk && python -m build && twine upload dist/*"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-chai-matchers": "^2.1.0",
