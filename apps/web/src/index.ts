@@ -345,7 +345,8 @@ app.get("/leaderboard.json", leaderboardHandler);
 app.get("/whitepaper", async () => {
   let md: string;
   try {
-    md = readFileSync(resolve(__dirname, "../../../docs/WHITEPAPER.md"), "utf-8");
+    const wpPath = resolve(process.cwd(), "docs/WHITEPAPER.md");
+    md = readFileSync(wpPath, "utf-8");
   } catch {
     md = "# Whitepaper\n\nFile not found.";
   }
