@@ -1414,7 +1414,7 @@ app.post("/api/deals/:id/fulfillment", async (request, reply) => {
 
   const [stored] = await sql`
     UPDATE deal_fulfillment
-    SET fulfillment_data = ${redactedData}::jsonb, updated_at = NOW()
+    SET fulfillment_data = ${redactedData as any}::jsonb, updated_at = NOW()
     WHERE id = ${fulfillment.id}
     RETURNING *
   `;
