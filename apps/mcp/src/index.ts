@@ -214,6 +214,19 @@ const tools: Tool[] = [
           description:
             "Maximum percentage the price can deviate during negotiation (e.g. 10 means ±10%). Defaults to 0 if omitted.",
         },
+        fulfillmentType: {
+          type: "string",
+          enum: [
+            "api-access",
+            "code-task",
+            "data-delivery",
+            "compute-access",
+            "consulting",
+            "generic",
+          ],
+          description:
+            "Optional fulfillment template type used after deal acceptance. Defaults to 'generic'.",
+        },
         apiKey: {
           type: "string",
           description:
@@ -389,6 +402,19 @@ const tools: Tool[] = [
           items: { type: "string" },
           description:
             "A list of criteria that must be met for the delivery to be accepted (e.g. ['JSON format', 'Updated daily by 9 AM UTC'])",
+        },
+        fulfillmentType: {
+          type: "string",
+          enum: [
+            "api-access",
+            "code-task",
+            "data-delivery",
+            "compute-access",
+            "consulting",
+            "generic",
+          ],
+          description:
+            "Optional fulfillment template type used after deal acceptance. Defaults to 'generic'.",
         },
         apiKey: {
           type: "string",
@@ -756,6 +782,162 @@ const tools: Tool[] = [
   },
 
   // ── Payments ──
+  {
+    name: "agentpact.list_fulfillment_types",
+    description:
+      "List all supported fulfillment template types and their fields. Use this before providing deal fulfillment details so payloads match the required schema.",
+    annotations: {
+      title: "List Fulfillment Types",
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        apiKey: {
+          type: "string",
+          description:
+            "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
+  {
+    name: "agentpact.provide_fulfillment",
+    description:
+      "As the seller, submit structured fulfillment details for an accepted deal (credentials, URLs, access info, etc.). The payload is validated against the deal's fulfillment type schema.",
+    annotations: {
+      title: "Provide Fulfillment",
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["dealId", "agentId", "fulfillmentData"],
+      properties: {
+        dealId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of the deal",
+        },
+        agentId: {
+          type: "string",
+          format: "uuid",
+          description: "The seller agent UUID providing fulfillment data",
+        },
+        fulfillmentData: {
+          type: "object",
+          description: "Structured fulfillment payload matching the selected fulfillment type",
+        },
+        apiKey: {
+          type: "string",
+          description:
+            "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
+  {
+    name: "agentpact.get_fulfillment",
+    description:
+      "Get fulfillment details and current fulfillment status for a deal. Only the buyer or seller party can access this data.",
+    annotations: {
+      title: "Get Fulfillment",
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["dealId", "agentId"],
+      properties: {
+        dealId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of the deal",
+        },
+        agentId: {
+          type: "string",
+          format: "uuid",
+          description: "The requesting party UUID (must be buyer or seller)",
+        },
+        apiKey: {
+          type: "string",
+          description:
+            "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
+  {
+    name: "agentpact.verify_fulfillment",
+    description:
+      "As the buyer, verify whether provided fulfillment details are valid. Accepted fulfillment becomes active; rejected fulfillment returns to pending for seller re-provisioning.",
+    annotations: {
+      title: "Verify Fulfillment",
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["dealId", "agentId", "accepted"],
+      properties: {
+        dealId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of the deal",
+        },
+        agentId: {
+          type: "string",
+          format: "uuid",
+          description: "The buyer agent UUID verifying fulfillment",
+        },
+        accepted: {
+          type: "boolean",
+          description: "Set true to approve fulfillment, false to reject",
+        },
+        notes: {
+          type: "string",
+          description: "Optional buyer notes for verification outcome",
+        },
+        apiKey: {
+          type: "string",
+          description:
+            "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
+  {
+    name: "agentpact.revoke_fulfillment",
+    description:
+      "As the seller, revoke previously provided fulfillment access for a deal (for example after completion or expiry).",
+    annotations: {
+      title: "Revoke Fulfillment",
+      readOnlyHint: false,
+      destructiveHint: true,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["dealId", "agentId"],
+      properties: {
+        dealId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of the deal",
+        },
+        agentId: {
+          type: "string",
+          format: "uuid",
+          description: "The seller agent UUID revoking fulfillment",
+        },
+        apiKey: {
+          type: "string",
+          description:
+            "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
   {
     name: "agentpact.create_payment_intent",
     description:
@@ -1195,6 +1377,9 @@ const tools: Tool[] = [
               "deal.proposed",
               "deal.accepted",
               "deal.cancelled",
+              "deal.fulfillment_provided",
+              "deal.fulfillment_verified",
+              "deal.fulfillment_revoked",
               "payment.funded",
               "payment.released",
               "milestone.completed",
@@ -1427,6 +1612,29 @@ function handleToolCall(name: string, rawArgs: Json) {
           args,
           apiKey,
         ),
+      );
+    case "agentpact.list_fulfillment_types":
+      return textResult(api("/api/fulfillment/types", "GET", undefined, apiKey));
+    case "agentpact.provide_fulfillment":
+      return textResult(
+        api(`/api/deals/${String(args.dealId)}/fulfillment`, "POST", args, apiKey),
+      );
+    case "agentpact.get_fulfillment":
+      return textResult(
+        api(
+          `/api/deals/${String(args.dealId)}/fulfillment?${new URLSearchParams({ agentId: String(args.agentId) }).toString()}`,
+          "GET",
+          undefined,
+          apiKey,
+        ),
+      );
+    case "agentpact.verify_fulfillment":
+      return textResult(
+        api(`/api/deals/${String(args.dealId)}/fulfillment/verify`, "POST", args, apiKey),
+      );
+    case "agentpact.revoke_fulfillment":
+      return textResult(
+        api(`/api/deals/${String(args.dealId)}/fulfillment/revoke`, "POST", args, apiKey),
       );
 
     // Payments

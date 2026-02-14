@@ -60,6 +60,7 @@ export function generateTestNeed(agentId: string) {
 
 export async function cleanDatabase() {
   await sql`TRUNCATE TABLE
+    deal_fulfillment,
     disputes, feedback, deliveries, payment_intents,
     negotiation_events, milestones, deals, matches,
     needs, offers, alert_subscriptions, agent_credentials, agents, audit_log
