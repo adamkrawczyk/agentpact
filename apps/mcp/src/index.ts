@@ -860,6 +860,11 @@ const tools: Tool[] = [
           format: "uuid",
           description: "The requesting party UUID (must be buyer or seller)",
         },
+        decrypt: {
+          type: "boolean",
+          description:
+            "When true, request decrypted sensitive fields. Only valid for deal participants.",
+        },
         apiKey: {
           type: "string",
           description:
@@ -929,6 +934,80 @@ const tools: Tool[] = [
           type: "string",
           format: "uuid",
           description: "The seller agent UUID revoking fulfillment",
+        },
+        apiKey: {
+          type: "string",
+          description:
+            "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
+  {
+    name: "agentpact.rotate_credential",
+    description:
+      "As the seller, rotate one encrypted credential field for a deal fulfillment record.",
+    annotations: {
+      title: "Rotate Credential",
+      readOnlyHint: false,
+      destructiveHint: true,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["dealId", "agentId", "fieldName", "newValue"],
+      properties: {
+        dealId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of the deal",
+        },
+        agentId: {
+          type: "string",
+          format: "uuid",
+          description: "The seller agent UUID rotating the credential",
+        },
+        fieldName: {
+          type: "string",
+          description: "The fulfillment field name to rotate (for example auth_value)",
+        },
+        newValue: {
+          type: "string",
+          description: "The new secret value to encrypt and store",
+        },
+        apiKey: {
+          type: "string",
+          description:
+            "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
+  {
+    name: "agentpact.request_rotation",
+    description:
+      "As the buyer, request that the seller rotate fulfillment credentials.",
+    annotations: {
+      title: "Request Rotation",
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["dealId", "agentId"],
+      properties: {
+        dealId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of the deal",
+        },
+        agentId: {
+          type: "string",
+          format: "uuid",
+          description: "The buyer agent UUID requesting rotation",
+        },
+        reason: {
+          type: "string",
+          description: "Optional explanation for the rotation request",
         },
         apiKey: {
           type: "string",
@@ -1380,6 +1459,10 @@ const tools: Tool[] = [
               "deal.fulfillment_provided",
               "deal.fulfillment_verified",
               "deal.fulfillment_revoked",
+              "deal.credential_rotated",
+              "deal.rotation_requested",
+              "deal.fulfillment_expiring",
+              "deal.fulfillment_expired",
               "payment.funded",
               "payment.released",
               "milestone.completed",
@@ -1620,11 +1703,35 @@ function handleToolCall(name: string, rawArgs: Json) {
         api(`/api/deals/${String(args.dealId)}/fulfillment`, "POST", args, apiKey),
       );
     case "agentpact.get_fulfillment":
+      {
+        const query = new URLSearchParams({
+          agentId: String(args.agentId),
+          decrypt: String(Boolean(args.decrypt ?? false)),
+        }).toString();
+        return textResult(
+          api(
+            `/api/deals/${String(args.dealId)}/fulfillment?${query}`,
+            "GET",
+            undefined,
+            apiKey,
+          ),
+        );
+      }
+    case "agentpact.rotate_credential":
       return textResult(
         api(
-          `/api/deals/${String(args.dealId)}/fulfillment?${new URLSearchParams({ agentId: String(args.agentId) }).toString()}`,
-          "GET",
-          undefined,
+          `/api/deals/${String(args.dealId)}/fulfillment/rotate`,
+          "POST",
+          args,
+          apiKey,
+        ),
+      );
+    case "agentpact.request_rotation":
+      return textResult(
+        api(
+          `/api/deals/${String(args.dealId)}/fulfillment/request-rotation`,
+          "POST",
+          args,
           apiKey,
         ),
       );
