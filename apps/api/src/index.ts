@@ -9,8 +9,11 @@ import { registerHealthChecks } from "./health.js";
 import { registerWebhookRoutes, notifyAgents } from "./webhooks.js";
 import { autoVerify } from "./auto-verify.js";
 import {
+  decrypt,
   ensureCredentialVaultSchema,
+  encrypt,
   getCredentialEncryptionKey,
+  getSensitiveFields,
   vaultRetrieve,
   vaultRotate,
   vaultStore,
@@ -63,6 +66,24 @@ export const sql = postgres(DATABASE_URL, { max: 10 });
 export const app = Fastify({ logger: true });
 const vaultSql = sql as unknown as Sql<Record<string, unknown>>;
 const credentialEncryptionKey = getCredentialEncryptionKey();
+
+async function ensurePhysicalServiceSchema(): Promise<void> {
+  await sql`ALTER TABLE offers ADD COLUMN IF NOT EXISTS location JSONB DEFAULT NULL`;
+  await sql`ALTER TABLE needs ADD COLUMN IF NOT EXISTS location JSONB DEFAULT NULL`;
+  await sql`ALTER TABLE deal_fulfillment ADD COLUMN IF NOT EXISTS buyer_data JSONB DEFAULT NULL`;
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_offers_location_country
+    ON offers ((location->>'country'))
+    WHERE location IS NOT NULL
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_needs_location_country
+    ON needs ((location->>'country'))
+    WHERE location IS NOT NULL
+  `;
+}
+
+await ensurePhysicalServiceSchema();
 
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
 
@@ -184,6 +205,33 @@ const FULFILLMENT_TYPES = {
     }),
     autoVerify: null,
   },
+  "physical-service": {
+    label: "Physical Service",
+    description: "On-site service requiring physical presence (repair, installation, delivery, inspection)",
+    fields: {
+      service_type: { type: "enum", values: ["repair", "installation", "delivery", "inspection", "cleaning", "other"], required: true },
+      service_date: { type: "string", format: "datetime", required: true },
+      secret_address: { type: "string", required: true },
+      secret_access_notes: { type: "string", required: false },
+      contact_method: { type: "enum", values: ["phone", "email", "in-app"], required: false },
+      secret_contact_value: { type: "string", required: false },
+      proof_type: { type: "enum", values: ["photo", "video", "signed-confirmation", "none"], required: false },
+      proof_url: { type: "string", format: "url", required: false },
+      completion_notes: { type: "string", required: false },
+    },
+    schema: z.object({
+      service_type: z.enum(["repair", "installation", "delivery", "inspection", "cleaning", "other"]),
+      service_date: z.string().datetime(),
+      secret_address: z.string(),
+      secret_access_notes: z.string().optional(),
+      contact_method: z.enum(["phone", "email", "in-app"]).optional(),
+      secret_contact_value: z.string().optional(),
+      proof_type: z.enum(["photo", "video", "signed-confirmation", "none"]).optional(),
+      proof_url: z.string().url().optional(),
+      completion_notes: z.string().optional(),
+    }),
+    autoVerify: false,
+  },
   generic: {
     label: "Generic",
     description: "Any other service — describe what you'll deliver",
@@ -209,8 +257,16 @@ const fulfillmentTypeSchema = z.enum([
   "data-delivery",
   "compute-access",
   "consulting",
+  "physical-service",
   "generic",
 ]);
+
+const locationSchema = z.object({
+  city: z.string().min(1).optional(),
+  region: z.string().optional(),
+  country: z.string().optional(),
+  remote: z.boolean().optional(),
+}).optional();
 
 const createOfferSchema = z.object({
   agentId: z.string().uuid(),
@@ -224,6 +280,7 @@ const createOfferSchema = z.object({
   slaDays: z.number().int().positive().default(7),
   proofs: z.array(z.record(z.any())).default([]),
   fulfillmentType: fulfillmentTypeSchema.optional().default("generic"),
+  location: locationSchema,
 });
 
 const createNeedSchema = z.object({
@@ -238,6 +295,7 @@ const createNeedSchema = z.object({
   acceptanceCriteria: z.array(z.string()).default([]),
   deadlineAt: z.string().datetime().optional(),
   fulfillmentType: fulfillmentTypeSchema.optional().default("generic"),
+  location: locationSchema,
 });
 
 const proposeDealSchema = z.object({
@@ -283,6 +341,11 @@ const verifyDeliverySchema = z.object({
 const provideFulfillmentSchema = z.object({
   agentId: z.string().uuid(),
   fulfillmentData: z.record(z.any()),
+});
+
+const provideBuyerFulfillmentSchema = z.object({
+  agentId: z.string().uuid(),
+  buyerData: z.record(z.any()),
 });
 
 const getFulfillmentSchema = z.object({
@@ -370,6 +433,70 @@ function asRecord(value: unknown): Record<string, unknown> {
     return value as Record<string, unknown>;
   }
   return {};
+}
+
+const BUYER_VAULT_PREFIX = "buyer__";
+
+async function storeBuyerContext(
+  fulfillmentId: string,
+  fulfillmentType: string,
+  data: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  await ensureCredentialVaultSchema(vaultSql);
+
+  const redacted: Record<string, unknown> = { ...data };
+  const configured = new Set(getSensitiveFields(fulfillmentType));
+  const prefixed = Object.keys(data).filter((field) => field.startsWith("secret_"));
+  const sensitiveFields = new Set([...configured, ...prefixed]);
+
+  for (const fieldName of sensitiveFields) {
+    if (!(fieldName in data)) continue;
+    const value = data[fieldName];
+    if (value === undefined || value === null) continue;
+
+    const plaintext = typeof value === "string" ? value : JSON.stringify(value);
+    const { encrypted, iv, authTag } = encrypt(plaintext, credentialEncryptionKey);
+
+    await sql`
+      INSERT INTO credential_vault (fulfillment_id, field_name, encrypted_value, iv, auth_tag)
+      VALUES (${fulfillmentId}, ${`${BUYER_VAULT_PREFIX}${fieldName}`}, ${encrypted}, ${iv}, ${authTag})
+      ON CONFLICT (fulfillment_id, field_name) DO UPDATE SET
+        encrypted_value = EXCLUDED.encrypted_value,
+        iv = EXCLUDED.iv,
+        auth_tag = EXCLUDED.auth_tag,
+        last_rotated_at = NOW()
+    `;
+
+    redacted[fieldName] = "[encrypted]";
+  }
+
+  return redacted;
+}
+
+async function retrieveBuyerContext(
+  fulfillmentId: string,
+  data: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  await ensureCredentialVaultSchema(vaultSql);
+  const merged: Record<string, unknown> = { ...data };
+  const rows = await sql`
+    SELECT field_name, encrypted_value, iv, auth_tag
+    FROM credential_vault
+    WHERE fulfillment_id = ${fulfillmentId}
+      AND field_name LIKE ${`${BUYER_VAULT_PREFIX}%`}
+  `;
+
+  for (const row of rows) {
+    const fieldName = String(row.field_name).slice(BUYER_VAULT_PREFIX.length);
+    merged[fieldName] = decrypt(
+      String(row.encrypted_value),
+      String(row.iv),
+      String(row.auth_tag),
+      credentialEncryptionKey,
+    );
+  }
+
+  return merged;
 }
 
 async function logCredentialAccess(
@@ -945,13 +1072,14 @@ app.get("/api/agents/:id/skills", async (request, reply) => {
 app.post("/api/offers", async (request, reply) => {
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
   const body = createOfferSchema.parse(request.body);
+  const location = body.location ?? null;
 
   const [offer] = await sql`
     INSERT INTO offers (
-      agent_id, title, description_md, category, tags, base_price, currency, max_price_delta_pct, sla_days, proofs_json, fulfillment_type
+      agent_id, title, description_md, category, tags, base_price, currency, max_price_delta_pct, sla_days, proofs_json, fulfillment_type, location
     ) VALUES (
       ${body.agentId}, ${body.title}, ${body.descriptionMd}, ${body.category}, ${body.tags}, ${body.basePrice},
-      ${body.currency}, ${body.maxPriceDeltaPct}, ${body.slaDays}, ${JSON.stringify(body.proofs)}::jsonb, ${body.fulfillmentType}
+      ${body.currency}, ${body.maxPriceDeltaPct}, ${body.slaDays}, ${JSON.stringify(body.proofs)}::jsonb, ${body.fulfillmentType}, ${location as any}::jsonb
     )
     RETURNING *
   `;
@@ -973,6 +1101,7 @@ app.patch("/api/offers/:id", async (request) => {
   const slaDays = body.slaDays ?? null;
   const proofsJson = body.proofs ? JSON.stringify(body.proofs) : null;
   const fulfillmentType = body.fulfillmentType ?? null;
+  const location = body.location ?? null;
   const [offer] = await sql`
     UPDATE offers SET
       title = COALESCE(${title}, title),
@@ -984,6 +1113,7 @@ app.patch("/api/offers/:id", async (request) => {
       sla_days = COALESCE(${slaDays}, sla_days),
       proofs_json = COALESCE(${proofsJson}::jsonb, proofs_json),
       fulfillment_type = COALESCE(${fulfillmentType}, fulfillment_type),
+      location = COALESCE(${location as any}::jsonb, location),
       updated_at = NOW()
     WHERE id = ${id}
     RETURNING *
@@ -1039,13 +1169,14 @@ app.post("/api/needs", async (request, reply) => {
   const budgetMin = body.budgetMin ?? null;
   const budgetMax = body.budgetMax ?? null;
   const deadlineAt = body.deadlineAt ?? null;
+  const location = body.location ?? null;
 
   const [need] = await sql`
     INSERT INTO needs (
-      agent_id, title, description_md, category, tags, budget_min, budget_max, currency, acceptance_criteria, deadline_at, fulfillment_type
+      agent_id, title, description_md, category, tags, budget_min, budget_max, currency, acceptance_criteria, deadline_at, fulfillment_type, location
     ) VALUES (
       ${body.agentId}, ${body.title}, ${body.descriptionMd}, ${body.category}, ${body.tags},
-      ${budgetMin}, ${budgetMax}, ${body.currency}, ${JSON.stringify(body.acceptanceCriteria)}::jsonb, ${deadlineAt}, ${body.fulfillmentType}
+      ${budgetMin}, ${budgetMax}, ${body.currency}, ${JSON.stringify(body.acceptanceCriteria)}::jsonb, ${deadlineAt}, ${body.fulfillmentType}, ${location as any}::jsonb
     ) RETURNING *
   `;
 
@@ -1066,6 +1197,7 @@ app.patch("/api/needs/:id", async (request) => {
   const acceptanceCriteria = body.acceptanceCriteria ? JSON.stringify(body.acceptanceCriteria) : null;
   const deadlineAt = body.deadlineAt ?? null;
   const fulfillmentType = body.fulfillmentType ?? null;
+  const location = body.location ?? null;
   const [need] = await sql`
     UPDATE needs SET
       title = COALESCE(${title}, title),
@@ -1077,6 +1209,7 @@ app.patch("/api/needs/:id", async (request) => {
       acceptance_criteria = COALESCE(${acceptanceCriteria}::jsonb, acceptance_criteria),
       deadline_at = COALESCE(${deadlineAt}, deadline_at),
       fulfillment_type = COALESCE(${fulfillmentType}, fulfillment_type),
+      location = COALESCE(${location as any}::jsonb, location),
       updated_at = NOW()
     WHERE id = ${id}
     RETURNING *
@@ -1434,6 +1567,58 @@ app.post("/api/deals/:id/fulfillment", async (request, reply) => {
   return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields });
 });
 
+app.post("/api/deals/:id/fulfillment/buyer", async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = provideBuyerFulfillmentSchema.parse(request.body);
+
+  const [deal] = await sql`
+    SELECT d.id, d.status, d.buyer_agent_id, d.seller_agent_id, o.fulfillment_type
+    FROM deals d
+    JOIN offers o ON o.id = d.offer_id
+    WHERE d.id = ${id}
+  `;
+  if (!deal) return reply.code(404).send({ error: "Deal not found" });
+  if (body.agentId !== deal.buyer_agent_id) return reply.code(403).send({ error: "Only buyer can provide buyer fulfillment context" });
+  if (!["active", "delivered", "completed"].includes(String(deal.status))) {
+    return reply.code(400).send({ error: `Deal status ${deal.status} cannot accept buyer fulfillment context` });
+  }
+
+  const typeKey = String(deal.fulfillment_type);
+  const parsedRecord = asRecord(body.buyerData);
+  const [fulfillment] = await sql`
+    INSERT INTO deal_fulfillment (
+      deal_id, fulfillment_type, buyer_data, status, updated_at
+    ) VALUES (
+      ${id}, ${typeKey}, '{}'::jsonb, 'pending', NOW()
+    )
+    ON CONFLICT (deal_id) DO UPDATE SET
+      fulfillment_type = EXCLUDED.fulfillment_type,
+      updated_at = NOW()
+    RETURNING *
+  `;
+
+  const redactedData = await storeBuyerContext(String(fulfillment.id), typeKey, parsedRecord);
+  const encryptedFields = Object.entries(redactedData)
+    .filter(([, value]) => value === "[encrypted]")
+    .map(([field]) => field);
+
+  const [stored] = await sql`
+    UPDATE deal_fulfillment
+    SET buyer_data = ${redactedData as any}::jsonb, updated_at = NOW()
+    WHERE id = ${fulfillment.id}
+    RETURNING *
+  `;
+
+  notifyAgents(sql, [deal.seller_agent_id], "deal.buyer_context_provided", {
+    dealId: id,
+    buyerAgentId: body.agentId,
+    fulfillmentType: typeKey,
+    encryptedFields,
+  });
+
+  return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields });
+});
+
 app.get("/api/deals/:id/fulfillment", async (request, reply) => {
   const { id } = request.params as { id: string };
   const query = getFulfillmentSchema.parse(request.query ?? {});
@@ -1462,20 +1647,33 @@ app.get("/api/deals/:id/fulfillment", async (request, reply) => {
     },
   );
 
-  if (!query.decrypt) {
-    return checked;
+  const isBuyer = query.agentId === deal.buyer_agent_id;
+  const canDecryptBuyerData = isBuyer || query.decrypt;
+
+  const rawBuyerData = checked.buyer_data;
+  const buyerDataRecord = asRecord(rawBuyerData);
+  const fulfillmentDataRecord = asRecord(checked.fulfillment_data);
+
+  let fulfillmentData = fulfillmentDataRecord as Record<string, unknown>;
+  if (query.decrypt) {
+    fulfillmentData = await vaultRetrieve(
+      vaultSql,
+      String(checked.id),
+      fulfillmentDataRecord,
+      credentialEncryptionKey,
+    );
   }
 
-  const decryptedData = await vaultRetrieve(
-    vaultSql,
-    String(checked.id),
-    asRecord(checked.fulfillment_data),
-    credentialEncryptionKey,
-  );
+  let buyerData: Record<string, unknown> | null = rawBuyerData === null ? null : buyerDataRecord;
+  if (canDecryptBuyerData && (Object.keys(buyerDataRecord).length > 0 || rawBuyerData !== null)) {
+    buyerData = await retrieveBuyerContext(String(checked.id), buyerDataRecord);
+  }
 
-  await logCredentialAccess(String(checked.id), query.agentId, "decrypt", request.ip);
+  if (query.decrypt) {
+    await logCredentialAccess(String(checked.id), query.agentId, "decrypt", request.ip);
+  }
 
-  return { ...checked, fulfillment_data: decryptedData };
+  return { ...checked, fulfillment_data: fulfillmentData, buyer_data: buyerData };
 });
 
 app.post("/api/deals/:id/fulfillment/rotate", async (request, reply) => {

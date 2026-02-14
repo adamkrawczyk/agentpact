@@ -222,10 +222,22 @@ const tools: Tool[] = [
             "data-delivery",
             "compute-access",
             "consulting",
+            "physical-service",
             "generic",
           ],
           description:
             "Optional fulfillment template type used after deal acceptance. Defaults to 'generic'.",
+        },
+        location: {
+          type: "object",
+          description:
+            "Optional coarse location for physical services. Keep this non-sensitive (city/region/country/remote) and do not include exact address.",
+          properties: {
+            city: { type: "string" },
+            region: { type: "string" },
+            country: { type: "string" },
+            remote: { type: "boolean" },
+          },
         },
         apiKey: {
           type: "string",
@@ -411,10 +423,22 @@ const tools: Tool[] = [
             "data-delivery",
             "compute-access",
             "consulting",
+            "physical-service",
             "generic",
           ],
           description:
             "Optional fulfillment template type used after deal acceptance. Defaults to 'generic'.",
+        },
+        location: {
+          type: "object",
+          description:
+            "Optional coarse location for physical services. Keep this non-sensitive (city/region/country/remote) and do not include exact address.",
+          properties: {
+            city: { type: "string" },
+            region: { type: "string" },
+            country: { type: "string" },
+            remote: { type: "boolean" },
+          },
         },
         apiKey: {
           type: "string",
@@ -785,7 +809,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.list_fulfillment_types",
     description:
-      "List all supported fulfillment template types and their fields. Use this before providing deal fulfillment details so payloads match the required schema.",
+      "List all supported fulfillment template types and their fields (including physical-service for two-sided on-site workflows). Use this before providing deal fulfillment details so payloads match the required schema.",
     annotations: {
       title: "List Fulfillment Types",
       readOnlyHint: true,
@@ -828,6 +852,41 @@ const tools: Tool[] = [
         fulfillmentData: {
           type: "object",
           description: "Structured fulfillment payload matching the selected fulfillment type",
+        },
+        apiKey: {
+          type: "string",
+          description:
+            "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
+  {
+    name: "agentpact.provide_buyer_context",
+    description:
+      "As the buyer, submit private context for a deal fulfillment (for example address or access notes). Sensitive fields are encrypted at rest by the credential vault.",
+    annotations: {
+      title: "Provide Buyer Context",
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["dealId", "agentId", "buyerData"],
+      properties: {
+        dealId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of the deal",
+        },
+        agentId: {
+          type: "string",
+          format: "uuid",
+          description: "The buyer agent UUID providing buyer context",
+        },
+        buyerData: {
+          type: "object",
+          description: "Buyer-side fulfillment payload (e.g., service date, address, access notes, contact method)",
         },
         apiKey: {
           type: "string",
@@ -1457,6 +1516,7 @@ const tools: Tool[] = [
               "deal.accepted",
               "deal.cancelled",
               "deal.fulfillment_provided",
+              "deal.buyer_context_provided",
               "deal.fulfillment_verified",
               "deal.fulfillment_revoked",
               "deal.credential_rotated",
@@ -1701,6 +1761,10 @@ function handleToolCall(name: string, rawArgs: Json) {
     case "agentpact.provide_fulfillment":
       return textResult(
         api(`/api/deals/${String(args.dealId)}/fulfillment`, "POST", args, apiKey),
+      );
+    case "agentpact.provide_buyer_context":
+      return textResult(
+        api(`/api/deals/${String(args.dealId)}/fulfillment/buyer`, "POST", args, apiKey),
       );
     case "agentpact.get_fulfillment":
       {

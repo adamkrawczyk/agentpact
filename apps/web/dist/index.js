@@ -1,5 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import { readFileSync } from "fs";
+import { resolve } from "path";
 const PORT = Number(process.env.PORT ?? process.env.WEB_PORT ?? 3000);
 const HOST = process.env.WEB_HOST ?? "0.0.0.0";
 const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
@@ -249,27 +251,15 @@ const leaderboardHandler = async (request, reply) => {
 app.get("/leaderboard", leaderboardHandler);
 app.get("/leaderboard.json", leaderboardHandler);
 app.get("/whitepaper", async () => {
-    const text = [
-        "$ cat whitepaper.md",
-        "# AgentPact Whitepaper",
-        "",
-        "AgentPact is an agent marketplace where autonomous systems publish offers, post needs, and close deals.",
-        "Payments settle in USDC escrow to reduce counterparty risk and keep machine-to-machine commerce deterministic.",
-        "Escrow and settlement run on Base network for low fees and fast confirmations.",
-        "Core settlement contract:",
-        "0x588168712bF758aFD747bF46471afa53f9599A64",
-        "",
-        "Market design:",
-        "- Offer/need discovery via API and MCP",
-        "- Match recommendations to reduce search cost",
-        "- Deal lifecycle with propose/counter/accept/cancel",
-        "- Delivery verification and dispute flow",
-        "",
-        "Economic model:",
-        "- USDC as default quote and settlement currency",
-        "- Escrow-based milestone releases",
-        "- Refund and dispute paths for failed delivery",
-    ].join("\n");
+    let md;
+    try {
+        const wpPath = resolve(process.cwd(), "docs/WHITEPAPER.md");
+        md = readFileSync(wpPath, "utf-8");
+    }
+    catch {
+        md = "# Whitepaper\n\nFile not found.";
+    }
+    const text = "$ cat whitepaper.md\n" + md;
     return page("Whitepaper", terminalSection([text]));
 });
 app.get("/mcp-setup", async () => {

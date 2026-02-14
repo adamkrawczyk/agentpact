@@ -174,6 +174,29 @@ const tools = [
                     type: "number",
                     description: "Maximum percentage the price can deviate during negotiation (e.g. 10 means ±10%). Defaults to 0 if omitted.",
                 },
+                fulfillmentType: {
+                    type: "string",
+                    enum: [
+                        "api-access",
+                        "code-task",
+                        "data-delivery",
+                        "compute-access",
+                        "consulting",
+                        "physical-service",
+                        "generic",
+                    ],
+                    description: "Optional fulfillment template type used after deal acceptance. Defaults to 'generic'.",
+                },
+                location: {
+                    type: "object",
+                    description: "Optional coarse location for physical services. Keep this non-sensitive (city/region/country/remote) and do not include exact address.",
+                    properties: {
+                        city: { type: "string" },
+                        region: { type: "string" },
+                        country: { type: "string" },
+                        remote: { type: "boolean" },
+                    },
+                },
                 apiKey: {
                     type: "string",
                     description: "Your AgentPact API key obtained from agentpact.register",
@@ -333,6 +356,29 @@ const tools = [
                     type: "array",
                     items: { type: "string" },
                     description: "A list of criteria that must be met for the delivery to be accepted (e.g. ['JSON format', 'Updated daily by 9 AM UTC'])",
+                },
+                fulfillmentType: {
+                    type: "string",
+                    enum: [
+                        "api-access",
+                        "code-task",
+                        "data-delivery",
+                        "compute-access",
+                        "consulting",
+                        "physical-service",
+                        "generic",
+                    ],
+                    description: "Optional fulfillment template type used after deal acceptance. Defaults to 'generic'.",
+                },
+                location: {
+                    type: "object",
+                    description: "Optional coarse location for physical services. Keep this non-sensitive (city/region/country/remote) and do not include exact address.",
+                    properties: {
+                        city: { type: "string" },
+                        region: { type: "string" },
+                        country: { type: "string" },
+                        remote: { type: "boolean" },
+                    },
                 },
                 apiKey: {
                     type: "string",
@@ -661,6 +707,259 @@ const tools = [
         },
     },
     // ── Payments ──
+    {
+        name: "agentpact.list_fulfillment_types",
+        description: "List all supported fulfillment template types and their fields (including physical-service for two-sided on-site workflows). Use this before providing deal fulfillment details so payloads match the required schema.",
+        annotations: {
+            title: "List Fulfillment Types",
+            readOnlyHint: true,
+            destructiveHint: false,
+        },
+        inputSchema: {
+            type: "object",
+            properties: {
+                apiKey: {
+                    type: "string",
+                    description: "Your AgentPact API key obtained from agentpact.register",
+                },
+            },
+        },
+    },
+    {
+        name: "agentpact.provide_fulfillment",
+        description: "As the seller, submit structured fulfillment details for an accepted deal (credentials, URLs, access info, etc.). The payload is validated against the deal's fulfillment type schema.",
+        annotations: {
+            title: "Provide Fulfillment",
+            readOnlyHint: false,
+            destructiveHint: false,
+        },
+        inputSchema: {
+            type: "object",
+            required: ["dealId", "agentId", "fulfillmentData"],
+            properties: {
+                dealId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The UUID of the deal",
+                },
+                agentId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The seller agent UUID providing fulfillment data",
+                },
+                fulfillmentData: {
+                    type: "object",
+                    description: "Structured fulfillment payload matching the selected fulfillment type",
+                },
+                apiKey: {
+                    type: "string",
+                    description: "Your AgentPact API key obtained from agentpact.register",
+                },
+            },
+        },
+    },
+    {
+        name: "agentpact.provide_buyer_context",
+        description: "As the buyer, submit private context for a deal fulfillment (for example address or access notes). Sensitive fields are encrypted at rest by the credential vault.",
+        annotations: {
+            title: "Provide Buyer Context",
+            readOnlyHint: false,
+            destructiveHint: false,
+        },
+        inputSchema: {
+            type: "object",
+            required: ["dealId", "agentId", "buyerData"],
+            properties: {
+                dealId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The UUID of the deal",
+                },
+                agentId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The buyer agent UUID providing buyer context",
+                },
+                buyerData: {
+                    type: "object",
+                    description: "Buyer-side fulfillment payload (e.g., service date, address, access notes, contact method)",
+                },
+                apiKey: {
+                    type: "string",
+                    description: "Your AgentPact API key obtained from agentpact.register",
+                },
+            },
+        },
+    },
+    {
+        name: "agentpact.get_fulfillment",
+        description: "Get fulfillment details and current fulfillment status for a deal. Only the buyer or seller party can access this data.",
+        annotations: {
+            title: "Get Fulfillment",
+            readOnlyHint: true,
+            destructiveHint: false,
+        },
+        inputSchema: {
+            type: "object",
+            required: ["dealId", "agentId"],
+            properties: {
+                dealId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The UUID of the deal",
+                },
+                agentId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The requesting party UUID (must be buyer or seller)",
+                },
+                decrypt: {
+                    type: "boolean",
+                    description: "When true, request decrypted sensitive fields. Only valid for deal participants.",
+                },
+                apiKey: {
+                    type: "string",
+                    description: "Your AgentPact API key obtained from agentpact.register",
+                },
+            },
+        },
+    },
+    {
+        name: "agentpact.verify_fulfillment",
+        description: "As the buyer, verify whether provided fulfillment details are valid. Accepted fulfillment becomes active; rejected fulfillment returns to pending for seller re-provisioning.",
+        annotations: {
+            title: "Verify Fulfillment",
+            readOnlyHint: false,
+            destructiveHint: false,
+        },
+        inputSchema: {
+            type: "object",
+            required: ["dealId", "agentId", "accepted"],
+            properties: {
+                dealId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The UUID of the deal",
+                },
+                agentId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The buyer agent UUID verifying fulfillment",
+                },
+                accepted: {
+                    type: "boolean",
+                    description: "Set true to approve fulfillment, false to reject",
+                },
+                notes: {
+                    type: "string",
+                    description: "Optional buyer notes for verification outcome",
+                },
+                apiKey: {
+                    type: "string",
+                    description: "Your AgentPact API key obtained from agentpact.register",
+                },
+            },
+        },
+    },
+    {
+        name: "agentpact.revoke_fulfillment",
+        description: "As the seller, revoke previously provided fulfillment access for a deal (for example after completion or expiry).",
+        annotations: {
+            title: "Revoke Fulfillment",
+            readOnlyHint: false,
+            destructiveHint: true,
+        },
+        inputSchema: {
+            type: "object",
+            required: ["dealId", "agentId"],
+            properties: {
+                dealId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The UUID of the deal",
+                },
+                agentId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The seller agent UUID revoking fulfillment",
+                },
+                apiKey: {
+                    type: "string",
+                    description: "Your AgentPact API key obtained from agentpact.register",
+                },
+            },
+        },
+    },
+    {
+        name: "agentpact.rotate_credential",
+        description: "As the seller, rotate one encrypted credential field for a deal fulfillment record.",
+        annotations: {
+            title: "Rotate Credential",
+            readOnlyHint: false,
+            destructiveHint: true,
+        },
+        inputSchema: {
+            type: "object",
+            required: ["dealId", "agentId", "fieldName", "newValue"],
+            properties: {
+                dealId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The UUID of the deal",
+                },
+                agentId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The seller agent UUID rotating the credential",
+                },
+                fieldName: {
+                    type: "string",
+                    description: "The fulfillment field name to rotate (for example auth_value)",
+                },
+                newValue: {
+                    type: "string",
+                    description: "The new secret value to encrypt and store",
+                },
+                apiKey: {
+                    type: "string",
+                    description: "Your AgentPact API key obtained from agentpact.register",
+                },
+            },
+        },
+    },
+    {
+        name: "agentpact.request_rotation",
+        description: "As the buyer, request that the seller rotate fulfillment credentials.",
+        annotations: {
+            title: "Request Rotation",
+            readOnlyHint: false,
+            destructiveHint: false,
+        },
+        inputSchema: {
+            type: "object",
+            required: ["dealId", "agentId"],
+            properties: {
+                dealId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The UUID of the deal",
+                },
+                agentId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The buyer agent UUID requesting rotation",
+                },
+                reason: {
+                    type: "string",
+                    description: "Optional explanation for the rotation request",
+                },
+                apiKey: {
+                    type: "string",
+                    description: "Your AgentPact API key obtained from agentpact.register",
+                },
+            },
+        },
+    },
     {
         name: "agentpact.create_payment_intent",
         description: "Create a USDC payment intent to fund a specific milestone in an accepted deal. This generates on-chain payment instructions that the buyer's wallet must execute. After sending the on-chain transaction, call agentpact.confirm_funding with the tx hash.",
@@ -1049,6 +1348,14 @@ const tools = [
                             "deal.proposed",
                             "deal.accepted",
                             "deal.cancelled",
+                            "deal.fulfillment_provided",
+                            "deal.buyer_context_provided",
+                            "deal.fulfillment_verified",
+                            "deal.fulfillment_revoked",
+                            "deal.credential_rotated",
+                            "deal.rotation_requested",
+                            "deal.fulfillment_expiring",
+                            "deal.fulfillment_expired",
                             "payment.funded",
                             "payment.released",
                             "milestone.completed",
@@ -1213,6 +1520,28 @@ function handleToolCall(name, rawArgs) {
             return textResult(api(`/api/deals/${String(args.dealId)}/accept`, "POST", args, apiKey));
         case "agentpact.cancel_deal":
             return textResult(api(`/api/deals/${String(args.dealId)}/cancel`, "POST", args, apiKey));
+        case "agentpact.list_fulfillment_types":
+            return textResult(api("/api/fulfillment/types", "GET", undefined, apiKey));
+        case "agentpact.provide_fulfillment":
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment`, "POST", args, apiKey));
+        case "agentpact.provide_buyer_context":
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/buyer`, "POST", args, apiKey));
+        case "agentpact.get_fulfillment":
+            {
+                const query = new URLSearchParams({
+                    agentId: String(args.agentId),
+                    decrypt: String(Boolean(args.decrypt ?? false)),
+                }).toString();
+                return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment?${query}`, "GET", undefined, apiKey));
+            }
+        case "agentpact.rotate_credential":
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/rotate`, "POST", args, apiKey));
+        case "agentpact.request_rotation":
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/request-rotation`, "POST", args, apiKey));
+        case "agentpact.verify_fulfillment":
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/verify`, "POST", args, apiKey));
+        case "agentpact.revoke_fulfillment":
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/revoke`, "POST", args, apiKey));
         // Payments
         case "agentpact.create_payment_intent":
             return textResult(api("/api/payments/create-intent", "POST", args, apiKey));

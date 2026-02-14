@@ -9,6 +9,7 @@ const SENSITIVE_FIELDS: Record<string, string[]> = {
   "compute-access": ["credentials"],
   "data-delivery": [],
   consulting: [],
+  "physical-service": ["secret_address", "secret_access_notes", "secret_contact_value"],
   generic: [],
 };
 
@@ -96,6 +97,7 @@ export async function ensureCredentialVaultSchema(db: VaultSql): Promise<void> {
       await db`CREATE INDEX IF NOT EXISTS idx_credential_access_log_fulfillment ON credential_access_log(fulfillment_id)`;
       await db`ALTER TABLE deal_fulfillment ADD COLUMN IF NOT EXISTS last_expiry_warning_at TIMESTAMPTZ`;
       await db`ALTER TABLE deal_fulfillment ADD COLUMN IF NOT EXISTS rotation_requested_at TIMESTAMPTZ`;
+      await db`ALTER TABLE deal_fulfillment ADD COLUMN IF NOT EXISTS buyer_data JSONB DEFAULT NULL`;
     })().catch((error) => {
       schemaReady = null;
       throw error;

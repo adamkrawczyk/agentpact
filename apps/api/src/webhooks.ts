@@ -10,6 +10,7 @@ const VALID_EVENTS = [
   "deal.accepted",
   "deal.cancelled",
   "deal.fulfillment_provided",
+  "deal.buyer_context_provided",
   "deal.fulfillment_verified",
   "deal.fulfillment_revoked",
   "deal.credential_rotated",

@@ -6,6 +6,8 @@ import { z } from "zod";
 import { initAuth } from "./auth.js";
 import { registerHealthChecks } from "./health.js";
 import { registerWebhookRoutes, notifyAgents } from "./webhooks.js";
+import { autoVerify } from "./auto-verify.js";
+import { decrypt, ensureCredentialVaultSchema, encrypt, getCredentialEncryptionKey, getSensitiveFields, vaultRetrieve, vaultRotate, vaultStore, } from "./credential-vault.js";
 import { isOnChainMode, generateFundingTransaction, generateAcceptTransaction, verifyFunding, resolveDisputeOnChain, getMilestoneStatus, ESCROW_ADDRESS, USDC_ADDRESS, } from "./chain.js";
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -37,6 +39,24 @@ async function getAgentStats(db, agentId) {
 }
 export const sql = postgres(DATABASE_URL, { max: 10 });
 export const app = Fastify({ logger: true });
+const vaultSql = sql;
+const credentialEncryptionKey = getCredentialEncryptionKey();
+async function ensurePhysicalServiceSchema() {
+    await sql `ALTER TABLE offers ADD COLUMN IF NOT EXISTS location JSONB DEFAULT NULL`;
+    await sql `ALTER TABLE needs ADD COLUMN IF NOT EXISTS location JSONB DEFAULT NULL`;
+    await sql `ALTER TABLE deal_fulfillment ADD COLUMN IF NOT EXISTS buyer_data JSONB DEFAULT NULL`;
+    await sql `
+    CREATE INDEX IF NOT EXISTS idx_offers_location_country
+    ON offers ((location->>'country'))
+    WHERE location IS NOT NULL
+  `;
+    await sql `
+    CREATE INDEX IF NOT EXISTS idx_needs_location_country
+    ON needs ((location->>'country'))
+    WHERE location IS NOT NULL
+  `;
+}
+await ensurePhysicalServiceSchema();
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
 const milestoneSchema = z.object({
     idx: z.number().int().positive(),
@@ -45,6 +65,176 @@ const milestoneSchema = z.object({
     acceptanceCriteria: z.array(z.string()).min(1),
     dueAt: z.string().datetime().optional()
 });
+const FULFILLMENT_TYPES = {
+    "api-access": {
+        label: "API Access",
+        description: "Provide API endpoint access (LLM, data service, etc.)",
+        fields: {
+            endpoint_url: { type: "string", format: "url", required: true },
+            auth_type: { type: "enum", values: ["bearer", "api-key", "basic", "header"], required: true },
+            auth_value: { type: "string", minLength: 1, required: true },
+            auth_header: { type: "string", required: false },
+            rate_limit: { type: "string", required: false },
+            docs_url: { type: "string", format: "url", required: false },
+            expires_at: { type: "string", format: "datetime", required: false },
+            usage_notes: { type: "string", required: false },
+        },
+        schema: z.object({
+            endpoint_url: z.string().url(),
+            auth_type: z.enum(["bearer", "api-key", "basic", "header"]),
+            auth_value: z.string().min(1),
+            auth_header: z.string().optional(),
+            rate_limit: z.string().optional(),
+            docs_url: z.string().url().optional(),
+            expires_at: z.string().datetime().optional(),
+            usage_notes: z.string().optional(),
+        }),
+        autoVerify: "http-ping",
+    },
+    "code-task": {
+        label: "Code Task",
+        description: "Code review, PR, bug fix, feature implementation",
+        fields: {
+            repo_url: { type: "string", format: "url", required: true },
+            branch: { type: "string", required: false },
+            access_method: { type: "enum", values: ["token", "collaborator-invite", "public"], required: true },
+            access_token: { type: "string", required: false },
+            scope: { type: "string", required: false },
+            delivery_method: { type: "enum", values: ["pull-request", "commit", "patch", "comment"], required: true },
+            setup_instructions: { type: "string", required: false },
+        },
+        schema: z.object({
+            repo_url: z.string().url(),
+            branch: z.string().optional(),
+            access_method: z.enum(["token", "collaborator-invite", "public"]),
+            access_token: z.string().optional(),
+            scope: z.string().optional(),
+            delivery_method: z.enum(["pull-request", "commit", "patch", "comment"]),
+            setup_instructions: z.string().optional(),
+        }),
+        autoVerify: null,
+    },
+    "data-delivery": {
+        label: "Data Delivery",
+        description: "Dataset, report, analysis, or file delivery",
+        fields: {
+            download_url: { type: "string", format: "url", required: true },
+            format: { type: "string", required: true },
+            size_bytes: { type: "number", required: false },
+            checksum_sha256: { type: "string", required: false },
+            schema_description: { type: "string", required: false },
+            expires_at: { type: "string", format: "datetime", required: false },
+        },
+        schema: z.object({
+            download_url: z.string().url(),
+            format: z.string(),
+            size_bytes: z.number().optional(),
+            checksum_sha256: z.string().optional(),
+            schema_description: z.string().optional(),
+            expires_at: z.string().datetime().optional(),
+        }),
+        autoVerify: "download-check",
+    },
+    "compute-access": {
+        label: "Compute Access",
+        description: "SSH, VM, GPU, or cloud compute access",
+        fields: {
+            access_type: { type: "enum", values: ["ssh", "api", "web-console"], required: true },
+            endpoint: { type: "string", required: true },
+            credentials: { type: "string", required: false },
+            specs: { type: "string", required: false },
+            time_window_hours: { type: "number", required: false },
+            expires_at: { type: "string", format: "datetime", required: false },
+            setup_instructions: { type: "string", required: false },
+        },
+        schema: z.object({
+            access_type: z.enum(["ssh", "api", "web-console"]),
+            endpoint: z.string(),
+            credentials: z.string().optional(),
+            specs: z.string().optional(),
+            time_window_hours: z.number().optional(),
+            expires_at: z.string().datetime().optional(),
+            setup_instructions: z.string().optional(),
+        }),
+        autoVerify: null,
+    },
+    consulting: {
+        label: "Consulting / Review / Advisory",
+        description: "Written review, analysis, recommendation, or advisory",
+        fields: {
+            delivery_format: { type: "enum", values: ["markdown", "pdf", "text", "video-url", "audio-url"], required: true },
+            content_url: { type: "string", format: "url", required: false },
+            content_text: { type: "string", required: false },
+            summary: { type: "string", required: false },
+        },
+        schema: z.object({
+            delivery_format: z.enum(["markdown", "pdf", "text", "video-url", "audio-url"]),
+            content_url: z.string().url().optional(),
+            content_text: z.string().optional(),
+            summary: z.string().optional(),
+        }),
+        autoVerify: null,
+    },
+    "physical-service": {
+        label: "Physical Service",
+        description: "On-site service requiring physical presence (repair, installation, delivery, inspection)",
+        fields: {
+            service_type: { type: "enum", values: ["repair", "installation", "delivery", "inspection", "cleaning", "other"], required: true },
+            service_date: { type: "string", format: "datetime", required: true },
+            secret_address: { type: "string", required: true },
+            secret_access_notes: { type: "string", required: false },
+            contact_method: { type: "enum", values: ["phone", "email", "in-app"], required: false },
+            secret_contact_value: { type: "string", required: false },
+            proof_type: { type: "enum", values: ["photo", "video", "signed-confirmation", "none"], required: false },
+            proof_url: { type: "string", format: "url", required: false },
+            completion_notes: { type: "string", required: false },
+        },
+        schema: z.object({
+            service_type: z.enum(["repair", "installation", "delivery", "inspection", "cleaning", "other"]),
+            service_date: z.string().datetime(),
+            secret_address: z.string(),
+            secret_access_notes: z.string().optional(),
+            contact_method: z.enum(["phone", "email", "in-app"]).optional(),
+            secret_contact_value: z.string().optional(),
+            proof_type: z.enum(["photo", "video", "signed-confirmation", "none"]).optional(),
+            proof_url: z.string().url().optional(),
+            completion_notes: z.string().optional(),
+        }),
+        autoVerify: false,
+    },
+    generic: {
+        label: "Generic",
+        description: "Any other service — describe what you'll deliver",
+        fields: {
+            description: { type: "string", minLength: 10, required: true },
+            artifact_urls: { type: "array", items: "url", required: false },
+            instructions: { type: "string", required: false },
+            expires_at: { type: "string", format: "datetime", required: false },
+        },
+        schema: z.object({
+            description: z.string().min(10),
+            artifact_urls: z.array(z.string().url()).optional(),
+            instructions: z.string().optional(),
+            expires_at: z.string().datetime().optional(),
+        }).passthrough(),
+        autoVerify: null,
+    },
+};
+const fulfillmentTypeSchema = z.enum([
+    "api-access",
+    "code-task",
+    "data-delivery",
+    "compute-access",
+    "consulting",
+    "physical-service",
+    "generic",
+]);
+const locationSchema = z.object({
+    city: z.string().min(1).optional(),
+    region: z.string().optional(),
+    country: z.string().optional(),
+    remote: z.boolean().optional(),
+}).optional();
 const createOfferSchema = z.object({
     agentId: z.string().uuid(),
     title: z.string().min(4),
@@ -55,7 +245,9 @@ const createOfferSchema = z.object({
     currency: z.literal("USDC").default("USDC"),
     maxPriceDeltaPct: z.number().min(0).max(100).default(15),
     slaDays: z.number().int().positive().default(7),
-    proofs: z.array(z.record(z.any())).default([])
+    proofs: z.array(z.record(z.any())).default([]),
+    fulfillmentType: fulfillmentTypeSchema.optional().default("generic"),
+    location: locationSchema,
 });
 const createNeedSchema = z.object({
     agentId: z.string().uuid(),
@@ -67,7 +259,9 @@ const createNeedSchema = z.object({
     budgetMax: z.number().positive().optional(),
     currency: z.literal("USDC").default("USDC"),
     acceptanceCriteria: z.array(z.string()).default([]),
-    deadlineAt: z.string().datetime().optional()
+    deadlineAt: z.string().datetime().optional(),
+    fulfillmentType: fulfillmentTypeSchema.optional().default("generic"),
+    location: locationSchema,
 });
 const proposeDealSchema = z.object({
     buyerAgentId: z.string().uuid(),
@@ -103,6 +297,39 @@ const verifyDeliverySchema = z.object({
     buyerAgentId: z.string().uuid(),
     accepted: z.boolean(),
     verificationNotes: z.string().optional()
+});
+const provideFulfillmentSchema = z.object({
+    agentId: z.string().uuid(),
+    fulfillmentData: z.record(z.any()),
+});
+const provideBuyerFulfillmentSchema = z.object({
+    agentId: z.string().uuid(),
+    buyerData: z.record(z.any()),
+});
+const getFulfillmentSchema = z.object({
+    agentId: z.string().uuid(),
+    decrypt: z.preprocess((v) => parseBooleanish(v), z.boolean()).optional().default(false),
+    reveal: z.preprocess((v) => parseBooleanish(v), z.boolean()).optional(),
+}).transform((data) => ({
+    agentId: data.agentId,
+    decrypt: data.decrypt || data.reveal || false,
+}));
+const rotateCredentialSchema = z.object({
+    agentId: z.string().uuid(),
+    fieldName: z.string().min(1),
+    newValue: z.string().min(1),
+});
+const requestRotationSchema = z.object({
+    agentId: z.string().uuid(),
+    reason: z.string().min(1).optional(),
+});
+const verifyFulfillmentSchema = z.object({
+    agentId: z.string().uuid(),
+    accepted: z.boolean(),
+    notes: z.string().optional(),
+});
+const revokeFulfillmentSchema = z.object({
+    agentId: z.string().uuid(),
 });
 const feedbackSchema = z.object({
     dealId: z.string().uuid(),
@@ -145,6 +372,109 @@ function parseBooleanish(value) {
         return false;
     const normalized = value.trim().toLowerCase();
     return normalized === "true" || normalized === "1" || normalized === "yes";
+}
+function asRecord(value) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+        return value;
+    }
+    return {};
+}
+const BUYER_VAULT_PREFIX = "buyer__";
+async function storeBuyerContext(fulfillmentId, fulfillmentType, data) {
+    await ensureCredentialVaultSchema(vaultSql);
+    const redacted = { ...data };
+    const configured = new Set(getSensitiveFields(fulfillmentType));
+    const prefixed = Object.keys(data).filter((field) => field.startsWith("secret_"));
+    const sensitiveFields = new Set([...configured, ...prefixed]);
+    for (const fieldName of sensitiveFields) {
+        if (!(fieldName in data))
+            continue;
+        const value = data[fieldName];
+        if (value === undefined || value === null)
+            continue;
+        const plaintext = typeof value === "string" ? value : JSON.stringify(value);
+        const { encrypted, iv, authTag } = encrypt(plaintext, credentialEncryptionKey);
+        await sql `
+      INSERT INTO credential_vault (fulfillment_id, field_name, encrypted_value, iv, auth_tag)
+      VALUES (${fulfillmentId}, ${`${BUYER_VAULT_PREFIX}${fieldName}`}, ${encrypted}, ${iv}, ${authTag})
+      ON CONFLICT (fulfillment_id, field_name) DO UPDATE SET
+        encrypted_value = EXCLUDED.encrypted_value,
+        iv = EXCLUDED.iv,
+        auth_tag = EXCLUDED.auth_tag,
+        last_rotated_at = NOW()
+    `;
+        redacted[fieldName] = "[encrypted]";
+    }
+    return redacted;
+}
+async function retrieveBuyerContext(fulfillmentId, data) {
+    await ensureCredentialVaultSchema(vaultSql);
+    const merged = { ...data };
+    const rows = await sql `
+    SELECT field_name, encrypted_value, iv, auth_tag
+    FROM credential_vault
+    WHERE fulfillment_id = ${fulfillmentId}
+      AND field_name LIKE ${`${BUYER_VAULT_PREFIX}%`}
+  `;
+    for (const row of rows) {
+        const fieldName = String(row.field_name).slice(BUYER_VAULT_PREFIX.length);
+        merged[fieldName] = decrypt(String(row.encrypted_value), String(row.iv), String(row.auth_tag), credentialEncryptionKey);
+    }
+    return merged;
+}
+async function logCredentialAccess(fulfillmentId, agentId, action, ipAddress) {
+    await ensureCredentialVaultSchema(vaultSql);
+    await sql `
+    INSERT INTO credential_access_log (fulfillment_id, agent_id, action, ip_address)
+    VALUES (${fulfillmentId}, ${agentId}, ${action}, ${ipAddress ?? null})
+  `;
+}
+async function applyFulfillmentExpiryChecks(deal, fulfillment) {
+    await ensureCredentialVaultSchema(vaultSql);
+    if (!fulfillment.expires_at)
+        return fulfillment;
+    const expiresAt = new Date(String(fulfillment.expires_at));
+    if (Number.isNaN(expiresAt.getTime()))
+        return fulfillment;
+    const now = new Date();
+    const status = String(fulfillment.status);
+    const expiresInMs = expiresAt.getTime() - now.getTime();
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    if (expiresInMs <= 0 && status !== "expired" && status !== "revoked") {
+        const [expired] = await sql `
+      UPDATE deal_fulfillment
+      SET status = 'expired', updated_at = NOW()
+      WHERE id = ${fulfillment.id}
+      RETURNING *
+    `;
+        if (expired) {
+            notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.fulfillment_expired", {
+                dealId: deal.id,
+                fulfillmentId: String(fulfillment.id),
+                expiresAt: fulfillment.expires_at,
+                status: "expired",
+            });
+            return expired;
+        }
+    }
+    if (expiresInMs > 0 && expiresInMs <= oneDayMs && !fulfillment.last_expiry_warning_at) {
+        const [warned] = await sql `
+      UPDATE deal_fulfillment
+      SET last_expiry_warning_at = NOW(), updated_at = NOW()
+      WHERE id = ${fulfillment.id}
+      RETURNING *
+    `;
+        if (warned) {
+            notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.fulfillment_expiring", {
+                dealId: deal.id,
+                fulfillmentId: String(fulfillment.id),
+                expiresAt: fulfillment.expires_at,
+                hoursRemaining: Number((expiresInMs / (60 * 60 * 1000)).toFixed(2)),
+            });
+            return warned;
+        }
+    }
+    return fulfillment;
 }
 function gradeSkillSubmission(expectedCriteria, submission) {
     const mode = typeof expectedCriteria.mode === "string" ? expectedCriteria.mode : "";
@@ -316,7 +646,7 @@ app.addHook("preHandler", async (request, reply) => {
     if (routePath.startsWith("/api/public/")) {
         return;
     }
-    const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills"];
+    const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills", "/api/fulfillment/types"];
     if (request.method === "GET" && publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
         return;
     }
@@ -580,12 +910,13 @@ app.get("/api/agents/:id/skills", async (request, reply) => {
 app.post("/api/offers", async (request, reply) => {
     const idem = idempotencyKey(request.headers);
     const body = createOfferSchema.parse(request.body);
+    const location = body.location ?? null;
     const [offer] = await sql `
     INSERT INTO offers (
-      agent_id, title, description_md, category, tags, base_price, currency, max_price_delta_pct, sla_days, proofs_json
+      agent_id, title, description_md, category, tags, base_price, currency, max_price_delta_pct, sla_days, proofs_json, fulfillment_type, location
     ) VALUES (
       ${body.agentId}, ${body.title}, ${body.descriptionMd}, ${body.category}, ${body.tags}, ${body.basePrice},
-      ${body.currency}, ${body.maxPriceDeltaPct}, ${body.slaDays}, ${JSON.stringify(body.proofs)}::jsonb
+      ${body.currency}, ${body.maxPriceDeltaPct}, ${body.slaDays}, ${JSON.stringify(body.proofs)}::jsonb, ${body.fulfillmentType}, ${location}::jsonb
     )
     RETURNING *
   `;
@@ -604,6 +935,8 @@ app.patch("/api/offers/:id", async (request) => {
     const maxPriceDeltaPct = body.maxPriceDeltaPct ?? null;
     const slaDays = body.slaDays ?? null;
     const proofsJson = body.proofs ? JSON.stringify(body.proofs) : null;
+    const fulfillmentType = body.fulfillmentType ?? null;
+    const location = body.location ?? null;
     const [offer] = await sql `
     UPDATE offers SET
       title = COALESCE(${title}, title),
@@ -614,6 +947,8 @@ app.patch("/api/offers/:id", async (request) => {
       max_price_delta_pct = COALESCE(${maxPriceDeltaPct}, max_price_delta_pct),
       sla_days = COALESCE(${slaDays}, sla_days),
       proofs_json = COALESCE(${proofsJson}::jsonb, proofs_json),
+      fulfillment_type = COALESCE(${fulfillmentType}, fulfillment_type),
+      location = COALESCE(${location}::jsonb, location),
       updated_at = NOW()
     WHERE id = ${id}
     RETURNING *
@@ -665,12 +1000,13 @@ app.post("/api/needs", async (request, reply) => {
     const budgetMin = body.budgetMin ?? null;
     const budgetMax = body.budgetMax ?? null;
     const deadlineAt = body.deadlineAt ?? null;
+    const location = body.location ?? null;
     const [need] = await sql `
     INSERT INTO needs (
-      agent_id, title, description_md, category, tags, budget_min, budget_max, currency, acceptance_criteria, deadline_at
+      agent_id, title, description_md, category, tags, budget_min, budget_max, currency, acceptance_criteria, deadline_at, fulfillment_type, location
     ) VALUES (
       ${body.agentId}, ${body.title}, ${body.descriptionMd}, ${body.category}, ${body.tags},
-      ${budgetMin}, ${budgetMax}, ${body.currency}, ${JSON.stringify(body.acceptanceCriteria)}::jsonb, ${deadlineAt}
+      ${budgetMin}, ${budgetMax}, ${body.currency}, ${JSON.stringify(body.acceptanceCriteria)}::jsonb, ${deadlineAt}, ${body.fulfillmentType}, ${location}::jsonb
     ) RETURNING *
   `;
     await audit(body.agentId, "need.create", "need", need.id, idem, body);
@@ -688,6 +1024,8 @@ app.patch("/api/needs/:id", async (request) => {
     const budgetMax = body.budgetMax ?? null;
     const acceptanceCriteria = body.acceptanceCriteria ? JSON.stringify(body.acceptanceCriteria) : null;
     const deadlineAt = body.deadlineAt ?? null;
+    const fulfillmentType = body.fulfillmentType ?? null;
+    const location = body.location ?? null;
     const [need] = await sql `
     UPDATE needs SET
       title = COALESCE(${title}, title),
@@ -698,6 +1036,8 @@ app.patch("/api/needs/:id", async (request) => {
       budget_max = COALESCE(${budgetMax}, budget_max),
       acceptance_criteria = COALESCE(${acceptanceCriteria}::jsonb, acceptance_criteria),
       deadline_at = COALESCE(${deadlineAt}, deadline_at),
+      fulfillment_type = COALESCE(${fulfillmentType}, fulfillment_type),
+      location = COALESCE(${location}::jsonb, location),
       updated_at = NOW()
     WHERE id = ${id}
     RETURNING *
@@ -837,10 +1177,20 @@ app.post("/api/deals/:id/counter", async (request) => {
 app.post("/api/deals/:id/accept", async (request) => {
     const { id } = request.params;
     const body = z.object({ actorAgentId: z.string().uuid() }).parse(request.body);
-    const [deal] = await sql `SELECT buyer_agent_id, seller_agent_id FROM deals WHERE id = ${id}`;
+    const [deal] = await sql `
+    SELECT d.buyer_agent_id, d.seller_agent_id, o.fulfillment_type
+    FROM deals d
+    JOIN offers o ON o.id = d.offer_id
+    WHERE d.id = ${id}
+  `;
     await sql.begin(async (txn) => {
         await txn.unsafe("UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = $1", [id]);
         await txn.unsafe("UPDATE milestones SET status = 'in_progress' WHERE deal_id = $1 AND status = 'pending'", [id]);
+        await txn.unsafe(`
+        INSERT INTO deal_fulfillment (deal_id, fulfillment_type, status)
+        VALUES ($1, $2, 'pending')
+        ON CONFLICT (deal_id) DO NOTHING
+      `, [id, deal?.fulfillment_type ?? "generic"]);
         await txn.unsafe(`
         INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
         VALUES ($1, $2, 'accept', $3::jsonb)
@@ -850,6 +1200,8 @@ app.post("/api/deals/:id/accept", async (request) => {
         notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.accepted", {
             dealId: id,
             acceptedBy: body.actorAgentId,
+            fulfillmentType: deal.fulfillment_type,
+            sellerActionRequired: "Provide fulfillment details via /api/deals/:id/fulfillment",
         });
     }
     return { ok: true };
@@ -897,6 +1249,334 @@ app.get("/api/deals/:id", async (request, reply) => {
     const milestones = await sql `SELECT * FROM milestones WHERE deal_id = ${id} ORDER BY idx`;
     const events = await sql `SELECT * FROM negotiation_events WHERE deal_id = ${id} ORDER BY created_at`;
     return { ...deal, milestones, events };
+});
+app.get("/api/fulfillment/types", async () => {
+    return Object.entries(FULFILLMENT_TYPES).map(([type, config]) => ({
+        type,
+        label: config.label,
+        description: config.description,
+        fields: config.fields,
+        autoVerify: config.autoVerify,
+    }));
+});
+app.post("/api/deals/:id/fulfillment", async (request, reply) => {
+    const { id } = request.params;
+    const body = provideFulfillmentSchema.parse(request.body);
+    const [deal] = await sql `
+    SELECT d.id, d.status, d.buyer_agent_id, d.seller_agent_id, o.fulfillment_type
+    FROM deals d
+    JOIN offers o ON o.id = d.offer_id
+    WHERE d.id = ${id}
+  `;
+    if (!deal)
+        return reply.code(404).send({ error: "Deal not found" });
+    if (body.agentId !== deal.seller_agent_id)
+        return reply.code(403).send({ error: "Only seller can provide fulfillment details" });
+    if (!["active", "delivered", "completed"].includes(String(deal.status))) {
+        return reply.code(400).send({ error: `Deal status ${deal.status} cannot accept fulfillment details` });
+    }
+    const typeKey = String(deal.fulfillment_type);
+    const typeConfig = FULFILLMENT_TYPES[typeKey] ?? FULFILLMENT_TYPES.generic;
+    const parsedData = typeConfig.schema.parse(body.fulfillmentData);
+    const parsedRecord = asRecord(parsedData);
+    const expiresAt = typeof parsedData === "object" && parsedData !== null && "expires_at" in parsedData
+        ? parsedData.expires_at ?? null
+        : null;
+    const autoVerifyResult = typeConfig.autoVerify
+        ? await autoVerify(typeConfig.autoVerify, parsedData)
+        : { success: true, details: "No auto-verification available for this type" };
+    const [fulfillment] = await sql `
+    INSERT INTO deal_fulfillment (
+      deal_id, fulfillment_type, fulfillment_data, status, expires_at, provided_at, auto_verify_result, updated_at
+    ) VALUES (
+      ${id}, ${typeKey}, ${JSON.stringify(parsedData)}::jsonb, 'provided', ${expiresAt}, NOW(), ${JSON.stringify(autoVerifyResult)}::jsonb, NOW()
+    )
+    ON CONFLICT (deal_id) DO UPDATE SET
+      fulfillment_type = EXCLUDED.fulfillment_type,
+      fulfillment_data = EXCLUDED.fulfillment_data,
+      status = 'provided',
+      expires_at = EXCLUDED.expires_at,
+      provided_at = NOW(),
+      auto_verify_result = EXCLUDED.auto_verify_result,
+      updated_at = NOW()
+    RETURNING *
+  `;
+    const redactedData = await vaultStore(vaultSql, String(fulfillment.id), typeKey, parsedRecord, credentialEncryptionKey);
+    const encryptedFields = Object.entries(redactedData)
+        .filter(([, value]) => value === "[encrypted]")
+        .map(([field]) => field);
+    const [stored] = await sql `
+    UPDATE deal_fulfillment
+    SET fulfillment_data = ${redactedData}::jsonb, updated_at = NOW()
+    WHERE id = ${fulfillment.id}
+    RETURNING *
+  `;
+    notifyAgents(sql, [deal.buyer_agent_id], "deal.fulfillment_provided", {
+        dealId: id,
+        sellerAgentId: body.agentId,
+        fulfillmentType: typeKey,
+        status: stored.status,
+        encryptedFields,
+    });
+    return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields });
+});
+app.post("/api/deals/:id/fulfillment/buyer", async (request, reply) => {
+    const { id } = request.params;
+    const body = provideBuyerFulfillmentSchema.parse(request.body);
+    const [deal] = await sql `
+    SELECT d.id, d.status, d.buyer_agent_id, d.seller_agent_id, o.fulfillment_type
+    FROM deals d
+    JOIN offers o ON o.id = d.offer_id
+    WHERE d.id = ${id}
+  `;
+    if (!deal)
+        return reply.code(404).send({ error: "Deal not found" });
+    if (body.agentId !== deal.buyer_agent_id)
+        return reply.code(403).send({ error: "Only buyer can provide buyer fulfillment context" });
+    if (!["active", "delivered", "completed"].includes(String(deal.status))) {
+        return reply.code(400).send({ error: `Deal status ${deal.status} cannot accept buyer fulfillment context` });
+    }
+    const typeKey = String(deal.fulfillment_type);
+    const parsedRecord = asRecord(body.buyerData);
+    const [fulfillment] = await sql `
+    INSERT INTO deal_fulfillment (
+      deal_id, fulfillment_type, buyer_data, status, updated_at
+    ) VALUES (
+      ${id}, ${typeKey}, '{}'::jsonb, 'pending', NOW()
+    )
+    ON CONFLICT (deal_id) DO UPDATE SET
+      fulfillment_type = EXCLUDED.fulfillment_type,
+      updated_at = NOW()
+    RETURNING *
+  `;
+    const redactedData = await storeBuyerContext(String(fulfillment.id), typeKey, parsedRecord);
+    const encryptedFields = Object.entries(redactedData)
+        .filter(([, value]) => value === "[encrypted]")
+        .map(([field]) => field);
+    const [stored] = await sql `
+    UPDATE deal_fulfillment
+    SET buyer_data = ${redactedData}::jsonb, updated_at = NOW()
+    WHERE id = ${fulfillment.id}
+    RETURNING *
+  `;
+    notifyAgents(sql, [deal.seller_agent_id], "deal.buyer_context_provided", {
+        dealId: id,
+        buyerAgentId: body.agentId,
+        fulfillmentType: typeKey,
+        encryptedFields,
+    });
+    return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields });
+});
+app.get("/api/deals/:id/fulfillment", async (request, reply) => {
+    const { id } = request.params;
+    const query = getFulfillmentSchema.parse(request.query ?? {});
+    const [deal] = await sql `
+    SELECT id, buyer_agent_id, seller_agent_id
+    FROM deals
+    WHERE id = ${id}
+  `;
+    if (!deal)
+        return reply.code(404).send({ error: "Deal not found" });
+    if (query.agentId !== deal.buyer_agent_id && query.agentId !== deal.seller_agent_id) {
+        return reply.code(403).send({ error: "Not authorized for this deal" });
+    }
+    const [fulfillment] = await sql `SELECT * FROM deal_fulfillment WHERE deal_id = ${id}`;
+    if (!fulfillment)
+        return reply.code(404).send({ error: "Fulfillment not found" });
+    const checked = await applyFulfillmentExpiryChecks({ id: String(deal.id), buyer_agent_id: String(deal.buyer_agent_id), seller_agent_id: String(deal.seller_agent_id) }, {
+        ...fulfillment,
+        id: String(fulfillment.id),
+        status: String(fulfillment.status),
+        expires_at: fulfillment.expires_at ?? null,
+        last_expiry_warning_at: fulfillment.last_expiry_warning_at ?? null,
+    });
+    const isBuyer = query.agentId === deal.buyer_agent_id;
+    const canDecryptBuyerData = isBuyer || query.decrypt;
+    const rawBuyerData = checked.buyer_data;
+    const buyerDataRecord = asRecord(rawBuyerData);
+    const fulfillmentDataRecord = asRecord(checked.fulfillment_data);
+    let fulfillmentData = fulfillmentDataRecord;
+    if (query.decrypt) {
+        fulfillmentData = await vaultRetrieve(vaultSql, String(checked.id), fulfillmentDataRecord, credentialEncryptionKey);
+    }
+    let buyerData = rawBuyerData === null ? null : buyerDataRecord;
+    if (canDecryptBuyerData && (Object.keys(buyerDataRecord).length > 0 || rawBuyerData !== null)) {
+        buyerData = await retrieveBuyerContext(String(checked.id), buyerDataRecord);
+    }
+    if (query.decrypt) {
+        await logCredentialAccess(String(checked.id), query.agentId, "decrypt", request.ip);
+    }
+    return { ...checked, fulfillment_data: fulfillmentData, buyer_data: buyerData };
+});
+app.post("/api/deals/:id/fulfillment/rotate", async (request, reply) => {
+    const { id } = request.params;
+    const body = rotateCredentialSchema.parse(request.body);
+    const [deal] = await sql `
+    SELECT id, buyer_agent_id, seller_agent_id
+    FROM deals
+    WHERE id = ${id}
+  `;
+    if (!deal)
+        return reply.code(404).send({ error: "Deal not found" });
+    if (body.agentId !== deal.seller_agent_id) {
+        return reply.code(403).send({ error: "Only seller can rotate credentials" });
+    }
+    const [fulfillment] = await sql `SELECT * FROM deal_fulfillment WHERE deal_id = ${id}`;
+    if (!fulfillment)
+        return reply.code(404).send({ error: "Fulfillment not found" });
+    await vaultRotate(vaultSql, String(fulfillment.id), body.fieldName, body.newValue, credentialEncryptionKey);
+    await logCredentialAccess(String(fulfillment.id), body.agentId, "rotate", request.ip);
+    const [updated] = await sql `
+    UPDATE deal_fulfillment
+    SET
+      fulfillment_data = jsonb_set(
+        CASE
+          WHEN jsonb_typeof(COALESCE(fulfillment_data, '{}'::jsonb)) = 'object' THEN COALESCE(fulfillment_data, '{}'::jsonb)
+          ELSE '{}'::jsonb
+        END,
+        ARRAY[${body.fieldName}],
+        to_jsonb('[encrypted]'::text),
+        true
+      ),
+      updated_at = NOW()
+    WHERE id = ${fulfillment.id}
+    RETURNING *
+  `;
+    notifyAgents(sql, [deal.buyer_agent_id], "deal.credential_rotated", {
+        dealId: id,
+        fulfillmentId: fulfillment.id,
+        fieldName: body.fieldName,
+        rotatedBy: body.agentId,
+        rotatedAt: new Date().toISOString(),
+    });
+    return updated;
+});
+app.get("/api/deals/:id/fulfillment/audit", async (request, reply) => {
+    const { id } = request.params;
+    const query = z.object({ agentId: z.string().uuid() }).parse(request.query ?? {});
+    await ensureCredentialVaultSchema(vaultSql);
+    const [deal] = await sql `
+    SELECT id, seller_agent_id
+    FROM deals
+    WHERE id = ${id}
+  `;
+    if (!deal)
+        return reply.code(404).send({ error: "Deal not found" });
+    if (query.agentId !== deal.seller_agent_id) {
+        return reply.code(403).send({ error: "Only seller can view fulfillment audit logs" });
+    }
+    const [fulfillment] = await sql `SELECT id FROM deal_fulfillment WHERE deal_id = ${id}`;
+    if (!fulfillment)
+        return reply.code(404).send({ error: "Fulfillment not found" });
+    const logs = await sql `
+    SELECT id, fulfillment_id, agent_id, action, ip_address, created_at
+    FROM credential_access_log
+    WHERE fulfillment_id = ${fulfillment.id}
+    ORDER BY created_at DESC
+  `;
+    return logs;
+});
+app.post("/api/deals/:id/fulfillment/request-rotation", async (request, reply) => {
+    const { id } = request.params;
+    const body = requestRotationSchema.parse(request.body);
+    await ensureCredentialVaultSchema(vaultSql);
+    const [deal] = await sql `
+    SELECT id, buyer_agent_id, seller_agent_id
+    FROM deals
+    WHERE id = ${id}
+  `;
+    if (!deal)
+        return reply.code(404).send({ error: "Deal not found" });
+    if (body.agentId !== deal.buyer_agent_id) {
+        return reply.code(403).send({ error: "Only buyer can request credential rotation" });
+    }
+    const [updated] = await sql `
+    UPDATE deal_fulfillment
+    SET rotation_requested_at = NOW(), updated_at = NOW()
+    WHERE deal_id = ${id}
+    RETURNING *
+  `;
+    if (!updated)
+        return reply.code(404).send({ error: "Fulfillment not found" });
+    await logCredentialAccess(String(updated.id), body.agentId, "request_rotation", request.ip);
+    notifyAgents(sql, [deal.seller_agent_id], "deal.rotation_requested", {
+        dealId: id,
+        fulfillmentId: updated.id,
+        requestedBy: body.agentId,
+        reason: body.reason ?? null,
+        requestedAt: updated.rotation_requested_at,
+    });
+    return updated;
+});
+app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
+    const { id } = request.params;
+    const body = verifyFulfillmentSchema.parse(request.body);
+    const [deal] = await sql `
+    SELECT id, buyer_agent_id, seller_agent_id
+    FROM deals
+    WHERE id = ${id}
+  `;
+    if (!deal)
+        return reply.code(404).send({ error: "Deal not found" });
+    if (body.agentId !== deal.buyer_agent_id)
+        return reply.code(403).send({ error: "Only buyer can verify fulfillment" });
+    const [existing] = await sql `SELECT * FROM deal_fulfillment WHERE deal_id = ${id}`;
+    if (!existing)
+        return reply.code(404).send({ error: "Fulfillment not found" });
+    const verificationPayload = JSON.stringify({
+        buyerVerification: {
+            accepted: body.accepted,
+            notes: body.notes ?? null,
+            verifiedAt: new Date().toISOString(),
+        },
+    });
+    const [updated] = await sql `
+    UPDATE deal_fulfillment
+    SET
+      status = ${body.accepted ? "active" : "pending"},
+      verified_at = ${body.accepted ? new Date().toISOString() : null},
+      auto_verify_result = COALESCE(auto_verify_result, '{}'::jsonb) || ${verificationPayload}::jsonb,
+      updated_at = NOW()
+    WHERE deal_id = ${id}
+    RETURNING *
+  `;
+    if (body.accepted) {
+        notifyAgents(sql, [deal.seller_agent_id], "deal.fulfillment_verified", {
+            dealId: id,
+            buyerAgentId: body.agentId,
+            accepted: true,
+            notes: body.notes,
+        });
+    }
+    return updated;
+});
+app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {
+    const { id } = request.params;
+    const body = revokeFulfillmentSchema.parse(request.body);
+    const [deal] = await sql `
+    SELECT id, buyer_agent_id, seller_agent_id
+    FROM deals
+    WHERE id = ${id}
+  `;
+    if (!deal)
+        return reply.code(404).send({ error: "Deal not found" });
+    if (body.agentId !== deal.seller_agent_id)
+        return reply.code(403).send({ error: "Only seller can revoke fulfillment" });
+    const [updated] = await sql `
+    UPDATE deal_fulfillment
+    SET status = 'revoked', updated_at = NOW()
+    WHERE deal_id = ${id}
+    RETURNING *
+  `;
+    if (!updated)
+        return reply.code(404).send({ error: "Fulfillment not found" });
+    await logCredentialAccess(String(updated.id), body.agentId, "revoke", request.ip);
+    notifyAgents(sql, [deal.buyer_agent_id], "deal.fulfillment_revoked", {
+        dealId: id,
+        sellerAgentId: body.agentId,
+        status: "revoked",
+    });
+    return updated;
 });
 app.post("/api/payments/create-intent", async (request, reply) => {
     const idem = idempotencyKey(request.headers);
@@ -1325,8 +2005,12 @@ app.get("/api/leaderboard", async (request) => {
 });
 app.setErrorHandler((error, _request, reply) => {
     app.log.error(error);
-    if (error.validation) {
-        return reply.code(400).send({ error: 'Validation error', details: error.validation });
+    if (error.validation || error.name === "ZodError") {
+        const details = error.issues ?? error.validation;
+        return reply.code(400).send({ error: 'Validation error', details });
+    }
+    if (typeof error.code === "string" && (error.code.startsWith("23") || error.code.startsWith("22"))) {
+        return reply.code(400).send({ error: error.message ?? "Invalid request" });
     }
     const statusCode = error.statusCode ?? 500;
     const message = statusCode < 500 ? (error.message ?? 'Unknown error') : 'Internal server error';
