@@ -288,7 +288,11 @@ const provideFulfillmentSchema = z.object({
 const getFulfillmentSchema = z.object({
   agentId: z.string().uuid(),
   decrypt: z.preprocess((v) => parseBooleanish(v), z.boolean()).optional().default(false),
-});
+  reveal: z.preprocess((v) => parseBooleanish(v), z.boolean()).optional(),
+}).transform((data) => ({
+  agentId: data.agentId,
+  decrypt: data.decrypt || data.reveal || false,
+}));
 
 const rotateCredentialSchema = z.object({
   agentId: z.string().uuid(),
@@ -2152,7 +2156,8 @@ app.get("/api/leaderboard", async (request) => {
 app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message?: string; name?: string; code?: string; issues?: unknown }, _request, reply) => {
   app.log.error(error);
   if (error.validation || error.name === "ZodError") {
-    return reply.code(400).send({ error: 'Validation error', details: error.validation });
+    const details = error.issues ?? error.validation;
+    return reply.code(400).send({ error: 'Validation error', details });
   }
   if (typeof error.code === "string" && (error.code.startsWith("23") || error.code.startsWith("22"))) {
     return reply.code(400).send({ error: error.message ?? "Invalid request" });
