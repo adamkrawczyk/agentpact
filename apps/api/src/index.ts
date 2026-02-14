@@ -1,13 +1,20 @@
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import postgres from "postgres";
+import postgres, { type Sql } from "postgres";
 import { randomUUID, createHash } from "node:crypto";
 import { z } from "zod";
 import { initAuth } from "./auth.js";
 import { registerHealthChecks } from "./health.js";
 import { registerWebhookRoutes, notifyAgents } from "./webhooks.js";
 import { autoVerify } from "./auto-verify.js";
+import {
+  ensureCredentialVaultSchema,
+  getCredentialEncryptionKey,
+  vaultRetrieve,
+  vaultRotate,
+  vaultStore,
+} from "./credential-vault.js";
 import {
   isOnChainMode,
   generateFundingTransaction,
@@ -54,6 +61,8 @@ async function getAgentStats(db: typeof sql, agentId: string): Promise<{ complet
 
 export const sql = postgres(DATABASE_URL, { max: 10 });
 export const app = Fastify({ logger: true });
+const vaultSql = sql as unknown as Sql<Record<string, unknown>>;
+const credentialEncryptionKey = getCredentialEncryptionKey();
 
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
 
@@ -189,7 +198,7 @@ const FULFILLMENT_TYPES = {
       artifact_urls: z.array(z.string().url()).optional(),
       instructions: z.string().optional(),
       expires_at: z.string().datetime().optional(),
-    }),
+    }).passthrough(),
     autoVerify: null,
   },
 } as const;
@@ -278,6 +287,18 @@ const provideFulfillmentSchema = z.object({
 
 const getFulfillmentSchema = z.object({
   agentId: z.string().uuid(),
+  decrypt: z.preprocess((v) => parseBooleanish(v), z.boolean()).optional().default(false),
+});
+
+const rotateCredentialSchema = z.object({
+  agentId: z.string().uuid(),
+  fieldName: z.string().min(1),
+  newValue: z.string().min(1),
+});
+
+const requestRotationSchema = z.object({
+  agentId: z.string().uuid(),
+  reason: z.string().min(1).optional(),
 });
 
 const verifyFulfillmentSchema = z.object({
@@ -338,6 +359,85 @@ function parseBooleanish(value: unknown): boolean {
   if (typeof value !== "string") return false;
   const normalized = value.trim().toLowerCase();
   return normalized === "true" || normalized === "1" || normalized === "yes";
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
+async function logCredentialAccess(
+  fulfillmentId: string,
+  agentId: string,
+  action: "decrypt" | "rotate" | "request_rotation" | "revoke",
+  ipAddress?: string,
+): Promise<void> {
+  await ensureCredentialVaultSchema(vaultSql);
+  await sql`
+    INSERT INTO credential_access_log (fulfillment_id, agent_id, action, ip_address)
+    VALUES (${fulfillmentId}, ${agentId}, ${action}, ${ipAddress ?? null})
+  `;
+}
+
+async function applyFulfillmentExpiryChecks(
+  deal: { id: string; buyer_agent_id: string; seller_agent_id: string },
+  fulfillment: {
+    id: string;
+    status: string;
+    expires_at: string | Date | null;
+    last_expiry_warning_at: string | Date | null;
+  } & Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  await ensureCredentialVaultSchema(vaultSql);
+  if (!fulfillment.expires_at) return fulfillment;
+
+  const expiresAt = new Date(String(fulfillment.expires_at));
+  if (Number.isNaN(expiresAt.getTime())) return fulfillment;
+
+  const now = new Date();
+  const status = String(fulfillment.status);
+  const expiresInMs = expiresAt.getTime() - now.getTime();
+  const oneDayMs = 24 * 60 * 60 * 1000;
+
+  if (expiresInMs <= 0 && status !== "expired" && status !== "revoked") {
+    const [expired] = await sql`
+      UPDATE deal_fulfillment
+      SET status = 'expired', updated_at = NOW()
+      WHERE id = ${fulfillment.id}
+      RETURNING *
+    `;
+    if (expired) {
+      notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.fulfillment_expired", {
+        dealId: deal.id,
+        fulfillmentId: String(fulfillment.id),
+        expiresAt: fulfillment.expires_at,
+        status: "expired",
+      });
+      return expired as Record<string, unknown>;
+    }
+  }
+
+  if (expiresInMs > 0 && expiresInMs <= oneDayMs && !fulfillment.last_expiry_warning_at) {
+    const [warned] = await sql`
+      UPDATE deal_fulfillment
+      SET last_expiry_warning_at = NOW(), updated_at = NOW()
+      WHERE id = ${fulfillment.id}
+      RETURNING *
+    `;
+    if (warned) {
+      notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.fulfillment_expiring", {
+        dealId: deal.id,
+        fulfillmentId: String(fulfillment.id),
+        expiresAt: fulfillment.expires_at,
+        hoursRemaining: Number((expiresInMs / (60 * 60 * 1000)).toFixed(2)),
+      });
+      return warned as Record<string, unknown>;
+    }
+  }
+
+  return fulfillment;
 }
 
 type GradeResult = {
@@ -1273,6 +1373,7 @@ app.post("/api/deals/:id/fulfillment", async (request, reply) => {
   const typeKey = String(deal.fulfillment_type) as keyof typeof FULFILLMENT_TYPES;
   const typeConfig = FULFILLMENT_TYPES[typeKey] ?? FULFILLMENT_TYPES.generic;
   const parsedData = typeConfig.schema.parse(body.fulfillmentData);
+  const parsedRecord = asRecord(parsedData);
 
   const expiresAt =
     typeof parsedData === "object" && parsedData !== null && "expires_at" in parsedData
@@ -1300,14 +1401,33 @@ app.post("/api/deals/:id/fulfillment", async (request, reply) => {
     RETURNING *
   `;
 
+  const redactedData = await vaultStore(
+    vaultSql,
+    String(fulfillment.id),
+    typeKey,
+    parsedRecord,
+    credentialEncryptionKey,
+  );
+  const encryptedFields = Object.entries(redactedData)
+    .filter(([, value]) => value === "[encrypted]")
+    .map(([field]) => field);
+
+  const [stored] = await sql`
+    UPDATE deal_fulfillment
+    SET fulfillment_data = ${redactedData}::jsonb, updated_at = NOW()
+    WHERE id = ${fulfillment.id}
+    RETURNING *
+  `;
+
   notifyAgents(sql, [deal.buyer_agent_id], "deal.fulfillment_provided", {
     dealId: id,
     sellerAgentId: body.agentId,
     fulfillmentType: typeKey,
-    status: fulfillment.status,
+    status: stored.status,
+    encryptedFields,
   });
 
-  return reply.code(200).send(fulfillment);
+  return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields });
 });
 
 app.get("/api/deals/:id/fulfillment", async (request, reply) => {
@@ -1326,7 +1446,144 @@ app.get("/api/deals/:id/fulfillment", async (request, reply) => {
 
   const [fulfillment] = await sql`SELECT * FROM deal_fulfillment WHERE deal_id = ${id}`;
   if (!fulfillment) return reply.code(404).send({ error: "Fulfillment not found" });
-  return fulfillment;
+
+  const checked = await applyFulfillmentExpiryChecks(
+    { id: String(deal.id), buyer_agent_id: String(deal.buyer_agent_id), seller_agent_id: String(deal.seller_agent_id) },
+    {
+      ...(fulfillment as Record<string, unknown>),
+      id: String(fulfillment.id),
+      status: String(fulfillment.status),
+      expires_at: (fulfillment.expires_at as string | Date | null) ?? null,
+      last_expiry_warning_at: (fulfillment.last_expiry_warning_at as string | Date | null) ?? null,
+    },
+  );
+
+  if (!query.decrypt) {
+    return checked;
+  }
+
+  const decryptedData = await vaultRetrieve(
+    vaultSql,
+    String(checked.id),
+    asRecord(checked.fulfillment_data),
+    credentialEncryptionKey,
+  );
+
+  await logCredentialAccess(String(checked.id), query.agentId, "decrypt", request.ip);
+
+  return { ...checked, fulfillment_data: decryptedData };
+});
+
+app.post("/api/deals/:id/fulfillment/rotate", async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = rotateCredentialSchema.parse(request.body);
+
+  const [deal] = await sql`
+    SELECT id, buyer_agent_id, seller_agent_id
+    FROM deals
+    WHERE id = ${id}
+  `;
+  if (!deal) return reply.code(404).send({ error: "Deal not found" });
+  if (body.agentId !== deal.seller_agent_id) {
+    return reply.code(403).send({ error: "Only seller can rotate credentials" });
+  }
+
+  const [fulfillment] = await sql`SELECT * FROM deal_fulfillment WHERE deal_id = ${id}`;
+  if (!fulfillment) return reply.code(404).send({ error: "Fulfillment not found" });
+
+  await vaultRotate(vaultSql, String(fulfillment.id), body.fieldName, body.newValue, credentialEncryptionKey);
+  await logCredentialAccess(String(fulfillment.id), body.agentId, "rotate", request.ip);
+
+  const [updated] = await sql`
+    UPDATE deal_fulfillment
+    SET
+      fulfillment_data = jsonb_set(
+        CASE
+          WHEN jsonb_typeof(COALESCE(fulfillment_data, '{}'::jsonb)) = 'object' THEN COALESCE(fulfillment_data, '{}'::jsonb)
+          ELSE '{}'::jsonb
+        END,
+        ARRAY[${body.fieldName}],
+        to_jsonb('[encrypted]'::text),
+        true
+      ),
+      updated_at = NOW()
+    WHERE id = ${fulfillment.id}
+    RETURNING *
+  `;
+
+  notifyAgents(sql, [deal.buyer_agent_id], "deal.credential_rotated", {
+    dealId: id,
+    fulfillmentId: fulfillment.id,
+    fieldName: body.fieldName,
+    rotatedBy: body.agentId,
+    rotatedAt: new Date().toISOString(),
+  });
+
+  return updated;
+});
+
+app.get("/api/deals/:id/fulfillment/audit", async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const query = z.object({ agentId: z.string().uuid() }).parse(request.query ?? {});
+  await ensureCredentialVaultSchema(vaultSql);
+
+  const [deal] = await sql`
+    SELECT id, seller_agent_id
+    FROM deals
+    WHERE id = ${id}
+  `;
+  if (!deal) return reply.code(404).send({ error: "Deal not found" });
+  if (query.agentId !== deal.seller_agent_id) {
+    return reply.code(403).send({ error: "Only seller can view fulfillment audit logs" });
+  }
+
+  const [fulfillment] = await sql`SELECT id FROM deal_fulfillment WHERE deal_id = ${id}`;
+  if (!fulfillment) return reply.code(404).send({ error: "Fulfillment not found" });
+
+  const logs = await sql`
+    SELECT id, fulfillment_id, agent_id, action, ip_address, created_at
+    FROM credential_access_log
+    WHERE fulfillment_id = ${fulfillment.id}
+    ORDER BY created_at DESC
+  `;
+
+  return logs;
+});
+
+app.post("/api/deals/:id/fulfillment/request-rotation", async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = requestRotationSchema.parse(request.body);
+  await ensureCredentialVaultSchema(vaultSql);
+
+  const [deal] = await sql`
+    SELECT id, buyer_agent_id, seller_agent_id
+    FROM deals
+    WHERE id = ${id}
+  `;
+  if (!deal) return reply.code(404).send({ error: "Deal not found" });
+  if (body.agentId !== deal.buyer_agent_id) {
+    return reply.code(403).send({ error: "Only buyer can request credential rotation" });
+  }
+
+  const [updated] = await sql`
+    UPDATE deal_fulfillment
+    SET rotation_requested_at = NOW(), updated_at = NOW()
+    WHERE deal_id = ${id}
+    RETURNING *
+  `;
+  if (!updated) return reply.code(404).send({ error: "Fulfillment not found" });
+
+  await logCredentialAccess(String(updated.id), body.agentId, "request_rotation", request.ip);
+
+  notifyAgents(sql, [deal.seller_agent_id], "deal.rotation_requested", {
+    dealId: id,
+    fulfillmentId: updated.id,
+    requestedBy: body.agentId,
+    reason: body.reason ?? null,
+    requestedAt: updated.rotation_requested_at,
+  });
+
+  return updated;
 });
 
 app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
@@ -1394,6 +1651,7 @@ app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {
     RETURNING *
   `;
   if (!updated) return reply.code(404).send({ error: "Fulfillment not found" });
+  await logCredentialAccess(String(updated.id), body.agentId, "revoke", request.ip);
 
   notifyAgents(sql, [deal.buyer_agent_id], "deal.fulfillment_revoked", {
     dealId: id,

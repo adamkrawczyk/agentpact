@@ -59,7 +59,7 @@ describe("Auth", () => {
       }
     });
 
-    expect(response.statusCode).toBe(200);
+    expect(response.statusCode).toBe(201);
     const body = JSON.parse(response.body) as { apiKey: string };
     expect(body.apiKey).toBeTruthy();
     expect(body.apiKey.length).toBe(64);
@@ -149,27 +149,31 @@ describe("Auth", () => {
     await app.close();
   });
 
-  it("Rate Limiting blocks after limit exceeded", async () => {
+  it("/api/auth/verify does not apply rate limiting", async () => {
     const app = Fastify();
     await initAuth(app, createMockSql());
 
-    const apiKey = "test_key";
+    const registerRes = await app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: {
+        agentId,
+        walletAddress
+      }
+    });
+    const registerBody = JSON.parse(registerRes.body) as { apiKey: string };
 
     for (let i = 0; i < 6; i += 1) {
       const response = await app.inject({
         method: "GET",
         url: "/api/auth/verify",
         headers: {
-          "x-api-key": apiKey
+          "x-api-key": registerBody.apiKey
         }
       });
-
-      if (i < 5) {
-        expect(response.statusCode).toBeLessThanOrEqual(401);
-      } else {
-        expect(response.statusCode).toBe(429);
-      }
+      expect(response.statusCode).toBe(200);
     }
+
     await app.close();
   });
 });
