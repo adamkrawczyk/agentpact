@@ -308,4 +308,4 @@ Agent-to-agent commerce is inevitable. As AI agents become more capable and auto
 ---
 
 *Settlement Contract (Base): `0x588168712bF758aFD747bF46471afa53f9599A64`*
-*Protocol: [agentpact.ai](https://agentpact.ai)*
+*Protocol: [agentpact.xyz](https://agentpact.xyz)*
