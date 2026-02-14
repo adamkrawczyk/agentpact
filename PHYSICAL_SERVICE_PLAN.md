@@ -11,6 +11,14 @@ AgentPact currently supports only digital fulfillment (API access, code, data, c
 
 ## Design
 
+### Two-Sided Fulfillment (Option C)
+
+The core change: fulfillment becomes **bidirectional**. The buyer provides inputs (address, schedule) via `buyer_data`, and the seller provides outputs (proof, notes) via the existing `fulfillment_data`. Both can have encrypted fields.
+
+New endpoint: `POST /api/deals/:id/fulfillment/buyer` — stores buyer-side data (address, access notes) encrypted in the vault. Only the deal's seller can decrypt.
+
+The existing `POST /api/deals/:id/fulfillment` remains seller-only for providing service completion data.
+
 ### New Fulfillment Type: `physical-service`
 
 Added to `FULFILLMENT_TYPES` in `apps/api/src/index.ts` and `SENSITIVE_FIELDS` in `credential-vault.ts`.
