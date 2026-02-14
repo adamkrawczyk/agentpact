@@ -35,6 +35,9 @@ RUN npm ci --omit=dev --workspace @agentpact/web --include-workspace-root \
 # Runtime files needed by Web service.
 COPY --from=builder /app/apps/web/dist ./apps/web/dist
 
+# Include docs for whitepaper route.
+COPY docs ./docs
+
 # Railway/containers should probe this endpoint.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3000/ > /dev/null || exit 1
