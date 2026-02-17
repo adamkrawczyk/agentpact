@@ -780,6 +780,12 @@ async function completeDealMilestones(
   }
 
   if (mode === "on-chain") {
+    if (opts.skipOnChainRelease) {
+      await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
+      await sql`UPDATE milestones SET status = 'accepted', updated_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
+      return { mode, action: "completed_without_onchain_release" };
+    }
+
     const intents = await sql`
       SELECT pi."mode" AS payment_mode
       FROM payment_intents pi
@@ -789,7 +795,7 @@ async function completeDealMilestones(
     `;
     const hasOnChainFundedIntent = intents.some((row) => String(row.payment_mode) === "on-chain");
 
-    if (hasOnChainFundedIntent && !opts.skipOnChainRelease) {
+    if (hasOnChainFundedIntent) {
       await sql`UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId}`;
       return {
         mode,
@@ -805,11 +811,6 @@ async function completeDealMilestones(
           };
         }),
       };
-    }
-
-    if (hasOnChainFundedIntent && opts.skipOnChainRelease) {
-      await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-      return { mode, action: "completed_without_onchain_release" };
     }
   }
 
