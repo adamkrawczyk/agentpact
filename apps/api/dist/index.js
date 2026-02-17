@@ -1646,7 +1646,7 @@ app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
     }
     await sql `
     UPDATE deal_fulfillment
-    SET status = 'verified', verified_at = NOW(), updated_at = NOW()
+    SET status = 'verified', updated_at = NOW()
     WHERE deal_id = ${id}
   `;
     const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: body.skipOnChainRelease });
