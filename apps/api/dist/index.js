@@ -647,7 +647,7 @@ async function completeDealMilestones(dealId, opts = {}) {
     if (mode === "on-chain") {
         if (opts.skipOnChainRelease) {
             await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-            await sql `UPDATE milestones SET status = 'accepted', updated_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
+            await sql `UPDATE milestones SET status = 'accepted' WHERE deal_id = ${dealId} AND status != 'accepted'`;
             return { mode, action: "completed_without_onchain_release" };
         }
         const intents = await sql `
