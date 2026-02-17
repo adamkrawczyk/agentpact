@@ -620,6 +620,12 @@ async function releaseMilestonePayment(milestoneId) {
         UPDATE deals SET status = 'completed', updated_at = NOW()
         WHERE id = (SELECT deal_id FROM milestones WHERE id = $1)
       `, [milestoneId]);
+        // Auto-archive the associated offer
+        await txn.unsafe(`
+        UPDATE offers SET status = 'archived', updated_at = NOW()
+        WHERE id = (SELECT offer_id FROM deals WHERE id = (SELECT deal_id FROM milestones WHERE id = $1))
+          AND status = 'active'
+      `, [milestoneId]);
         await txn.unsafe(`
         INSERT INTO audit_log (action, object_type, object_id, payload_json)
         VALUES ('payment.release', 'milestone', $1, $2::jsonb)
@@ -1624,7 +1630,7 @@ app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
         const body = confirmDeliverySchema.parse(request.body);
         const rating = body.rating ?? 5;
         const [deal] = await sql `
-    SELECT id, status, buyer_agent_id, seller_agent_id
+    SELECT id, status, buyer_agent_id, seller_agent_id, offer_id
     FROM deals
     WHERE id = ${id}
   `;
@@ -1652,6 +1658,10 @@ app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
     WHERE deal_id = ${id}
   `;
         const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: body.skipOnChainRelease });
+        // Auto-archive the associated offer when deal completes
+        if (deal.offer_id) {
+            await sql `UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
+        }
         await audit(body.agentId, "deal.buyer_review", "deal", id, idem, {
             dealId: id,
             rating,
