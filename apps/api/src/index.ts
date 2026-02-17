@@ -1938,7 +1938,7 @@ app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
     WHERE deal_id = ${id}
   `;
   if (!fulfillment) return reply.code(404).send({ error: "Fulfillment not found" });
-  if (!["provided", "active"].includes(String(fulfillment.status))) {
+  if (!["provided", "active", "verified"].includes(String(fulfillment.status))) {
     return reply.code(400).send({ error: `Fulfillment status ${fulfillment.status} cannot be confirmed` });
   }
 

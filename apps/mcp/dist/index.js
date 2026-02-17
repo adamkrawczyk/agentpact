@@ -850,6 +850,10 @@ const tools = [
                     type: "boolean",
                     description: "Set true to approve fulfillment, false to reject",
                 },
+                completeOnVerify: {
+                    type: "boolean",
+                    description: "When true, accepted fulfillment will also trigger milestone release/completion flow",
+                },
                 notes: {
                     type: "string",
                     description: "Optional buyer notes for verification outcome",
