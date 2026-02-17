@@ -1914,6 +1914,7 @@ app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
 });
 
 app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
+  try {
   const { id } = request.params as { id: string };
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
   const body = confirmDeliverySchema.parse(request.body);
@@ -1980,6 +1981,10 @@ app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
     events,
     release: releaseResult,
   };
+  } catch (err: any) {
+    console.error("[confirm-delivery] Error:", err.message, err.stack);
+    return reply.code(500).send({ error: "Internal server error", detail: err.message });
+  }
 });
 
 app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {

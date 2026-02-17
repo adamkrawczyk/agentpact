@@ -1617,65 +1617,71 @@ app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
     return updated;
 });
 app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
-    const { id } = request.params;
-    const idem = idempotencyKey(request.headers);
-    const body = confirmDeliverySchema.parse(request.body);
-    const rating = body.rating ?? 5;
-    const [deal] = await sql `
+    try {
+        const { id } = request.params;
+        const idem = idempotencyKey(request.headers);
+        const body = confirmDeliverySchema.parse(request.body);
+        const rating = body.rating ?? 5;
+        const [deal] = await sql `
     SELECT id, status, buyer_agent_id, seller_agent_id
     FROM deals
     WHERE id = ${id}
   `;
-    if (!deal)
-        return reply.code(404).send({ error: "Deal not found" });
-    if (body.agentId !== deal.buyer_agent_id) {
-        return reply.code(403).send({ error: "Only buyer can confirm delivery" });
-    }
-    if (!["active", "delivered"].includes(String(deal.status))) {
-        return reply.code(400).send({ error: `Deal status ${deal.status} cannot be confirmed` });
-    }
-    const [fulfillment] = await sql `
+        if (!deal)
+            return reply.code(404).send({ error: "Deal not found" });
+        if (body.agentId !== deal.buyer_agent_id) {
+            return reply.code(403).send({ error: "Only buyer can confirm delivery" });
+        }
+        if (!["active", "delivered"].includes(String(deal.status))) {
+            return reply.code(400).send({ error: `Deal status ${deal.status} cannot be confirmed` });
+        }
+        const [fulfillment] = await sql `
     SELECT id, status
     FROM deal_fulfillment
     WHERE deal_id = ${id}
   `;
-    if (!fulfillment)
-        return reply.code(404).send({ error: "Fulfillment not found" });
-    if (!["provided", "active", "verified"].includes(String(fulfillment.status))) {
-        return reply.code(400).send({ error: `Fulfillment status ${fulfillment.status} cannot be confirmed` });
-    }
-    await sql `
+        if (!fulfillment)
+            return reply.code(404).send({ error: "Fulfillment not found" });
+        if (!["provided", "active", "verified"].includes(String(fulfillment.status))) {
+            return reply.code(400).send({ error: `Fulfillment status ${fulfillment.status} cannot be confirmed` });
+        }
+        await sql `
     UPDATE deal_fulfillment
     SET status = 'verified', updated_at = NOW()
     WHERE deal_id = ${id}
   `;
-    const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: body.skipOnChainRelease });
-    await audit(body.agentId, "deal.buyer_review", "deal", id, idem, {
-        dealId: id,
-        rating,
-        notes: body.notes ?? null,
-    });
-    await sql `
+        const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: body.skipOnChainRelease });
+        await audit(body.agentId, "deal.buyer_review", "deal", id, idem, {
+            dealId: id,
+            rating,
+            notes: body.notes ?? null,
+        });
+        await sql `
     UPDATE agents
     SET reputation_score = COALESCE(reputation_score, 0) + ${rating}
     WHERE id = ${deal.seller_agent_id}
   `;
-    notifyAgents(sql, [deal.seller_agent_id], "deal.delivery_confirmed", {
-        dealId: id,
-        buyerAgentId: body.agentId,
-        rating,
-        notes: body.notes ?? null,
-        releaseAction: releaseResult.action,
-    });
-    const [updatedDeal] = await sql `SELECT * FROM deals WHERE id = ${id}`;
-    const milestones = await sql `SELECT * FROM milestones WHERE deal_id = ${id} ORDER BY idx`;
-    const events = await sql `SELECT * FROM negotiation_events WHERE deal_id = ${id} ORDER BY created_at`;
-    return {
-        ...updatedDeal,
-        milestones,
-        events,
-        release: releaseResult,
-    };
+        notifyAgents(sql, [deal.seller_agent_id], "deal.delivery_confirmed", {
+            dealId: id,
+            buyerAgentId: body.agentId,
+            rating,
+            notes: body.notes ?? null,
+            releaseAction: releaseResult.action,
+        });
+        const [updatedDeal] = await sql `SELECT * FROM deals WHERE id = ${id}`;
+        const milestones = await sql `SELECT * FROM milestones WHERE deal_id = ${id} ORDER BY idx`;
+        const events = await sql `SELECT * FROM negotiation_events WHERE deal_id = ${id} ORDER BY created_at`;
+        return {
+            ...updatedDeal,
+            milestones,
+            events,
+            release: releaseResult,
+        };
+    }
+    catch (err) {
+        console.error("[confirm-delivery] Error:", err.message, err.stack);
+        return reply.code(500).send({ error: "Internal server error", detail: err.message });
+    }
 });
 app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {
     const { id } = request.params;
