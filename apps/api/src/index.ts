@@ -453,6 +453,15 @@ function asRecord(value: unknown): Record<string, unknown> {
   return {};
 }
 
+function getRequesterAgentId(request: { agentId?: string }, reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }): string | null {
+  const requesterAgentId = request.agentId;
+  if (!requesterAgentId) {
+    reply.code(401).send({ error: "Missing API key" });
+    return null;
+  }
+  return requesterAgentId;
+}
+
 const BUYER_VAULT_PREFIX = "buyer__";
 
 async function storeBuyerContext(
@@ -965,6 +974,11 @@ app.get("/api/skills/challenges", async (request) => {
 app.post("/api/skills/challenges/:id/start", async (request, reply) => {
   const { id } = challengeIdParamSchema.parse(request.params);
   const body = startChallengeSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
 
   const [challenge] = await sql`
     SELECT * FROM skill_challenges
@@ -1029,6 +1043,11 @@ app.post("/api/skills/challenges/:id/start", async (request, reply) => {
 app.post("/api/skills/challenges/:id/submit", async (request, reply) => {
   const { id } = challengeIdParamSchema.parse(request.params);
   const body = submitChallengeSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
 
   const [attempt] = await sql`
     SELECT sv.*, sc.category, sc.expected_criteria
@@ -1157,6 +1176,11 @@ app.get("/api/agents/:id/skills", async (request, reply) => {
 app.post("/api/offers", async (request, reply) => {
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
   const body = createOfferSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
   const location = body.location ?? null;
 
   const [offer] = await sql`
@@ -1174,9 +1198,15 @@ app.post("/api/offers", async (request, reply) => {
   return reply.code(201).send(offer);
 });
 
-app.patch("/api/offers/:id", async (request) => {
+app.patch("/api/offers/:id", async (request, reply) => {
   const { id } = request.params as { id: string };
   const body = createOfferSchema.partial().parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  const [existingOffer] = await sql`SELECT agent_id FROM offers WHERE id = ${id}`;
+  if (!existingOffer || existingOffer.agent_id !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
   const title = body.title ?? null;
   const descriptionMd = body.descriptionMd ?? null;
   const category = body.category ?? null;
@@ -1207,8 +1237,14 @@ app.patch("/api/offers/:id", async (request) => {
   return offer;
 });
 
-app.post("/api/offers/:id/archive", async (request) => {
+app.post("/api/offers/:id/archive", async (request, reply) => {
   const { id } = request.params as { id: string };
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  const [existingOffer] = await sql`SELECT agent_id FROM offers WHERE id = ${id}`;
+  if (!existingOffer || existingOffer.agent_id !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
   const [offer] = await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${id} RETURNING *`;
   return offer;
 });
@@ -1251,6 +1287,11 @@ app.get("/api/offers/:id", async (request, reply) => {
 app.post("/api/needs", async (request, reply) => {
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
   const body = createNeedSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
   const budgetMin = body.budgetMin ?? null;
   const budgetMax = body.budgetMax ?? null;
   const deadlineAt = body.deadlineAt ?? null;
@@ -1270,9 +1311,15 @@ app.post("/api/needs", async (request, reply) => {
   return reply.code(201).send(need);
 });
 
-app.patch("/api/needs/:id", async (request) => {
+app.patch("/api/needs/:id", async (request, reply) => {
   const { id } = request.params as { id: string };
   const body = createNeedSchema.partial().parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  const [existingNeed] = await sql`SELECT agent_id FROM needs WHERE id = ${id}`;
+  if (!existingNeed || existingNeed.agent_id !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
   const title = body.title ?? null;
   const descriptionMd = body.descriptionMd ?? null;
   const category = body.category ?? null;
@@ -1303,8 +1350,14 @@ app.patch("/api/needs/:id", async (request) => {
   return need;
 });
 
-app.post("/api/needs/:id/archive", async (request) => {
+app.post("/api/needs/:id/archive", async (request, reply) => {
   const { id } = request.params as { id: string };
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  const [existingNeed] = await sql`SELECT agent_id FROM needs WHERE id = ${id}`;
+  if (!existingNeed || existingNeed.agent_id !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
   const [need] = await sql`UPDATE needs SET status = 'archived', updated_at = NOW() WHERE id = ${id} RETURNING *`;
   return need;
 });
@@ -1367,6 +1420,11 @@ app.post("/api/alerts/subscribe", async (request, reply) => {
       webhookUrl: z.string().url().optional()
     })
     .parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
   const webhookUrl = body.webhookUrl ?? null;
 
   const [subscription] = await sql`
@@ -1380,6 +1438,19 @@ app.post("/api/alerts/subscribe", async (request, reply) => {
 app.post("/api/deals/propose", async (request, reply) => {
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
   const body = proposeDealSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.buyerAgentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
+  const [offerOwner] = await sql`SELECT agent_id FROM offers WHERE id = ${body.offerId}`;
+  if (!offerOwner || offerOwner.agent_id !== body.sellerAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
+  const [needOwner] = await sql`SELECT agent_id FROM needs WHERE id = ${body.needId}`;
+  if (!needOwner || needOwner.agent_id !== body.buyerAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
 
   const result = await sql.begin(async (txn) => {
     const [deal] = await txn.unsafe(
@@ -1429,10 +1500,21 @@ app.post("/api/deals/propose", async (request, reply) => {
   return reply.code(201).send(result);
 });
 
-app.post("/api/deals/:id/counter", async (request) => {
+app.post("/api/deals/:id/counter", async (request, reply) => {
   const { id } = request.params as { id: string };
   const requestBody = request.body && typeof request.body === "object" ? request.body : {};
   const body = counterDealSchema.parse({ ...requestBody, dealId: id });
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.actorAgentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
+
+  const [deal] = await sql`SELECT buyer_agent_id, seller_agent_id FROM deals WHERE id = ${id}`;
+  if (!deal) return reply.code(404).send({ error: "Deal not found" });
+  if (body.actorAgentId !== deal.buyer_agent_id && body.actorAgentId !== deal.seller_agent_id) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
 
   await enforceDealDelta(id, body.negotiatedTotal);
 
@@ -1470,9 +1552,14 @@ app.post("/api/deals/:id/counter", async (request) => {
   return { ok: true };
 });
 
-app.post("/api/deals/:id/accept", async (request) => {
+app.post("/api/deals/:id/accept", async (request, reply) => {
   const { id } = request.params as { id: string };
   const body = z.object({ actorAgentId: z.string().uuid() }).parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.actorAgentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
 
   const [deal] = await sql`
     SELECT d.buyer_agent_id, d.seller_agent_id, o.fulfillment_type
@@ -1480,6 +1567,10 @@ app.post("/api/deals/:id/accept", async (request) => {
     JOIN offers o ON o.id = d.offer_id
     WHERE d.id = ${id}
   `;
+  if (!deal) return reply.code(404).send({ error: "Deal not found" });
+  if (body.actorAgentId !== deal.seller_agent_id) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
 
   await sql.begin(async (txn) => {
     await txn.unsafe("UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = $1", [id]);
@@ -1513,11 +1604,20 @@ app.post("/api/deals/:id/accept", async (request) => {
   return { ok: true };
 });
 
-app.post("/api/deals/:id/cancel", async (request) => {
+app.post("/api/deals/:id/cancel", async (request, reply) => {
   const { id } = request.params as { id: string };
   const body = z.object({ actorAgentId: z.string().uuid(), reason: z.string().optional() }).parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.actorAgentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
 
   const [deal] = await sql`SELECT buyer_agent_id, seller_agent_id FROM deals WHERE id = ${id}`;
+  if (!deal) return reply.code(404).send({ error: "Deal not found" });
+  if (requesterAgentId !== deal.buyer_agent_id && requesterAgentId !== deal.seller_agent_id) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
 
   await sql.begin(async (txn) => {
     await txn.unsafe("UPDATE deals SET status = 'cancelled', updated_at = NOW() WHERE id = $1", [id]);
@@ -1579,6 +1679,11 @@ app.get("/api/fulfillment/types", async () => {
 app.post("/api/deals/:id/fulfillment", async (request, reply) => {
   const { id } = request.params as { id: string };
   const body = provideFulfillmentSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
 
   const [deal] = await sql`
     SELECT d.id, d.status, d.buyer_agent_id, d.seller_agent_id, o.fulfillment_type
@@ -1655,6 +1760,11 @@ app.post("/api/deals/:id/fulfillment", async (request, reply) => {
 app.post("/api/deals/:id/fulfillment/buyer", async (request, reply) => {
   const { id } = request.params as { id: string };
   const body = provideBuyerFulfillmentSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
 
   const [deal] = await sql`
     SELECT d.id, d.status, d.buyer_agent_id, d.seller_agent_id, o.fulfillment_type
@@ -1764,6 +1874,11 @@ app.get("/api/deals/:id/fulfillment", async (request, reply) => {
 app.post("/api/deals/:id/fulfillment/rotate", async (request, reply) => {
   const { id } = request.params as { id: string };
   const body = rotateCredentialSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
 
   const [deal] = await sql`
     SELECT id, buyer_agent_id, seller_agent_id
@@ -1840,6 +1955,11 @@ app.get("/api/deals/:id/fulfillment/audit", async (request, reply) => {
 app.post("/api/deals/:id/fulfillment/request-rotation", async (request, reply) => {
   const { id } = request.params as { id: string };
   const body = requestRotationSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
   await ensureCredentialVaultSchema(vaultSql);
 
   const [deal] = await sql`
@@ -1876,6 +1996,11 @@ app.post("/api/deals/:id/fulfillment/request-rotation", async (request, reply) =
 app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
   const { id } = request.params as { id: string };
   const body = verifyFulfillmentSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
 
   const [deal] = await sql`
     SELECT id, buyer_agent_id, seller_agent_id
@@ -1928,6 +2053,11 @@ app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
   const { id } = request.params as { id: string };
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
   const body = confirmDeliverySchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
   const rating = body.rating ?? 5;
 
   const [deal] = await sql`
@@ -2005,6 +2135,11 @@ app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
 app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {
   const { id } = request.params as { id: string };
   const body = revokeFulfillmentSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
 
   const [deal] = await sql`
     SELECT id, buyer_agent_id, seller_agent_id
@@ -2035,6 +2170,11 @@ app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {
 app.post("/api/payments/create-intent", async (request, reply) => {
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
   const body = createPaymentIntentSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.buyerAgentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
   const mode = isOnChainMode() ? "on-chain" : "simulation";
 
   const [milestone] = await sql`
@@ -2046,6 +2186,9 @@ app.post("/api/payments/create-intent", async (request, reply) => {
   `;
 
   if (!milestone) return reply.code(404).send({ error: "Milestone not found" });
+  if (milestone.buyer_agent_id !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
   if (!["in_progress", "pending"].includes(milestone.status)) {
     return reply.code(400).send({ error: `Milestone status ${milestone.status} cannot be funded` });
   }
@@ -2160,12 +2303,17 @@ const confirmFundingSchema = z.object({
 app.post("/api/payments/confirm-funding", async (request, reply) => {
   const body = confirmFundingSchema.parse(request.body);
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
 
   const [intent] = await sql`
     SELECT * FROM payment_intents WHERE id = ${body.paymentIntentId}
   `;
 
   if (!intent) return reply.code(404).send({ error: "Payment intent not found" });
+  if (intent.buyer_agent_id !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
   if (intent.status !== "created") {
     return reply.code(400).send({ error: `Intent status is ${intent.status}, expected created` });
   }
@@ -2222,6 +2370,18 @@ app.get("/api/payments/on-chain-status", async (request, reply) => {
 
 app.post("/api/payments/release", async (request, reply) => {
   const body = z.object({ milestoneId: z.string().uuid() }).parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  const [milestone] = await sql`
+    SELECT d.buyer_agent_id
+    FROM milestones m
+    JOIN deals d ON d.id = m.deal_id
+    WHERE m.id = ${body.milestoneId}
+  `;
+  if (!milestone) return reply.code(404).send({ error: "Milestone not found" });
+  if (milestone.buyer_agent_id !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
   const mode = isOnChainMode() ? "on-chain" : "simulation";
 
   if (mode === "on-chain") {
@@ -2251,10 +2411,15 @@ app.post("/api/payments/release", async (request, reply) => {
 
 app.post("/api/payments/refund", async (request, reply) => {
   const body = z.object({ paymentIntentId: z.string().uuid(), reason: z.string().optional() }).parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
   const mode = isOnChainMode() ? "on-chain" : "simulation";
 
   const [intent] = await sql`SELECT * FROM payment_intents WHERE id = ${body.paymentIntentId}`;
   if (!intent) return reply.code(404).send({ error: "Payment intent not found" });
+  if (intent.buyer_agent_id !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
 
   if (mode === "on-chain") {
     // On-chain refund: the milestone must first be disputed (buyer calls openDispute),
@@ -2303,6 +2468,21 @@ app.post("/api/payments/refund", async (request, reply) => {
 
 app.post("/api/deliveries/submit", async (request, reply) => {
   const body = submitDeliverySchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.submittedBy !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
+  const [submissionAuth] = await sql`
+    SELECT d.seller_agent_id
+    FROM milestones m
+    JOIN deals d ON d.id = m.deal_id
+    WHERE m.id = ${body.milestoneId}
+  `;
+  if (!submissionAuth) return reply.code(404).send({ error: "Milestone not found" });
+  if (submissionAuth.seller_agent_id !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
   const checksum = createHash("sha256").update(JSON.stringify(body.artifacts)).digest("hex");
   const notes = body.notes ?? null;
 
@@ -2323,6 +2503,21 @@ app.post("/api/deliveries/submit", async (request, reply) => {
 
 app.post("/api/deliveries/verify", async (request, reply) => {
   const body = verifyDeliverySchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.buyerAgentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
+  const [verificationAuth] = await sql`
+    SELECT d.buyer_agent_id
+    FROM milestones m
+    JOIN deals d ON d.id = m.deal_id
+    WHERE m.id = ${body.milestoneId}
+  `;
+  if (!verificationAuth) return reply.code(404).send({ error: "Milestone not found" });
+  if (verificationAuth.buyer_agent_id !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
   const verificationNotes = body.verificationNotes ?? null;
 
   if (!body.accepted) {
@@ -2363,6 +2558,16 @@ app.post("/api/deliveries/verify", async (request, reply) => {
 
 app.post("/api/disputes/open", async (request, reply) => {
   const body = disputeSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.openedBy !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
+  const [deal] = await sql`SELECT buyer_agent_id, seller_agent_id FROM deals WHERE id = ${body.dealId}`;
+  if (!deal) return reply.code(404).send({ error: "Deal not found" });
+  if (requesterAgentId !== deal.buyer_agent_id && requesterAgentId !== deal.seller_agent_id) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
   const [dispute] = await sql`
     INSERT INTO disputes (deal_id, milestone_id, opened_by, reason, evidence_json, expires_at)
     VALUES (
@@ -2397,6 +2602,26 @@ app.post("/api/disputes/resolve-timeouts", async () => {
 
 app.post("/api/feedback", async (request, reply) => {
   const body = feedbackSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.fromAgentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
+  const [deal] = await sql`
+    SELECT buyer_agent_id, seller_agent_id
+    FROM deals
+    WHERE id = ${body.dealId}
+  `;
+  if (!deal) return reply.code(404).send({ error: "Deal not found" });
+  if (body.fromAgentId !== deal.buyer_agent_id && body.fromAgentId !== deal.seller_agent_id) {
+    return reply.code(403).send({ error: "Not authorized" });
+  }
+  if (body.toAgentId !== deal.buyer_agent_id && body.toAgentId !== deal.seller_agent_id) {
+    return reply.code(400).send({ error: "Feedback target must be a participant in the deal" });
+  }
+  if (body.fromAgentId === body.toAgentId) {
+    return reply.code(400).send({ error: "Feedback target must differ from author" });
+  }
   const comment = body.comment ?? null;
   const [entry] = await sql`
     INSERT INTO feedback (

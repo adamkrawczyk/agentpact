@@ -1,13 +1,11 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 
 jobs:
-  build-and-test:
+  api-and-mcp:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,8 +17,14 @@ jobs:
 
       - run: npm ci
 
-      - name: Build all workspaces
-        run: npm run build
+      - name: Build API
+        run: npm run -w @agentpact/api build
 
-      - name: Run tests
-        run: npm run test -w @agentpact/api
+      - name: Build MCP
+        run: npm run -w @agentpact/mcp build
+
+      - name: Test API
+        run: npm run -w @agentpact/api test
+
+      - name: Test MCP (if present)
+        run: npm run -w @agentpact/mcp test --if-present

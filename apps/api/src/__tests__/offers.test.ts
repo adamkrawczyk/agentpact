@@ -1,22 +1,16 @@
+import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { cleanDatabase, createTestApp, generateTestAgent, generateTestOffer, getAuthHeaders } from "./helpers/testApp.js";
+import { cleanDatabase, createTestApp, generateTestOffer, getAuthHeadersForAgent } from "./helpers/testApp.js";
 
 describe("Offers API", () => {
   let authHeaders: Record<string, string>;
   let agentId: string;
 
   beforeEach(async () => {
-    const { app } = await createTestApp();
+    await createTestApp();
     await cleanDatabase();
-    authHeaders = await getAuthHeaders();
-
-    const agentRes = await app.inject({
-      method: "POST",
-      url: "/api/agents",
-      headers: authHeaders,
-      payload: generateTestAgent()
-    });
-    agentId = (JSON.parse(agentRes.body) as { id: string }).id;
+    agentId = randomUUID();
+    authHeaders = await getAuthHeadersForAgent(agentId);
   });
 
   describe("POST /api/offers", () => {
@@ -38,7 +32,7 @@ describe("Offers API", () => {
       expect(body.status).toBe("active");
     });
 
-    it("should reject unknown agentId via FK", async () => {
+    it("should reject creating offer for another agent", async () => {
       const { app } = await createTestApp();
       const offer = generateTestOffer("00000000-0000-0000-0000-000000000000");
 
@@ -49,7 +43,7 @@ describe("Offers API", () => {
         payload: offer
       });
 
-      expect(response.statusCode).toBe(400);
+      expect(response.statusCode).toBe(403);
     });
 
     it("should validate positive price", async () => {

@@ -1,42 +1,32 @@
+import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   cleanDatabase,
   createTestApp,
-  generateTestAgent,
   generateTestNeed,
   generateTestOffer,
-  getAuthHeaders,
+  getAuthHeadersForAgent,
 } from "./helpers/testApp.js";
 
 type DealFixture = {
   dealId: string;
   buyerId: string;
   sellerId: string;
+  buyerHeaders: Record<string, string>;
+  sellerHeaders: Record<string, string>;
 };
 
-async function setupPhysicalServiceDeal(authHeaders: Record<string, string>): Promise<DealFixture> {
+async function setupPhysicalServiceDeal(): Promise<DealFixture> {
   const { app } = await createTestApp();
-
-  const buyerRes = await app.inject({
-    method: "POST",
-    url: "/api/agents",
-    headers: authHeaders,
-    payload: generateTestAgent(),
-  });
-  const buyerId = (JSON.parse(buyerRes.body) as { id: string }).id;
-
-  const sellerRes = await app.inject({
-    method: "POST",
-    url: "/api/agents",
-    headers: authHeaders,
-    payload: generateTestAgent(),
-  });
-  const sellerId = (JSON.parse(sellerRes.body) as { id: string }).id;
+  const buyerId = randomUUID();
+  const sellerId = randomUUID();
+  const buyerHeaders = await getAuthHeadersForAgent(buyerId);
+  const sellerHeaders = await getAuthHeadersForAgent(sellerId);
 
   const offerRes = await app.inject({
     method: "POST",
     url: "/api/offers",
-    headers: authHeaders,
+    headers: sellerHeaders,
     payload: { ...generateTestOffer(sellerId), fulfillmentType: "physical-service" },
   });
   const offerId = (JSON.parse(offerRes.body) as { id: string }).id;
@@ -44,7 +34,7 @@ async function setupPhysicalServiceDeal(authHeaders: Record<string, string>): Pr
   const needRes = await app.inject({
     method: "POST",
     url: "/api/needs",
-    headers: authHeaders,
+    headers: buyerHeaders,
     payload: { ...generateTestNeed(buyerId), fulfillmentType: "physical-service" },
   });
   const needId = (JSON.parse(needRes.body) as { id: string }).id;
@@ -52,7 +42,7 @@ async function setupPhysicalServiceDeal(authHeaders: Record<string, string>): Pr
   const proposeRes = await app.inject({
     method: "POST",
     url: "/api/deals/propose",
-    headers: authHeaders,
+    headers: buyerHeaders,
     payload: {
       buyerAgentId: buyerId,
       sellerAgentId: sellerId,
@@ -68,11 +58,11 @@ async function setupPhysicalServiceDeal(authHeaders: Record<string, string>): Pr
   await app.inject({
     method: "POST",
     url: `/api/deals/${dealId}/accept`,
-    headers: authHeaders,
+    headers: sellerHeaders,
     payload: { actorAgentId: sellerId },
   });
 
-  return { dealId, buyerId, sellerId };
+  return { dealId, buyerId, sellerId, buyerHeaders, sellerHeaders };
 }
 
 describe("Physical Service Fulfillment", () => {
@@ -81,7 +71,7 @@ describe("Physical Service Fulfillment", () => {
   beforeEach(async () => {
     await createTestApp();
     await cleanDatabase();
-    authHeaders = await getAuthHeaders();
+    authHeaders = await getAuthHeadersForAgent(randomUUID());
   });
 
   it("includes physical-service in fulfillment types", async () => {
@@ -102,12 +92,12 @@ describe("Physical Service Fulfillment", () => {
 
   it("stores encrypted buyer context and returns redacted buyer_data by default", async () => {
     const { app, sql } = await createTestApp();
-    const { dealId, buyerId } = await setupPhysicalServiceDeal(authHeaders);
+    const { dealId, buyerId, buyerHeaders } = await setupPhysicalServiceDeal();
 
     const provideRes = await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment/buyer`,
-      headers: authHeaders,
+      headers: buyerHeaders,
       payload: {
         agentId: buyerId,
         buyerData: {
@@ -144,7 +134,7 @@ describe("Physical Service Fulfillment", () => {
     const getRes = await app.inject({
       method: "GET",
       url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}`,
-      headers: authHeaders,
+      headers: buyerHeaders,
     });
     expect(getRes.statusCode).toBe(200);
 
@@ -154,12 +144,12 @@ describe("Physical Service Fulfillment", () => {
 
   it("returns redacted buyer_data for seller by default and decrypted with decrypt=true", async () => {
     const { app } = await createTestApp();
-    const { dealId, buyerId, sellerId } = await setupPhysicalServiceDeal(authHeaders);
+    const { dealId, buyerId, sellerId, buyerHeaders, sellerHeaders } = await setupPhysicalServiceDeal();
 
     await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment/buyer`,
-      headers: authHeaders,
+      headers: buyerHeaders,
       payload: {
         agentId: buyerId,
         buyerData: {
@@ -174,7 +164,7 @@ describe("Physical Service Fulfillment", () => {
     const redactedRes = await app.inject({
       method: "GET",
       url: `/api/deals/${dealId}/fulfillment?agentId=${sellerId}`,
-      headers: authHeaders,
+      headers: sellerHeaders,
     });
     expect(redactedRes.statusCode).toBe(200);
     const redacted = JSON.parse(redactedRes.body) as { buyer_data: Record<string, unknown> };
@@ -183,7 +173,7 @@ describe("Physical Service Fulfillment", () => {
     const decryptedRes = await app.inject({
       method: "GET",
       url: `/api/deals/${dealId}/fulfillment?agentId=${sellerId}&decrypt=true`,
-      headers: authHeaders,
+      headers: sellerHeaders,
     });
     expect(decryptedRes.statusCode).toBe(200);
     const decrypted = JSON.parse(decryptedRes.body) as { buyer_data: Record<string, unknown> };
@@ -194,18 +184,13 @@ describe("Physical Service Fulfillment", () => {
   it("persists optional location on offers and needs", async () => {
     const { app } = await createTestApp();
 
-    const agentRes = await app.inject({
-      method: "POST",
-      url: "/api/agents",
-      headers: authHeaders,
-      payload: generateTestAgent(),
-    });
-    const agentId = (JSON.parse(agentRes.body) as { id: string }).id;
+    const agentId = randomUUID();
+    const ownerHeaders = await getAuthHeadersForAgent(agentId);
 
     const offerRes = await app.inject({
       method: "POST",
       url: "/api/offers",
-      headers: authHeaders,
+      headers: ownerHeaders,
       payload: {
         ...generateTestOffer(agentId),
         location: {
@@ -222,7 +207,7 @@ describe("Physical Service Fulfillment", () => {
     const offerGetRes = await app.inject({
       method: "GET",
       url: `/api/offers/${offer.id}`,
-      headers: authHeaders,
+      headers: ownerHeaders,
     });
     const fetchedOffer = JSON.parse(offerGetRes.body) as { location: Record<string, unknown> };
     expect(fetchedOffer.location.city).toBe("Austin");
@@ -231,7 +216,7 @@ describe("Physical Service Fulfillment", () => {
     const needRes = await app.inject({
       method: "POST",
       url: "/api/needs",
-      headers: authHeaders,
+      headers: ownerHeaders,
       payload: {
         ...generateTestNeed(agentId),
         location: {
@@ -248,7 +233,7 @@ describe("Physical Service Fulfillment", () => {
     const needGetRes = await app.inject({
       method: "GET",
       url: `/api/needs/${need.id}`,
-      headers: authHeaders,
+      headers: ownerHeaders,
     });
     const fetchedNeed = JSON.parse(needGetRes.body) as { location: Record<string, unknown> };
     expect(fetchedNeed.location.region).toBe("WA");

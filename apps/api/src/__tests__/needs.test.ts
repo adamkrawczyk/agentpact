@@ -1,22 +1,16 @@
+import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { cleanDatabase, createTestApp, generateTestAgent, generateTestNeed, getAuthHeaders } from "./helpers/testApp.js";
+import { cleanDatabase, createTestApp, generateTestNeed, getAuthHeadersForAgent } from "./helpers/testApp.js";
 
 describe("Needs API", () => {
   let authHeaders: Record<string, string>;
   let agentId: string;
 
   beforeEach(async () => {
-    const { app } = await createTestApp();
+    await createTestApp();
     await cleanDatabase();
-    authHeaders = await getAuthHeaders();
-
-    const agentRes = await app.inject({
-      method: "POST",
-      url: "/api/agents",
-      headers: authHeaders,
-      payload: generateTestAgent()
-    });
-    agentId = (JSON.parse(agentRes.body) as { id: string }).id;
+    agentId = randomUUID();
+    authHeaders = await getAuthHeadersForAgent(agentId);
   });
 
   it("should create a need", async () => {

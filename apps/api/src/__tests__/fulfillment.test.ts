@@ -1,8 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { cleanDatabase, createTestApp, generateTestAgent, generateTestNeed, generateTestOffer, getAuthHeaders } from "./helpers/testApp.js";
+import { cleanDatabase, createTestApp, generateTestNeed, generateTestOffer, getAuthHeadersForAgent } from "./helpers/testApp.js";
 
 describe("Fulfillment API", () => {
-  let authHeaders: Record<string, string>;
+  let buyerHeaders: Record<string, string>;
+  let sellerHeaders: Record<string, string>;
+  let attackerHeaders: Record<string, string>;
   let buyerId: string;
   let sellerId: string;
   let attackerId: string;
@@ -13,36 +16,17 @@ describe("Fulfillment API", () => {
   beforeEach(async () => {
     const { app } = await createTestApp();
     await cleanDatabase();
-    authHeaders = await getAuthHeaders();
-
-    const buyerRes = await app.inject({
-      method: "POST",
-      url: "/api/agents",
-      headers: authHeaders,
-      payload: generateTestAgent(),
-    });
-    buyerId = (JSON.parse(buyerRes.body) as { id: string }).id;
-
-    const sellerRes = await app.inject({
-      method: "POST",
-      url: "/api/agents",
-      headers: authHeaders,
-      payload: generateTestAgent(),
-    });
-    sellerId = (JSON.parse(sellerRes.body) as { id: string }).id;
-
-    const attackerRes = await app.inject({
-      method: "POST",
-      url: "/api/agents",
-      headers: authHeaders,
-      payload: generateTestAgent(),
-    });
-    attackerId = (JSON.parse(attackerRes.body) as { id: string }).id;
+    buyerId = randomUUID();
+    sellerId = randomUUID();
+    attackerId = randomUUID();
+    buyerHeaders = await getAuthHeadersForAgent(buyerId);
+    sellerHeaders = await getAuthHeadersForAgent(sellerId);
+    attackerHeaders = await getAuthHeadersForAgent(attackerId);
 
     const offerRes = await app.inject({
       method: "POST",
       url: "/api/offers",
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: { ...generateTestOffer(sellerId), fulfillmentType: "api-access" },
     });
     offerId = (JSON.parse(offerRes.body) as { id: string }).id;
@@ -50,7 +34,7 @@ describe("Fulfillment API", () => {
     const needRes = await app.inject({
       method: "POST",
       url: "/api/needs",
-      headers: authHeaders,
+      headers: buyerHeaders,
       payload: { ...generateTestNeed(buyerId), fulfillmentType: "api-access" },
     });
     needId = (JSON.parse(needRes.body) as { id: string }).id;
@@ -58,7 +42,7 @@ describe("Fulfillment API", () => {
     const proposeRes = await app.inject({
       method: "POST",
       url: "/api/deals/propose",
-      headers: authHeaders,
+      headers: buyerHeaders,
       payload: {
         buyerAgentId: buyerId,
         sellerAgentId: sellerId,
@@ -74,7 +58,7 @@ describe("Fulfillment API", () => {
     await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/accept`,
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: { actorAgentId: sellerId },
     });
   });
@@ -94,7 +78,7 @@ describe("Fulfillment API", () => {
     const provideRes = await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment`,
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         agentId: sellerId,
         fulfillmentData: {
@@ -112,7 +96,7 @@ describe("Fulfillment API", () => {
     const getRes = await app.inject({
       method: "GET",
       url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}`,
-      headers: authHeaders,
+      headers: buyerHeaders,
     });
     expect(getRes.statusCode).toBe(200);
     const fetched = JSON.parse(getRes.body) as {
@@ -126,7 +110,7 @@ describe("Fulfillment API", () => {
     const verifyRes = await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment/verify`,
-      headers: authHeaders,
+      headers: buyerHeaders,
       payload: {
         agentId: buyerId,
         accepted: true,
@@ -140,7 +124,7 @@ describe("Fulfillment API", () => {
     const revokeRes = await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment/revoke`,
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         agentId: sellerId,
       },
@@ -156,7 +140,7 @@ describe("Fulfillment API", () => {
     const response = await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment`,
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         agentId: sellerId,
         fulfillmentData: {
@@ -175,7 +159,7 @@ describe("Fulfillment API", () => {
     const response = await app.inject({
       method: "GET",
       url: `/api/deals/${dealId}/fulfillment?agentId=${attackerId}`,
-      headers: authHeaders,
+      headers: attackerHeaders,
     });
 
     expect(response.statusCode).toBe(403);

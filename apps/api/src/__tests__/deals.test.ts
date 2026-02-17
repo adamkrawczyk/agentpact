@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { cleanDatabase, createTestApp, generateTestAgent, generateTestNeed, generateTestOffer, getAuthHeaders } from "./helpers/testApp.js";
+import { cleanDatabase, createTestApp, generateTestNeed, generateTestOffer, getAuthHeadersForAgent } from "./helpers/testApp.js";
 
 describe("Deals API", () => {
-  let authHeaders: Record<string, string>;
+  let buyerHeaders: Record<string, string>;
+  let sellerHeaders: Record<string, string>;
   let buyerId: string;
   let sellerId: string;
   let offerId: string;
@@ -11,28 +13,15 @@ describe("Deals API", () => {
   beforeEach(async () => {
     const { app } = await createTestApp();
     await cleanDatabase();
-    authHeaders = await getAuthHeaders();
-
-    const buyerRes = await app.inject({
-      method: "POST",
-      url: "/api/agents",
-      headers: authHeaders,
-      payload: generateTestAgent()
-    });
-    buyerId = (JSON.parse(buyerRes.body) as { id: string }).id;
-
-    const sellerRes = await app.inject({
-      method: "POST",
-      url: "/api/agents",
-      headers: authHeaders,
-      payload: generateTestAgent()
-    });
-    sellerId = (JSON.parse(sellerRes.body) as { id: string }).id;
+    buyerId = randomUUID();
+    sellerId = randomUUID();
+    buyerHeaders = await getAuthHeadersForAgent(buyerId);
+    sellerHeaders = await getAuthHeadersForAgent(sellerId);
 
     const offerRes = await app.inject({
       method: "POST",
       url: "/api/offers",
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: generateTestOffer(sellerId)
     });
     offerId = (JSON.parse(offerRes.body) as { id: string }).id;
@@ -40,7 +29,7 @@ describe("Deals API", () => {
     const needRes = await app.inject({
       method: "POST",
       url: "/api/needs",
-      headers: authHeaders,
+      headers: buyerHeaders,
       payload: generateTestNeed(buyerId)
     });
     needId = (JSON.parse(needRes.body) as { id: string }).id;
@@ -65,7 +54,7 @@ describe("Deals API", () => {
       const response = await app.inject({
         method: "POST",
         url: "/api/deals/propose",
-        headers: authHeaders,
+        headers: buyerHeaders,
         payload
       });
       expect(response.statusCode).toBe(201);
@@ -89,7 +78,7 @@ describe("Deals API", () => {
       await app.inject({
         method: "POST",
         url: "/api/deals/propose",
-        headers: authHeaders,
+        headers: buyerHeaders,
         payload: {
           buyerAgentId: buyerId,
           sellerAgentId: sellerId,
@@ -110,7 +99,7 @@ describe("Deals API", () => {
       const response = await app.inject({
         method: "POST",
         url: `/api/deals/${deal.id}/accept`,
-        headers: authHeaders,
+        headers: sellerHeaders,
         payload: { actorAgentId: sellerId }
       });
       expect(response.statusCode).toBe(200);
@@ -127,7 +116,7 @@ describe("Deals API", () => {
       const proposeRes = await app.inject({
         method: "POST",
         url: "/api/deals/propose",
-        headers: authHeaders,
+        headers: buyerHeaders,
         payload: {
           buyerAgentId: buyerId,
           sellerAgentId: sellerId,
@@ -143,14 +132,14 @@ describe("Deals API", () => {
       await app.inject({
         method: "POST",
         url: `/api/deals/${dealId}/accept`,
-        headers: authHeaders,
+        headers: sellerHeaders,
         payload: { actorAgentId: sellerId }
       });
 
       const provideRes = await app.inject({
         method: "POST",
         url: `/api/deals/${dealId}/fulfillment`,
-        headers: authHeaders,
+        headers: sellerHeaders,
         payload: {
           agentId: sellerId,
           fulfillmentData: {
@@ -166,7 +155,7 @@ describe("Deals API", () => {
       const fundRes = await app.inject({
         method: "POST",
         url: "/api/payments/create-intent",
-        headers: authHeaders,
+        headers: buyerHeaders,
         payload: {
           milestoneId: milestone.id,
           buyerAgentId: buyerId,
@@ -186,7 +175,7 @@ describe("Deals API", () => {
       const response = await app.inject({
         method: "POST",
         url: `/api/deals/${dealId}/confirm-delivery`,
-        headers: authHeaders,
+        headers: buyerHeaders,
         payload: {
           agentId: buyerId,
           rating: 5,
@@ -206,18 +195,13 @@ describe("Deals API", () => {
     it("confirm-delivery returns 403 for non-buyer", async () => {
       const { app, dealId } = await setupAcceptedDealWithFunding();
 
-      const outsiderRes = await app.inject({
-        method: "POST",
-        url: "/api/agents",
-        headers: authHeaders,
-        payload: generateTestAgent()
-      });
-      const outsiderId = (JSON.parse(outsiderRes.body) as { id: string }).id;
+      const outsiderId = randomUUID();
+      const outsiderHeaders = await getAuthHeadersForAgent(outsiderId);
 
       const response = await app.inject({
         method: "POST",
         url: `/api/deals/${dealId}/confirm-delivery`,
-        headers: authHeaders,
+        headers: outsiderHeaders,
         payload: {
           agentId: outsiderId
         }
@@ -232,7 +216,7 @@ describe("Deals API", () => {
       const proposeRes = await app.inject({
         method: "POST",
         url: "/api/deals/propose",
-        headers: authHeaders,
+        headers: buyerHeaders,
         payload: {
           buyerAgentId: buyerId,
           sellerAgentId: sellerId,
@@ -248,7 +232,7 @@ describe("Deals API", () => {
       const response = await app.inject({
         method: "POST",
         url: `/api/deals/${dealId}/confirm-delivery`,
-        headers: authHeaders,
+        headers: buyerHeaders,
         payload: {
           agentId: buyerId
         }
@@ -265,7 +249,7 @@ describe("Deals API", () => {
       const response = await app.inject({
         method: "POST",
         url: `/api/deals/${dealId}/confirm-delivery`,
-        headers: authHeaders,
+        headers: buyerHeaders,
         payload: {
           agentId: buyerId,
           rating: 4

@@ -1,12 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { decrypt, encrypt } from "../credential-vault.js";
 import {
   cleanDatabase,
   createTestApp,
-  generateTestAgent,
   generateTestNeed,
   generateTestOffer,
-  getAuthHeaders,
+  getAuthHeadersForAgent,
 } from "./helpers/testApp.js";
 
 const SELLER_ID = "550e8400-e29b-41d4-a716-446655440000";
@@ -15,31 +15,21 @@ type DealFixture = {
   dealId: string;
   buyerId: string;
   attackerId: string;
+  buyerHeaders: Record<string, string>;
+  attackerHeaders: Record<string, string>;
 };
 
 async function setupDeal(fulfillmentType: string): Promise<DealFixture> {
   const { app } = await createTestApp();
-
-  const buyerRes = await app.inject({
-    method: "POST",
-    url: "/api/agents",
-    headers: authHeaders,
-    payload: generateTestAgent(),
-  });
-  const buyerId = (JSON.parse(buyerRes.body) as { id: string }).id;
-
-  const attackerRes = await app.inject({
-    method: "POST",
-    url: "/api/agents",
-    headers: authHeaders,
-    payload: generateTestAgent(),
-  });
-  const attackerId = (JSON.parse(attackerRes.body) as { id: string }).id;
+  const buyerId = randomUUID();
+  const attackerId = randomUUID();
+  const buyerHeaders = await getAuthHeadersForAgent(buyerId);
+  const attackerHeaders = await getAuthHeadersForAgent(attackerId);
 
   const offerRes = await app.inject({
     method: "POST",
     url: "/api/offers",
-    headers: authHeaders,
+    headers: sellerHeaders,
     payload: { ...generateTestOffer(SELLER_ID), fulfillmentType },
   });
   const offerId = (JSON.parse(offerRes.body) as { id: string }).id;
@@ -47,7 +37,7 @@ async function setupDeal(fulfillmentType: string): Promise<DealFixture> {
   const needRes = await app.inject({
     method: "POST",
     url: "/api/needs",
-    headers: authHeaders,
+    headers: buyerHeaders,
     payload: { ...generateTestNeed(buyerId), fulfillmentType },
   });
   const needId = (JSON.parse(needRes.body) as { id: string }).id;
@@ -55,7 +45,7 @@ async function setupDeal(fulfillmentType: string): Promise<DealFixture> {
   const proposeRes = await app.inject({
     method: "POST",
     url: "/api/deals/propose",
-    headers: authHeaders,
+    headers: buyerHeaders,
     payload: {
       buyerAgentId: buyerId,
       sellerAgentId: SELLER_ID,
@@ -71,11 +61,11 @@ async function setupDeal(fulfillmentType: string): Promise<DealFixture> {
   await app.inject({
     method: "POST",
     url: `/api/deals/${dealId}/accept`,
-    headers: authHeaders,
+    headers: sellerHeaders,
     payload: { actorAgentId: SELLER_ID },
   });
 
-  return { dealId, buyerId, attackerId };
+  return { dealId, buyerId, attackerId, buyerHeaders, attackerHeaders };
 }
 
 async function waitForNotification(eventType: string): Promise<Record<string, unknown>> {
@@ -97,7 +87,7 @@ async function waitForNotification(eventType: string): Promise<Record<string, un
   throw new Error(`Timed out waiting for notification ${eventType}`);
 }
 
-let authHeaders: Record<string, string>;
+let sellerHeaders: Record<string, string>;
 const originalFetch = globalThis.fetch;
 
 describe("Credential Vault", () => {
@@ -121,7 +111,7 @@ describe("Credential Vault", () => {
   beforeEach(async () => {
     await createTestApp();
     await cleanDatabase();
-    authHeaders = await getAuthHeaders();
+    sellerHeaders = await getAuthHeadersForAgent(SELLER_ID);
   });
 
   it("encrypt/decrypt roundtrip", () => {
@@ -141,7 +131,7 @@ describe("Credential Vault", () => {
     const provideRes = await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment`,
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         agentId: SELLER_ID,
         fulfillmentData: {
@@ -173,12 +163,12 @@ describe("Credential Vault", () => {
 
   it("returns redacted fulfillment by default", async () => {
     const { app } = await createTestApp();
-    const { dealId, buyerId } = await setupDeal("code-task");
+    const { dealId, buyerId, buyerHeaders } = await setupDeal("code-task");
 
     await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment`,
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         agentId: SELLER_ID,
         fulfillmentData: {
@@ -193,7 +183,7 @@ describe("Credential Vault", () => {
     const getRes = await app.inject({
       method: "GET",
       url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}`,
-      headers: authHeaders,
+      headers: buyerHeaders,
     });
     expect(getRes.statusCode).toBe(200);
     const body = JSON.parse(getRes.body) as { fulfillment_data: Record<string, unknown> };
@@ -202,12 +192,12 @@ describe("Credential Vault", () => {
 
   it("returns decrypted fulfillment when authorized participant requests decrypt", async () => {
     const { app, sql } = await createTestApp();
-    const { dealId, buyerId } = await setupDeal("code-task");
+    const { dealId, buyerId, buyerHeaders } = await setupDeal("code-task");
 
     await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment`,
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         agentId: SELLER_ID,
         fulfillmentData: {
@@ -222,7 +212,7 @@ describe("Credential Vault", () => {
     const getRes = await app.inject({
       method: "GET",
       url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}&decrypt=true`,
-      headers: authHeaders,
+      headers: buyerHeaders,
     });
 
     expect(getRes.statusCode).toBe(200);
@@ -241,12 +231,12 @@ describe("Credential Vault", () => {
 
   it("rejects decrypt requests from unauthorized agents", async () => {
     const { app } = await createTestApp();
-    const { dealId, attackerId } = await setupDeal("code-task");
+    const { dealId, attackerId, attackerHeaders } = await setupDeal("code-task");
 
     const getRes = await app.inject({
       method: "GET",
       url: `/api/deals/${dealId}/fulfillment?agentId=${attackerId}&decrypt=true`,
-      headers: authHeaders,
+      headers: attackerHeaders,
     });
 
     expect(getRes.statusCode).toBe(403);
@@ -254,12 +244,12 @@ describe("Credential Vault", () => {
 
   it("rotates credentials and increments rotation_count", async () => {
     const { app, sql } = await createTestApp();
-    const { dealId, buyerId } = await setupDeal("code-task");
+    const { dealId, buyerId, buyerHeaders } = await setupDeal("code-task");
 
     await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment`,
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         agentId: SELLER_ID,
         fulfillmentData: {
@@ -274,7 +264,7 @@ describe("Credential Vault", () => {
     const rotateRes = await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment/rotate`,
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         agentId: SELLER_ID,
         fieldName: "access_token",
@@ -286,7 +276,7 @@ describe("Credential Vault", () => {
     const getRes = await app.inject({
       method: "GET",
       url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}&decrypt=true`,
-      headers: authHeaders,
+      headers: buyerHeaders,
     });
     const body = JSON.parse(getRes.body) as { fulfillment_data: Record<string, unknown> };
     expect(body.fulfillment_data.access_token).toBe("rotated-secret-token");
@@ -302,12 +292,12 @@ describe("Credential Vault", () => {
 
   it("fires rotation_requested webhook event", async () => {
     const { app } = await createTestApp();
-    const { dealId, buyerId } = await setupDeal("code-task");
+    const { dealId, buyerId, buyerHeaders } = await setupDeal("code-task");
 
     const webhookRes = await app.inject({
       method: "POST",
       url: "/api/webhooks",
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         url: "https://webhook.test/seller",
         events: ["deal.rotation_requested"],
@@ -318,7 +308,7 @@ describe("Credential Vault", () => {
     const requestRes = await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment/request-rotation`,
-      headers: authHeaders,
+      headers: buyerHeaders,
       payload: {
         agentId: buyerId,
         reason: "Possible token leak",
@@ -332,12 +322,12 @@ describe("Credential Vault", () => {
 
   it("fires expiry warning when fulfillment expires within 24h", async () => {
     const { app, sql } = await createTestApp();
-    const { dealId, buyerId } = await setupDeal("generic");
+    const { dealId, buyerId, buyerHeaders } = await setupDeal("generic");
 
     await app.inject({
       method: "POST",
       url: "/api/webhooks",
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         url: "https://webhook.test/seller-expiring",
         events: ["deal.fulfillment_expiring"],
@@ -348,7 +338,7 @@ describe("Credential Vault", () => {
     const provideRes = await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment`,
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         agentId: SELLER_ID,
         fulfillmentData: {
@@ -366,7 +356,7 @@ describe("Credential Vault", () => {
     const getRes = await app.inject({
       method: "GET",
       url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}`,
-      headers: authHeaders,
+      headers: buyerHeaders,
     });
     expect(getRes.statusCode).toBe(200);
 
@@ -382,12 +372,12 @@ describe("Credential Vault", () => {
 
   it("auto-expires fulfillment when expiry has passed", async () => {
     const { app } = await createTestApp();
-    const { dealId, buyerId } = await setupDeal("generic");
+    const { dealId, buyerId, buyerHeaders } = await setupDeal("generic");
 
     await app.inject({
       method: "POST",
       url: "/api/webhooks",
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         url: "https://webhook.test/seller-expired",
         events: ["deal.fulfillment_expired"],
@@ -398,7 +388,7 @@ describe("Credential Vault", () => {
     await app.inject({
       method: "POST",
       url: `/api/deals/${dealId}/fulfillment`,
-      headers: authHeaders,
+      headers: sellerHeaders,
       payload: {
         agentId: SELLER_ID,
         fulfillmentData: {
@@ -411,7 +401,7 @@ describe("Credential Vault", () => {
     const getRes = await app.inject({
       method: "GET",
       url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}`,
-      headers: authHeaders,
+      headers: buyerHeaders,
     });
 
     expect(getRes.statusCode).toBe(200);

@@ -8,11 +8,15 @@ export async function createTestApp() {
 }
 
 export async function getAuthHeaders() {
+  return getAuthHeadersForAgent(TEST_AGENT_ID);
+}
+
+export async function getAuthHeadersForAgent(agentId: string) {
   const registerRes = await app.inject({
     method: "POST",
     url: "/api/auth/register",
     payload: {
-      agentId: TEST_AGENT_ID,
+      agentId,
       walletAddress: "0x1234567890123456789012345678901234567890"
     }
   });
