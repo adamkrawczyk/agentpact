@@ -646,13 +646,13 @@ async function completeDealMilestones(dealId, opts = {}) {
     }
     if (mode === "on-chain") {
         const intents = await sql `
-      SELECT pi."mode"
+      SELECT pi."mode" AS payment_mode
       FROM payment_intents pi
       JOIN milestones m ON m.id = pi.milestone_id
       WHERE m.deal_id = ${dealId} AND pi.status = 'funded'
       ORDER BY pi.created_at DESC
     `;
-        const hasOnChainFundedIntent = intents.some((row) => String(row.mode) === "on-chain");
+        const hasOnChainFundedIntent = intents.some((row) => String(row.payment_mode) === "on-chain");
         if (hasOnChainFundedIntent && !opts.skipOnChainRelease) {
             await sql `UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId}`;
             return {
