@@ -781,7 +781,7 @@ async function completeDealMilestones(
 
   if (mode === "on-chain") {
     const intents = await sql`
-      SELECT pi.mode
+      SELECT pi."mode"
       FROM payment_intents pi
       JOIN milestones m ON m.id = pi.milestone_id
       WHERE m.deal_id = ${dealId} AND pi.status = 'funded'
