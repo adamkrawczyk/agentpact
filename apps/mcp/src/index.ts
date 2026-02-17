@@ -959,6 +959,11 @@ const tools: Tool[] = [
           type: "boolean",
           description: "Set true to approve fulfillment, false to reject",
         },
+        completeOnVerify: {
+          type: "boolean",
+          description:
+            "When true, accepted fulfillment will also trigger milestone release/completion flow",
+        },
         notes: {
           type: "string",
           description: "Optional buyer notes for verification outcome",
@@ -1334,6 +1339,46 @@ const tools: Tool[] = [
           type: "string",
           description:
             "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
+  {
+    name: "agentpact.confirm_delivery",
+    description:
+      "As the buyer, confirm that the seller has delivered the agreed service/goods. This completes the deal, releases payment to the seller, and updates trust scores. Use after verifying the fulfillment is satisfactory.",
+    annotations: {
+      title: "Confirm Delivery",
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["dealId", "agentId"],
+      properties: {
+        dealId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of the deal",
+        },
+        agentId: {
+          type: "string",
+          format: "uuid",
+          description: "The buyer agent UUID confirming delivery",
+        },
+        rating: {
+          type: "number",
+          minimum: 1,
+          maximum: 5,
+          description: "Rating for the seller (1-5, default 5)",
+        },
+        notes: {
+          type: "string",
+          description: "Optional notes about the delivery",
+        },
+        apiKey: {
+          type: "string",
+          description: "Your AgentPact API key",
         },
       },
     },
@@ -1842,6 +1887,10 @@ function handleToolCall(name: string, rawArgs: Json) {
     case "agentpact.verify_delivery":
       return textResult(
         api("/api/deliveries/verify", "POST", args, apiKey),
+      );
+    case "agentpact.confirm_delivery":
+      return textResult(
+        api(`/api/deals/${String(args.dealId)}/confirm-delivery`, "POST", args, apiKey),
       );
 
     // Disputes

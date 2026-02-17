@@ -1191,6 +1191,45 @@ const tools = [
             },
         },
     },
+    {
+        name: "agentpact.confirm_delivery",
+        description: "As the buyer, confirm that the seller has delivered the agreed service/goods. This completes the deal, releases payment to the seller, and updates trust scores. Use after verifying the fulfillment is satisfactory.",
+        annotations: {
+            title: "Confirm Delivery",
+            readOnlyHint: false,
+            destructiveHint: false,
+        },
+        inputSchema: {
+            type: "object",
+            required: ["dealId", "agentId"],
+            properties: {
+                dealId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The UUID of the deal",
+                },
+                agentId: {
+                    type: "string",
+                    format: "uuid",
+                    description: "The buyer agent UUID confirming delivery",
+                },
+                rating: {
+                    type: "number",
+                    minimum: 1,
+                    maximum: 5,
+                    description: "Rating for the seller (1-5, default 5)",
+                },
+                notes: {
+                    type: "string",
+                    description: "Optional notes about the delivery",
+                },
+                apiKey: {
+                    type: "string",
+                    description: "Your AgentPact API key",
+                },
+            },
+        },
+    },
     // ── Disputes ──
     {
         name: "agentpact.open_dispute",
@@ -1560,6 +1599,8 @@ function handleToolCall(name, rawArgs) {
             return textResult(api("/api/deliveries/submit", "POST", args, apiKey));
         case "agentpact.verify_delivery":
             return textResult(api("/api/deliveries/verify", "POST", args, apiKey));
+        case "agentpact.confirm_delivery":
+            return textResult(api(`/api/deals/${String(args.dealId)}/confirm-delivery`, "POST", args, apiKey));
         // Disputes
         case "agentpact.open_dispute":
             return textResult(api("/api/disputes/open", "POST", args, apiKey));

@@ -56,7 +56,16 @@ async function ensurePhysicalServiceSchema() {
     WHERE location IS NOT NULL
   `;
 }
+async function ensureFulfillmentStatusSchema() {
+    await sql `ALTER TABLE deal_fulfillment DROP CONSTRAINT IF EXISTS deal_fulfillment_status_check`;
+    await sql `
+    ALTER TABLE deal_fulfillment
+    ADD CONSTRAINT deal_fulfillment_status_check
+    CHECK (status IN ('pending', 'provided', 'active', 'verified', 'expired', 'revoked'))
+  `;
+}
 await ensurePhysicalServiceSchema();
+await ensureFulfillmentStatusSchema();
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
 const milestoneSchema = z.object({
     idx: z.number().int().positive(),
@@ -326,7 +335,14 @@ const requestRotationSchema = z.object({
 const verifyFulfillmentSchema = z.object({
     agentId: z.string().uuid(),
     accepted: z.boolean(),
+    completeOnVerify: z.boolean().optional(),
     notes: z.string().optional(),
+});
+const confirmDeliverySchema = z.object({
+    agentId: z.string().uuid(),
+    rating: z.number().min(1).max(5).optional(),
+    notes: z.string().optional(),
+    skipOnChainRelease: z.boolean().optional().default(true),
 });
 const revokeFulfillmentSchema = z.object({
     agentId: z.string().uuid(),
@@ -616,6 +632,53 @@ async function releaseMilestonePayment(milestoneId) {
         sellerAmount,
         feeAmount,
     });
+}
+async function completeDealMilestones(dealId, opts = {}) {
+    const mode = isOnChainMode() ? "on-chain" : "simulation";
+    const milestones = await sql `
+    SELECT id
+    FROM milestones
+    WHERE deal_id = ${dealId} AND status != 'accepted'
+    ORDER BY idx
+  `;
+    if (milestones.length === 0) {
+        return { mode, action: "released" };
+    }
+    if (mode === "on-chain") {
+        const intents = await sql `
+      SELECT pi.mode
+      FROM payment_intents pi
+      JOIN milestones m ON m.id = pi.milestone_id
+      WHERE m.deal_id = ${dealId} AND pi.status = 'funded'
+      ORDER BY pi.created_at DESC
+    `;
+        const hasOnChainFundedIntent = intents.some((row) => String(row.mode) === "on-chain");
+        if (hasOnChainFundedIntent && !opts.skipOnChainRelease) {
+            await sql `UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId}`;
+            return {
+                mode,
+                action: "buyer_sign_required",
+                txData: milestones.map((milestone) => {
+                    const txData = generateAcceptTransaction(String(milestone.id));
+                    return {
+                        milestoneId: String(milestone.id),
+                        to: txData.to,
+                        data: txData.calldata,
+                        value: "0",
+                        description: "Accept milestone on-chain and release escrowed funds",
+                    };
+                }),
+            };
+        }
+        if (hasOnChainFundedIntent && opts.skipOnChainRelease) {
+            await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
+            return { mode, action: "completed_without_onchain_release" };
+        }
+    }
+    for (const milestone of milestones) {
+        await releaseMilestonePayment(String(milestone.id));
+    }
+    return { mode, action: "released" };
 }
 await app.register(cors, {
     origin: process.env.CORS_ORIGINS
@@ -1541,6 +1604,9 @@ app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
     RETURNING *
   `;
     if (body.accepted) {
+        if (body.completeOnVerify) {
+            await completeDealMilestones(id, { skipOnChainRelease: true });
+        }
         notifyAgents(sql, [deal.seller_agent_id], "deal.fulfillment_verified", {
             dealId: id,
             buyerAgentId: body.agentId,
@@ -1549,6 +1615,67 @@ app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
         });
     }
     return updated;
+});
+app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
+    const { id } = request.params;
+    const idem = idempotencyKey(request.headers);
+    const body = confirmDeliverySchema.parse(request.body);
+    const rating = body.rating ?? 5;
+    const [deal] = await sql `
+    SELECT id, status, buyer_agent_id, seller_agent_id
+    FROM deals
+    WHERE id = ${id}
+  `;
+    if (!deal)
+        return reply.code(404).send({ error: "Deal not found" });
+    if (body.agentId !== deal.buyer_agent_id) {
+        return reply.code(403).send({ error: "Only buyer can confirm delivery" });
+    }
+    if (!["active", "delivered"].includes(String(deal.status))) {
+        return reply.code(400).send({ error: `Deal status ${deal.status} cannot be confirmed` });
+    }
+    const [fulfillment] = await sql `
+    SELECT id, status
+    FROM deal_fulfillment
+    WHERE deal_id = ${id}
+  `;
+    if (!fulfillment)
+        return reply.code(404).send({ error: "Fulfillment not found" });
+    if (!["provided", "active"].includes(String(fulfillment.status))) {
+        return reply.code(400).send({ error: `Fulfillment status ${fulfillment.status} cannot be confirmed` });
+    }
+    await sql `
+    UPDATE deal_fulfillment
+    SET status = 'verified', verified_at = NOW(), updated_at = NOW()
+    WHERE deal_id = ${id}
+  `;
+    const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: body.skipOnChainRelease });
+    await audit(body.agentId, "deal.buyer_review", "deal", id, idem, {
+        dealId: id,
+        rating,
+        notes: body.notes ?? null,
+    });
+    await sql `
+    UPDATE agents
+    SET reputation_score = COALESCE(reputation_score, 0) + ${rating}
+    WHERE id = ${deal.seller_agent_id}
+  `;
+    notifyAgents(sql, [deal.seller_agent_id], "deal.delivery_confirmed", {
+        dealId: id,
+        buyerAgentId: body.agentId,
+        rating,
+        notes: body.notes ?? null,
+        releaseAction: releaseResult.action,
+    });
+    const [updatedDeal] = await sql `SELECT * FROM deals WHERE id = ${id}`;
+    const milestones = await sql `SELECT * FROM milestones WHERE deal_id = ${id} ORDER BY idx`;
+    const events = await sql `SELECT * FROM negotiation_events WHERE deal_id = ${id} ORDER BY created_at`;
+    return {
+        ...updatedDeal,
+        milestones,
+        events,
+        release: releaseResult,
+    };
 });
 app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {
     const { id } = request.params;

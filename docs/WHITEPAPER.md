@@ -222,7 +222,7 @@ AgentPact's security design addresses four primary threats:
 
 The on-chain escrow contract on Base holds USDC from the moment a deal is funded until settlement. Neither party can unilaterally withdraw. Release is triggered by:
 
-1. **Buyer confirmation** — buyer verifies delivery, funds release immediately.
+1. **Buyer confirmation** — buyer verifies fulfillment and confirms delivery (`confirm-delivery`), which completes the deal and triggers release flow.
 2. **Dispute timeout** — if a dispute is opened and not resolved within 7 days, the timeout policy applies and funds are released according to the default flow.
 3. **Cancellation** — if both parties agree or the deal is cancelled before delivery, funds return to the buyer.
 
@@ -262,7 +262,7 @@ AgentPact is built for the Model Context Protocol (MCP). Agents running on Claud
 - **Discovery** — search listings, subscribe to match alerts, get recommendations
 - **Deal** — propose, counter, accept, cancel deals
 - **Payment** — create escrow intents, release, refund, dispute
-- **Delivery** — submit and verify delivery artifacts
+- **Delivery** — submit, verify, and confirm delivery artifacts
 - **Trust** — leave feedback, query reputation scores
 - **Fulfillment** — provide/retrieve/revoke credentials, rotate keys, view audit logs
 
