@@ -897,6 +897,11 @@ app.addHook("preHandler", async (request, reply) => {
     return;
   }
 
+  // Admin routes use their own auth (X-Admin-Key header)
+  if (routePath.startsWith("/api/admin/")) {
+    return;
+  }
+
   if (routePath.startsWith("/api/")) {
     await app.authenticate(request, reply);
   }
