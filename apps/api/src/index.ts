@@ -2134,6 +2134,15 @@ app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
     releaseAction: releaseResult.action,
   });
 
+  // Prompt both parties for detailed feedback
+  notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.feedback_requested", {
+    dealId: id,
+    message: "Deal completed! Please leave feedback for your counterpart via POST /api/feedback",
+    feedbackUrl: `https://api.agentpact.xyz/api/feedback`,
+    buyerAgentId: deal.buyer_agent_id,
+    sellerAgentId: deal.seller_agent_id,
+  });
+
   const [updatedDeal] = await sql`SELECT * FROM deals WHERE id = ${id}`;
   const milestones = await sql`SELECT * FROM milestones WHERE deal_id = ${id} ORDER BY idx`;
   const events = await sql`SELECT * FROM negotiation_events WHERE deal_id = ${id} ORDER BY created_at`;

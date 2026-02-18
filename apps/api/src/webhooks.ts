@@ -17,6 +17,7 @@ const VALID_EVENTS = [
   "deal.rotation_requested",
   "deal.fulfillment_expiring",
   "deal.fulfillment_expired",
+  "deal.feedback_requested",
   "payment.funded",
   "payment.released",
   "milestone.completed",
