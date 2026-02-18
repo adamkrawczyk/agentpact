@@ -784,7 +784,7 @@ async function releaseMilestonePayment(milestoneId: string): Promise<void> {
 async function completeDealMilestones(
   dealId: string,
   opts: { skipOnChainRelease?: boolean } = {},
-): Promise<{ mode: "simulation" | "on-chain"; action: "released" | "buyer_sign_required" | "completed_without_onchain_release"; txData?: Array<{ milestoneId: string; to: string; data: string; value: string; description: string }> }> {
+): Promise<{ mode: "simulation" | "on-chain"; action: "released" | "buyer_sign_required" | "completed_without_onchain_release"; txData?: Array<{ milestoneId: string; to: string; data: string; value: string; description: string }>; onChainReleaseResults?: Array<{ milestoneId: string; txHash?: string; error?: string }> }> {
   const mode = isOnChainMode() ? "on-chain" : "simulation";
   const milestones = await sql`
     SELECT id
@@ -814,20 +814,38 @@ async function completeDealMilestones(
     const hasOnChainFundedIntent = intents.some((row) => String(row.payment_mode) === "on-chain");
 
     if (hasOnChainFundedIntent) {
-      await sql`UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId}`;
+      // Try platform-initiated release via resolveDispute (pays seller)
+      const releaseResults: Array<{ milestoneId: string; txHash?: string; error?: string }> = [];
+      for (const milestone of milestones) {
+        try {
+          const result = await resolveDisputeOnChain(String(milestone.id), false);
+          releaseResults.push({ milestoneId: String(milestone.id), txHash: result.txHash });
+        } catch (err: any) {
+          console.error(`[completeDealMilestones] On-chain release failed for ${milestone.id}: ${err.message}`);
+          releaseResults.push({ milestoneId: String(milestone.id), error: err.message });
+        }
+      }
+      
+      // Update DB to completed regardless (funds will be claimable after timeout if on-chain fails)
+      await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
+      await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
+      await sql`UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW() WHERE milestone_id = ANY(${milestones.map(m => String(m.id))}) AND status = 'funded'`;
+      
+      const allReleased = releaseResults.every(r => r.txHash);
       return {
         mode,
-        action: "buyer_sign_required",
-        txData: milestones.map((milestone) => {
-          const txData = generateAcceptTransaction(String(milestone.id));
+        action: allReleased ? "released" : "buyer_sign_required",
+        txData: releaseResults.filter(r => !r.txHash).map(r => {
+          const txData = generateAcceptTransaction(r.milestoneId);
           return {
-            milestoneId: String(milestone.id),
+            milestoneId: r.milestoneId,
             to: txData.to,
             data: txData.calldata,
             value: "0",
-            description: "Accept milestone on-chain and release escrowed funds",
+            description: "Accept milestone on-chain and release escrowed funds (platform release failed, buyer must sign)",
           };
         }),
+        onChainReleaseResults: releaseResults,
       };
     }
   }
@@ -2583,6 +2601,60 @@ app.post("/api/disputes/open", async (request, reply) => {
   await sql`UPDATE milestones SET status = 'disputed' WHERE id = ${body.milestoneId}`;
   await sql`UPDATE deals SET status = 'disputed', updated_at = NOW() WHERE id = ${body.dealId}`;
   return reply.code(201).send(dispute);
+});
+
+// ── Admin: Force-release stuck on-chain milestones ──────────────────
+// Uses resolveDispute(milestoneId, false) to pay seller when funds are stuck in escrow.
+// Protected by ADMIN_API_KEY env var.
+app.post("/api/admin/force-release", async (request, reply) => {
+  const adminKey = process.env.ADMIN_API_KEY;
+  if (!adminKey) return reply.code(503).send({ error: "Admin API not configured" });
+  
+  const authHeader = request.headers["x-admin-key"] || request.headers["authorization"]?.replace("Bearer ", "");
+  if (authHeader !== adminKey) return reply.code(403).send({ error: "Invalid admin key" });
+
+  const body = z.object({
+    milestoneId: z.string().uuid(),
+    reason: z.string().optional(),
+  }).parse(request.body);
+
+  const [milestone] = await sql`
+    SELECT m.*, d.id AS deal_id, d.status AS deal_status, d.seller_agent_id
+    FROM milestones m
+    JOIN deals d ON d.id = m.deal_id
+    WHERE m.id = ${body.milestoneId}
+  `;
+  if (!milestone) return reply.code(404).send({ error: "Milestone not found" });
+
+  const mode = isOnChainMode() ? "on-chain" : "simulation";
+  let txHash: string | null = null;
+
+  if (mode === "on-chain") {
+    try {
+      const result = await resolveDisputeOnChain(body.milestoneId, false);
+      txHash = result.txHash;
+    } catch (err: any) {
+      // If dispute resolution fails (e.g. milestone not in disputed state on-chain),
+      // log and continue with DB update
+      console.error(`[admin/force-release] On-chain resolveDispute failed: ${err.message}`);
+    }
+  }
+
+  // Update DB regardless
+  await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = ${body.milestoneId}`;
+  await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${milestone.deal_id}`;
+  await sql`UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW() WHERE milestone_id = ${body.milestoneId} AND status = 'funded'`;
+
+  console.log(`[admin/force-release] Milestone ${body.milestoneId} released. Reason: ${body.reason || "admin action"}. TxHash: ${txHash || "N/A"}`);
+
+  return {
+    ok: true,
+    milestoneId: body.milestoneId,
+    dealId: milestone.deal_id,
+    mode,
+    txHash,
+    reason: body.reason || "admin force-release",
+  };
 });
 
 app.post("/api/disputes/resolve-timeouts", async () => {
