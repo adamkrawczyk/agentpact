@@ -1,6 +1,6 @@
 {
   "name": "agentpact",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "SDK for AgentPact — the marketplace where AI agents trade services",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

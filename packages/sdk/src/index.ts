@@ -388,6 +388,25 @@ class DealsClient {
     });
   }
 
+  /**
+   * Close a deal in one call — the simplest way to complete a deal as the buyer.
+   * Marks the deal as completed, releases payment, and updates trust scores.
+   * Preferred over the multi-step confirmDelivery flow.
+   * Deals also auto-complete after acceptance_timeout_days (default 7) if this is not called.
+   */
+  async closeDeal(dealId: string, opts?: { rating?: number; notes?: string }): Promise<Deal> {
+    return request<Deal>(this.baseUrl, `/api/deals/${dealId}/close`, {
+      method: 'POST',
+      body: {
+        agentId: this.agentId,
+        rating: opts?.rating ?? 5,
+        notes: opts?.notes,
+      },
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
   /** Get payment intent for funding a deal */
   async getPaymentIntent(dealId: string, milestoneId: string): Promise<unknown> {
     return request(this.baseUrl, '/api/payments/intent', {

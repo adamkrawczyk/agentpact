@@ -2164,6 +2164,136 @@ app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
   }
 });
 
+// ── Simplified deal close (one-call completion for buyers) ──────────
+app.post("/api/deals/:id/close", async (request, reply) => {
+  try {
+    const { id } = request.params as { id: string };
+    const idem = idempotencyKey(request.headers as Record<string, unknown>);
+    const body = z.object({
+      agentId: z.string().uuid(),
+      rating: z.number().min(1).max(5).optional(),
+      notes: z.string().optional(),
+      skipOnChainRelease: z.boolean().optional().default(true),
+    }).parse(request.body);
+    const requesterAgentId = getRequesterAgentId(request, reply);
+    if (!requesterAgentId) return;
+    if (body.agentId !== requesterAgentId) {
+      return reply.code(403).send({ error: "Not authorized to act as this agent" });
+    }
+    const rating = body.rating ?? 5;
+
+    const [deal] = await sql`
+      SELECT id, status, buyer_agent_id, seller_agent_id, offer_id
+      FROM deals WHERE id = ${id}
+    `;
+    if (!deal) return reply.code(404).send({ error: "Deal not found" });
+    if (body.agentId !== deal.buyer_agent_id) {
+      return reply.code(403).send({ error: "Only buyer can close a deal" });
+    }
+    if (!["active", "delivered", "proposed", "countered"].includes(String(deal.status))) {
+      return reply.code(400).send({ error: `Deal status '${deal.status}' cannot be closed` });
+    }
+
+    // Mark any pending fulfillment as verified
+    await sql`
+      UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW()
+      WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')
+    `;
+
+    const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: body.skipOnChainRelease });
+
+    if (deal.offer_id) {
+      await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
+    }
+
+    await audit(body.agentId, "deal.close", "deal", id, idem, { dealId: id, rating, notes: body.notes ?? null });
+
+    await sql`
+      UPDATE agents SET reputation_score = COALESCE(reputation_score, 0) + ${rating}
+      WHERE id = ${deal.seller_agent_id}
+    `;
+
+    notifyAgents(sql, [deal.seller_agent_id], "deal.closed", {
+      dealId: id, buyerAgentId: body.agentId, rating, notes: body.notes ?? null, releaseAction: releaseResult.action,
+    });
+    notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.feedback_requested", {
+      dealId: id,
+      message: "Deal closed! Leave feedback via POST /api/feedback",
+      feedbackUrl: "https://api.agentpact.xyz/api/feedback",
+      buyerAgentId: deal.buyer_agent_id,
+      sellerAgentId: deal.seller_agent_id,
+    });
+
+    const [updatedDeal] = await sql`SELECT * FROM deals WHERE id = ${id}`;
+    const milestones = await sql`SELECT * FROM milestones WHERE deal_id = ${id} ORDER BY idx`;
+    return { ...updatedDeal, milestones, release: releaseResult };
+  } catch (err: any) {
+    console.error("[deal/close] Error:", err.message, err.stack);
+    return reply.code(500).send({ error: "Internal server error", detail: err.message });
+  }
+});
+
+// ── Auto-complete timed-out delivered deals (cron-friendly) ─────────
+app.post("/api/deals/:id/fulfillment/auto-complete", async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const [deal] = await sql`
+    SELECT id, status, buyer_agent_id, seller_agent_id, offer_id, acceptance_timeout_days, updated_at
+    FROM deals WHERE id = ${id}
+  `;
+  if (!deal) return reply.code(404).send({ error: "Deal not found" });
+  if (!["delivered", "active"].includes(String(deal.status))) {
+    return { ok: false, reason: `Deal status '${deal.status}' is not eligible for auto-complete` };
+  }
+
+  const timeoutDays = Number(deal.acceptance_timeout_days ?? 7);
+  const updatedAt = new Date(deal.updated_at);
+  const expiredAt = new Date(updatedAt.getTime() + timeoutDays * 24 * 60 * 60 * 1000);
+  if (new Date() < expiredAt) {
+    return { ok: false, reason: `Acceptance timeout not reached. Expires at ${expiredAt.toISOString()}`, expiresAt: expiredAt.toISOString() };
+  }
+
+  await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
+  await completeDealMilestones(id, { skipOnChainRelease: true });
+  if (deal.offer_id) {
+    await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
+  }
+  await sql`UPDATE agents SET reputation_score = COALESCE(reputation_score, 0) + 5 WHERE id = ${deal.seller_agent_id}`;
+
+  notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.auto_completed", {
+    dealId: id, reason: "Acceptance timeout reached — deal auto-completed", expiredAt: expiredAt.toISOString(),
+  });
+
+  const [updatedDeal] = await sql`SELECT * FROM deals WHERE id = ${id}`;
+  return { ok: true, completed: true, deal: updatedDeal };
+});
+
+// ── Batch auto-complete all timed-out delivered deals (admin/cron) ──
+app.post("/api/admin/auto-complete-timeouts", async (request, reply) => {
+  const adminKey = process.env.ADMIN_API_KEY;
+  const authHeader = request.headers["x-admin-key"] || String(request.headers["authorization"] ?? "").replace("Bearer ", "");
+  if (adminKey && authHeader !== adminKey) return reply.code(403).send({ error: "Invalid admin key" });
+
+  const expiredDeals = await sql`
+    SELECT id, acceptance_timeout_days, updated_at
+    FROM deals
+    WHERE status IN ('delivered', 'active')
+      AND updated_at < NOW() - (COALESCE(acceptance_timeout_days, 7) || ' days')::interval
+  `;
+
+  const results = [];
+  for (const deal of expiredDeals) {
+    try {
+      await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${deal.id} AND status NOT IN ('verified', 'revoked')`;
+      await completeDealMilestones(String(deal.id), { skipOnChainRelease: true });
+      results.push({ dealId: deal.id, completed: true });
+    } catch (err: any) {
+      results.push({ dealId: deal.id, completed: false, error: err.message });
+    }
+  }
+
+  return { processed: results.length, results };
+});
+
 app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {
   const { id } = request.params as { id: string };
   const body = revokeFulfillmentSchema.parse(request.body);

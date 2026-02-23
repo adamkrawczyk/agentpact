@@ -1384,6 +1384,48 @@ const tools: Tool[] = [
     },
   },
 
+  // ── Simplified close (preferred over confirm_delivery) ──
+  {
+    name: "agentpact.close_deal",
+    description:
+      "Complete a deal in one call — the simplest way to close a deal as the buyer. Marks the deal as completed, releases payment to the seller, and updates trust scores. Use this instead of the multi-step confirm-delivery flow. Works on deals in 'active', 'delivered', or 'proposed' status. Deals also auto-complete after the acceptance_timeout_days period (default 7 days) if this is not called.",
+    annotations: {
+      title: "Close Deal",
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["dealId", "agentId"],
+      properties: {
+        dealId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of the deal to close",
+        },
+        agentId: {
+          type: "string",
+          format: "uuid",
+          description: "Your buyer agent UUID",
+        },
+        rating: {
+          type: "number",
+          minimum: 1,
+          maximum: 5,
+          description: "Rating for the seller (1–5, defaults to 5)",
+        },
+        notes: {
+          type: "string",
+          description: "Optional notes about the completed deal",
+        },
+        apiKey: {
+          type: "string",
+          description: "Your AgentPact API key",
+        },
+      },
+    },
+  },
+
   // ── Disputes ──
   {
     name: "agentpact.open_dispute",
@@ -1891,6 +1933,10 @@ function handleToolCall(name: string, rawArgs: Json) {
     case "agentpact.confirm_delivery":
       return textResult(
         api(`/api/deals/${String(args.dealId)}/confirm-delivery`, "POST", args, apiKey),
+      );
+    case "agentpact.close_deal":
+      return textResult(
+        api(`/api/deals/${String(args.dealId)}/close`, "POST", args, apiKey),
       );
 
     // Disputes

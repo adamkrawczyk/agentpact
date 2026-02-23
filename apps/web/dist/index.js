@@ -64,6 +64,7 @@ function page(title, body) {
       --fg: #00ff41;
       --dim: #00b530;
       --line: #0f401b;
+      --accent: #00ff41;
     }
     * { box-sizing: border-box; }
     body {
@@ -72,6 +73,7 @@ function page(title, body) {
       color: var(--fg);
       font-family: ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       line-height: 1.45;
+      font-size: 14px;
     }
     .shell {
       max-width: 1080px;
@@ -92,6 +94,50 @@ function page(title, body) {
     a, a:visited { color: var(--fg); text-decoration: none; }
     a:hover { text-decoration: underline; }
     .muted { color: var(--dim); }
+
+    /* Card-based layouts for mobile */
+    .cards { display: flex; flex-direction: column; gap: 12px; }
+    .card {
+      border: 1px solid var(--line);
+      padding: 14px;
+      border-radius: 4px;
+    }
+    .card:hover { border-color: var(--accent); }
+    .card-title {
+      font-weight: bold;
+      margin-bottom: 8px;
+      font-size: 15px;
+    }
+    .card-title a { color: var(--fg); }
+    .card-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 3px 0;
+    }
+    .card-label { color: var(--dim); }
+    .card-value { text-align: right; word-break: break-all; }
+    .card-tags { margin-top: 8px; }
+    .tag {
+      display: inline-block;
+      border: 1px solid var(--line);
+      padding: 2px 8px;
+      margin: 2px 4px 2px 0;
+      font-size: 12px;
+      border-radius: 3px;
+      color: var(--dim);
+    }
+    .price { color: #FFD700; font-weight: bold; }
+    .detail-section { margin: 16px 0; }
+    .detail-section h3 { color: var(--dim); margin: 0 0 8px 0; font-size: 13px; text-transform: uppercase; }
+    .detail-section p, .detail-section div { margin: 4px 0; }
+    .img-link { display: inline-block; margin: 4px 8px 4px 0; color: var(--accent); text-decoration: underline; }
+    .back-link { color: var(--dim); margin-bottom: 12px; display: inline-block; }
+
+    /* Desktop table fallback */
+    @media (min-width: 768px) {
+      body { font-size: 13px; }
+    }
   </style>
 </head>
 <body>
@@ -156,36 +202,99 @@ app.get("/", async () => {
         ]),
     ].join("\n"));
 });
+function formatPrice(price) {
+    const n = Number(price);
+    if (Number.isNaN(n))
+        return String(price);
+    return n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+function renderOfferCard(offer) {
+    const tags = (offer.tags ?? []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
+    const location = offer.location ? `${escapeHtml(offer.location.city ?? "")}${offer.location.country ? ", " + escapeHtml(offer.location.country) : ""}` : "-";
+    return `<div class="card">
+  <div class="card-title"><a href="/offers/${escapeHtml(offer.id)}">${escapeHtml(offer.title)}</a></div>
+  <div class="card-row"><span class="card-label">price</span><span class="card-value price">${formatPrice(offer.base_price)} ${escapeHtml(offer.currency ?? "USDC")}</span></div>
+  <div class="card-row"><span class="card-label">category</span><span class="card-value">${escapeHtml(offer.category ?? "-")}</span></div>
+  <div class="card-row"><span class="card-label">location</span><span class="card-value">${location}</span></div>
+  <div class="card-row"><span class="card-label">sla</span><span class="card-value">${offer.sla_days ?? "-"} days</span></div>
+  ${tags ? `<div class="card-tags">${tags}</div>` : ""}
+</div>`;
+}
+// Extract image URLs from markdown description
+function extractImages(md) {
+    const images = [];
+    const re = /!\[([^\]]*)\]\(([^)]+)\)/g;
+    let m;
+    while ((m = re.exec(md)) !== null) {
+        images.push({ alt: m[1], url: m[2] });
+    }
+    return images;
+}
+// Strip markdown images and basic formatting for plain text display
+function mdToPlainHtml(md) {
+    return escapeHtml(md)
+        .replace(/!\[[^\]]*\]\([^)]+\)/g, "") // remove image tags
+        .replace(/^## (.+)$/gm, "<b>$1</b>")
+        .replace(/^### (.+)$/gm, "<b>$1</b>")
+        .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+        .replace(/\n{2,}/g, "<br><br>")
+        .replace(/\n/g, "<br>");
+}
 const offersHandler = async (request, reply) => {
     const data = (await getJson("/api/offers"));
     if (wantsJson(request.url, request.headers.accept))
         return reply.send(data);
-    const table = renderTable(["id", "title", "price", "currency", "tags", "agent"], data.map((offer) => [
-        safe(offer.id),
-        safe(offer.title),
-        safe(offer.base_price),
-        safe(offer.currency, "USDC"),
-        (offer.tags ?? []).join(","),
-        safe(offer.agent_id),
-    ]));
-    return page("Offers", terminalSection(["$ list offers", table]));
+    const cards = data.map(renderOfferCard).join("\n");
+    return page("Offers", `<section class="row"><pre>$ list offers (${data.length})</pre></section>\n<div class="cards">${cards}</div>`);
 };
 app.get("/offers", offersHandler);
 app.get("/offers.json", offersHandler);
+// Offer detail page
+app.get("/offers/:id", async (request, reply) => {
+    const { id } = request.params;
+    const offer = (await getJson(`/api/offers/${id}`));
+    if (wantsJson(request.url, request.headers.accept))
+        return reply.send(offer);
+    const tags = (offer.tags ?? []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
+    const location = offer.location ? `${escapeHtml(offer.location.city ?? "")}${offer.location.country ? ", " + escapeHtml(offer.location.country) : ""}` : "-";
+    const description = offer.description_md ?? "";
+    const images = extractImages(description);
+    const descHtml = mdToPlainHtml(description);
+    const imageLinks = images.length > 0
+        ? `<div class="detail-section"><h3>📷 Images</h3>${images.map((img, i) => `<a class="img-link" href="${escapeHtml(img.url)}" target="_blank">[${escapeHtml(img.alt || `Image ${i + 1}`)}]</a>`).join(" ")}</div>`
+        : "";
+    const body = `
+<a href="/offers" class="back-link">← back to offers</a>
+<div class="card">
+  <div class="card-title">${escapeHtml(offer.title)}</div>
+  <div class="card-row"><span class="card-label">price</span><span class="card-value price">${formatPrice(offer.base_price)} ${escapeHtml(offer.currency ?? "USDC")}</span></div>
+  <div class="card-row"><span class="card-label">category</span><span class="card-value">${escapeHtml(offer.category ?? "-")}</span></div>
+  <div class="card-row"><span class="card-label">location</span><span class="card-value">${location}</span></div>
+  <div class="card-row"><span class="card-label">sla</span><span class="card-value">${offer.sla_days ?? "-"} days</span></div>
+  <div class="card-row"><span class="card-label">posted</span><span class="card-value">${offer.created_at ? new Date(offer.created_at).toISOString().slice(0, 10) : "-"}</span></div>
+  <div class="card-row"><span class="card-label">agent</span><span class="card-value">${escapeHtml(safe(offer.agent_id))}</span></div>
+  ${tags ? `<div class="card-tags">${tags}</div>` : ""}
+  ${imageLinks}
+  <div class="detail-section"><h3>Description</h3><div>${descHtml}</div></div>
+</div>`;
+    return page(offer.title, body);
+});
 const needsHandler = async (request, reply) => {
     const data = (await getJson("/api/needs"));
     if (wantsJson(request.url, request.headers.accept))
         return reply.send(data);
-    const table = renderTable(["id", "title", "budget_min", "budget_max", "currency", "tags", "agent"], data.map((need) => [
-        safe(need.id),
-        safe(need.title),
-        safe(need.budget_min),
-        safe(need.budget_max),
-        safe(need.currency, "USDC"),
-        (need.tags ?? []).join(","),
-        safe(need.agent_id),
-    ]));
-    return page("Needs", terminalSection(["$ list needs", table]));
+    const cards = data.map(need => {
+        const tags = (need.tags ?? []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
+        const budget = need.budget_min || need.budget_max
+            ? `${formatPrice(need.budget_min ?? 0)} – ${formatPrice(need.budget_max ?? "∞")} ${escapeHtml(need.currency ?? "USDC")}`
+            : "Open";
+        return `<div class="card">
+  <div class="card-title">${escapeHtml(need.title)}</div>
+  <div class="card-row"><span class="card-label">budget</span><span class="card-value price">${budget}</span></div>
+  ${tags ? `<div class="card-tags">${tags}</div>` : ""}
+</div>`;
+    }).join("\n");
+    return page("Needs", `<section class="row"><pre>$ list needs (${data.length})</pre></section>\n<div class="cards">${cards}</div>`);
 };
 app.get("/needs", needsHandler);
 app.get("/needs.json", needsHandler);
@@ -193,15 +302,17 @@ const dealsHandler = async (request, reply) => {
     const data = (await getJson("/api/deals"));
     if (wantsJson(request.url, request.headers.accept))
         return reply.send(data);
-    const table = renderTable(["id", "buyer", "seller", "status", "total", "currency"], data.map((deal) => [
-        safe(deal.id),
-        safe(deal.buyer_agent_id),
-        safe(deal.seller_agent_id),
-        safe(deal.status),
-        safe(deal.negotiated_total),
-        safe(deal.currency, "USDC"),
-    ]));
-    return page("Deals", terminalSection(["$ list deals", table]));
+    const cards = data.map(deal => {
+        const statusColor = deal.status === "accepted" ? "#00ff41" : deal.status === "disputed" ? "#ff4141" : "#FFD700";
+        return `<div class="card">
+  <div class="card-title">Deal ${escapeHtml(safe(deal.id).slice(0, 8))}…</div>
+  <div class="card-row"><span class="card-label">status</span><span class="card-value" style="color:${statusColor}">${escapeHtml(safe(deal.status))}</span></div>
+  <div class="card-row"><span class="card-label">total</span><span class="card-value price">${formatPrice(deal.negotiated_total ?? 0)} ${escapeHtml(deal.currency ?? "USDC")}</span></div>
+  <div class="card-row"><span class="card-label">buyer</span><span class="card-value">${escapeHtml(safe(deal.buyer_agent_id).slice(0, 8))}…</span></div>
+  <div class="card-row"><span class="card-label">seller</span><span class="card-value">${escapeHtml(safe(deal.seller_agent_id).slice(0, 8))}…</span></div>
+</div>`;
+    }).join("\n");
+    return page("Deals", `<section class="row"><pre>$ list deals (${data.length})</pre></section>\n<div class="cards">${cards}</div>`);
 };
 app.get("/deals", dealsHandler);
 app.get("/deals.json", dealsHandler);
@@ -304,6 +415,9 @@ app.get("/api-docs", async () => {
         "POST /api/deals/:id/counter",
         "POST /api/deals/:id/accept",
         "POST /api/deals/:id/cancel",
+        "POST /api/deals/:id/close           ← simplified one-call completion (preferred)",
+        "POST /api/deals/:id/confirm-delivery  (legacy, still works)",
+        "POST /api/deals/:id/fulfillment/auto-complete  ← auto-close after timeout",
         "POST /api/payments/create-intent",
         "GET /api/payments/status",
         "POST /api/payments/release",
