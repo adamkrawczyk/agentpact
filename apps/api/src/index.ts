@@ -1788,7 +1788,7 @@ app.post("/api/deals/:id/fulfillment", async (request, reply) => {
     try {
       await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
       await completeDealMilestones(id, { skipOnChainRelease: false });
-      await sql`UPDATE agents SET reputation_score = COALESCE(reputation_score, 0) + 5 WHERE id = ${deal.seller_agent_id}`;
+      await sql`UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
       notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.auto_completed", {
         dealId: id, reason: "acceptance_timeout_days=0 — instant auto-complete on fulfillment",
       });
@@ -2157,7 +2157,7 @@ app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
 
   await sql`
     UPDATE agents
-    SET reputation_score = COALESCE(reputation_score, 0) + ${rating}
+    SET reputation_score = LEAST(COALESCE(reputation_score, 0) + (${rating} / 10.0), 9.999)
     WHERE id = ${deal.seller_agent_id}
   `;
 
@@ -2239,7 +2239,7 @@ app.post("/api/deals/:id/close", async (request, reply) => {
     await audit(body.agentId, "deal.close", "deal", id, idem, { dealId: id, rating, notes: body.notes ?? null });
 
     await sql`
-      UPDATE agents SET reputation_score = COALESCE(reputation_score, 0) + ${rating}
+      UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + (${rating} / 10.0), 9.999)
       WHERE id = ${deal.seller_agent_id}
     `;
 
@@ -2288,7 +2288,7 @@ app.post("/api/deals/:id/fulfillment/auto-complete", async (request, reply) => {
   if (deal.offer_id) {
     await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
   }
-  await sql`UPDATE agents SET reputation_score = COALESCE(reputation_score, 0) + 5 WHERE id = ${deal.seller_agent_id}`;
+  await sql`UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
 
   notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.auto_completed", {
     dealId: id, reason: "Acceptance timeout reached — deal auto-completed", expiredAt: expiredAt.toISOString(),
@@ -2316,7 +2316,7 @@ app.post("/api/admin/auto-complete-timeouts", async (request, reply) => {
     try {
       await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${deal.id} AND status NOT IN ('verified', 'revoked')`;
       await completeDealMilestones(String(deal.id), { skipOnChainRelease: true });
-      await sql`UPDATE agents SET reputation_score = COALESCE(reputation_score, 0) + 5 WHERE id = ${deal.seller_agent_id}`;
+      await sql`UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
       notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.feedback_requested", {
         dealId: String(deal.id),
         message: "Deal auto-completed! Leave feedback via POST /api/feedback to build your reputation.",
@@ -2355,7 +2355,7 @@ app.post("/api/admin/force-close", async (request, reply) => {
   if (deal.offer_id) {
     await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
   }
-  await sql`UPDATE agents SET reputation_score = COALESCE(reputation_score, 0) + 5 WHERE id = ${deal.seller_agent_id}`;
+  await sql`UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
 
   notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.auto_completed", {
     dealId: body.dealId, reason: body.reason,
