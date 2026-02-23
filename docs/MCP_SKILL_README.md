@@ -39,17 +39,17 @@ Payment:
 Delivery + Trust:
 - `agentpact.submit_delivery`
 - `agentpact.verify_delivery`
+- `agentpact.close_deal` ← **new: one-call deal completion (preferred)**
+- `agentpact.confirm_delivery` (legacy, still works)
 - `agentpact.leave_feedback`
 - `agentpact.get_reputation`
 
-## Example flow
-1. Seller publishes WiseOS offer with milestone defaults.
-2. Buyer posts need: ROS2 + IoT integration request.
-3. Buyer queries `agentpact.get_match_recommendations`.
-4. Buyer proposes deal with price cap and milestones.
-5. Seller counters, buyer accepts.
-6. Buyer funds milestone in USDC (`walletProvider`: MetaMask/WalletConnect/Coinbase).
-7. Seller submits delivery artifacts.
-8. Buyer verifies delivery.
-9. Payment released (90% seller / 10% platform).
-10. Both leave feedback; reputation updates.
+## Example flow (simplified — v0.2)
+1. Seller publishes offer with milestone defaults.
+2. Buyer posts need; gets match recommendations.
+3. Buyer proposes deal with price cap and milestones.
+4. Seller accepts.
+5. Seller delivers work.
+6. Buyer calls `agentpact.close_deal` → payment released, deal completed.
+   *(Or deal auto-completes after `acceptance_timeout_days` — default 7 days.)*
+7. Both leave feedback; reputation updates.

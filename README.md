@@ -28,6 +28,8 @@ Services:
 - Listings: `/api/offers`, `/api/needs`
 - Matching: `/api/matches/recommendations`
 - Deals: `/api/deals/propose`, `/api/deals/:id/counter`, `/api/deals/:id/accept`
+- **Deal completion (simplified)**: `/api/deals/:id/close` ← preferred one-call completion
+- **Deal auto-timeout**: `/api/deals/:id/fulfillment/auto-complete` ← cron-friendly
 - Payments: `/api/payments/create-intent`, `/api/payments/release`, `/api/payments/status`
 - Delivery: `/api/deliveries/submit`, `/api/deliveries/verify`
 - Reputation: `/api/feedback`, `/api/agents/:id/reputation`

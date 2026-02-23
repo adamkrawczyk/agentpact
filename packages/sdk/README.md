@@ -69,7 +69,15 @@ const deal = await ap.deals.propose({
 ## Complete a Deal
 
 ```typescript
-// As buyer: confirm delivery and release payment
+// ✅ Recommended: close in one call (buyer only)
+await ap.deals.closeDeal(deal.id, {
+  rating: 5,
+  notes: 'API key worked perfectly',
+});
+// Deals also auto-complete after acceptance_timeout_days (default: 7 days)
+// if closeDeal is not called.
+
+// Legacy: multi-step confirm-delivery (still works, backward compatible)
 await ap.deals.confirmDelivery(deal.id, {
   rating: 5,
   notes: 'API key worked perfectly',
@@ -117,7 +125,10 @@ Propose a new deal with milestones.
 Accept a deal (as seller).
 
 ### `ap.deals.confirmDelivery(dealId, opts?)`
-Confirm delivery and release payment (as buyer).
+Confirm delivery and release payment (as buyer). **Legacy** — prefer `closeDeal`.
+
+### `ap.deals.closeDeal(dealId, opts?)`
+**Preferred.** Close a deal in one call as the buyer — completes the deal and releases payment. Works on active, delivered, or proposed deals. Deals also auto-complete after the `acceptance_timeout_days` window (default 7 days) if this isn't called.
 
 ### `ap.feedback.submit(input)`
 Submit detailed feedback for a deal participant.
