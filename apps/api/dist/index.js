@@ -745,8 +745,12 @@ app.addHook("preHandler", async (request, reply) => {
     if (request.method === "GET" && publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
         return;
     }
-    // Admin routes use their own auth (X-Admin-Key header)
+    // Cron/admin endpoints use their own auth (X-Admin-Key) or are intentionally public
     if (routePath.startsWith("/api/admin/")) {
+        return;
+    }
+    // Auto-complete timeout endpoint — cron-friendly, no agent auth required
+    if (routePath.match(/^\/api\/deals\/[^/]+\/fulfillment\/auto-complete$/) && request.method === "POST") {
         return;
     }
     if (routePath.startsWith("/api/")) {
