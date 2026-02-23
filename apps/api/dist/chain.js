@@ -9,9 +9,13 @@ import { createPublicClient, createWalletClient, http, encodeFunctionData, parse
 import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 // ── Addresses & config ───────────────────────────────────────────────
-export const ESCROW_ADDRESS = process.env.ESCROW_CONTRACT ?? "0x588168712bF758aFD747bF46471afa53f9599A64";
+export const ESCROW_ADDRESS = process.env.ESCROW_CONTRACT ??
+    process.env.ESCROW_CONTRACT_ADDRESS ??
+    "0x588168712bF758aFD747bF46471afa53f9599A64";
 export const USDC_ADDRESS = process.env.USDC_CONTRACT ?? "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // Base USDC
-const RPC_URL = process.env.BASE_RPC_URL ?? "https://mainnet.base.org";
+const RPC_URL = process.env.BASE_RPC_URL ??
+    process.env.RPC_URL ??
+    "https://mainnet.base.org";
 // ── ABI — derived from contracts/AgentPactEscrow.sol ─────────────────
 // Contract functions:
 //   createMilestone(bytes32 dealId, bytes32 milestoneId, address seller, uint256 amount) — buyer calls (after USDC approve)

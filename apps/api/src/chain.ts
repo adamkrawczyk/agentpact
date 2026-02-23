@@ -21,10 +21,15 @@ import { privateKeyToAccount } from "viem/accounts";
 
 // ── Addresses & config ───────────────────────────────────────────────
 export const ESCROW_ADDRESS: Address =
-  (process.env.ESCROW_CONTRACT as Address) ?? "0x588168712bF758aFD747bF46471afa53f9599A64";
+  (process.env.ESCROW_CONTRACT as Address) ??
+  (process.env.ESCROW_CONTRACT_ADDRESS as Address) ??
+  "0x588168712bF758aFD747bF46471afa53f9599A64";
 export const USDC_ADDRESS: Address =
   (process.env.USDC_CONTRACT as Address) ?? "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // Base USDC
-const RPC_URL = process.env.BASE_RPC_URL ?? "https://mainnet.base.org";
+const RPC_URL =
+  process.env.BASE_RPC_URL ??
+  process.env.RPC_URL ??
+  "https://mainnet.base.org";
 
 // ── ABI — derived from contracts/AgentPactEscrow.sol ─────────────────
 // Contract functions:
