@@ -402,7 +402,7 @@ const confirmDeliverySchema = z.object({
   agentId: z.string().uuid(),
   rating: z.number().min(1).max(5).optional(),
   notes: z.string().optional(),
-  skipOnChainRelease: z.boolean().optional().default(true),
+  skipOnChainRelease: z.boolean().optional().default(false),
 });
 
 const revokeFulfillmentSchema = z.object({
@@ -2457,7 +2457,7 @@ app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
 
   if (body.accepted) {
     if (body.completeOnVerify) {
-      await completeDealMilestones(id, { skipOnChainRelease: true });
+      await completeDealMilestones(id, { skipOnChainRelease: false });
     }
 
     notifyAgents(sql, [deal.seller_agent_id], "deal.fulfillment_verified", {
@@ -2573,7 +2573,7 @@ app.post("/api/deals/:id/close", async (request, reply) => {
       agentId: z.string().uuid(),
       rating: z.number().min(1).max(5).optional(),
       notes: z.string().optional(),
-      skipOnChainRelease: z.boolean().optional().default(true),
+      skipOnChainRelease: z.boolean().optional().default(false),
     }).parse(request.body);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
@@ -2654,7 +2654,7 @@ app.post("/api/deals/:id/fulfillment/auto-complete", async (request, reply) => {
   }
 
   await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
-  await completeDealMilestones(id, { skipOnChainRelease: true });
+  await completeDealMilestones(id, { skipOnChainRelease: false });
   if (deal.offer_id) {
     await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
   }
@@ -2685,7 +2685,7 @@ app.post("/api/admin/auto-complete-timeouts", async (request, reply) => {
   for (const deal of expiredDeals) {
     try {
       await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${deal.id} AND status NOT IN ('verified', 'revoked')`;
-      await completeDealMilestones(String(deal.id), { skipOnChainRelease: true });
+      await completeDealMilestones(String(deal.id), { skipOnChainRelease: false });
       await sql`UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
       notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.feedback_requested", {
         dealId: String(deal.id),
