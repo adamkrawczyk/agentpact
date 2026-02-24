@@ -28,6 +28,12 @@ import {
   ESCROW_ADDRESS,
   USDC_ADDRESS,
 } from "./chain.js";
+import {
+  cacheEmbedding,
+  computeSemanticScore,
+  generateEmbeddings,
+  isSemanticMatchingEnabled,
+} from "./semantic-match.js";
 import type { Hex, Address } from "viem";
 
 const PORT = Number(process.env.API_PORT ?? 4000);
@@ -673,6 +679,29 @@ async function audit(actorId: string | null, action: string, objectType: string,
   `;
 }
 
+function buildSemanticText(input: { title?: string | null; description_md?: string | null; category?: string | null; tags?: string[] | null }): string {
+  const tags = Array.isArray(input.tags) ? input.tags.join(", ") : "";
+  return [
+    input.title ?? "",
+    input.description_md ?? "",
+    input.category ?? "",
+    tags,
+  ]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function extractEmbedding(value: unknown): number[] | null {
+  if (!Array.isArray(value)) return null;
+  const embedding: number[] = [];
+  for (const item of value) {
+    if (typeof item !== "number" || !Number.isFinite(item)) return null;
+    embedding.push(item);
+  }
+  return embedding.length > 0 ? embedding : null;
+}
+
 async function recomputeMatches(): Promise<number> {
   const offers = await sql`
     SELECT o.*, COALESCE(a.skill_verification_count, 0)::int AS seller_skill_verification_count
@@ -682,21 +711,79 @@ async function recomputeMatches(): Promise<number> {
   `;
   const needs = await sql`SELECT * FROM needs WHERE status = 'open'`;
   let writes = 0;
+  let semanticEnabled = isSemanticMatchingEnabled();
+  const offerTexts = new Map<string, string>();
+  const needTexts = new Map<string, string>();
+
+  if (semanticEnabled) {
+    try {
+      const allTexts: string[] = [];
+      for (const offer of offers) {
+        const text = buildSemanticText(offer);
+        offerTexts.set(String(offer.id), text);
+        const cachedEmbedding = extractEmbedding(offer.description_embedding);
+        if (cachedEmbedding) {
+          cacheEmbedding(text, cachedEmbedding);
+        }
+        allTexts.push(text);
+      }
+      for (const need of needs) {
+        const text = buildSemanticText(need);
+        needTexts.set(String(need.id), text);
+        const cachedEmbedding = extractEmbedding(need.description_embedding);
+        if (cachedEmbedding) {
+          cacheEmbedding(text, cachedEmbedding);
+        }
+        allTexts.push(text);
+      }
+      await generateEmbeddings(allTexts);
+    } catch (error) {
+      app.log.warn({ err: error }, "Semantic matching warmup failed, using tag-only matching");
+      semanticEnabled = false;
+    }
+  }
 
   for (const offer of offers) {
     for (const need of needs) {
       const overlap = offer.tags.filter((t: string) => need.tags.includes(t));
-      if (overlap.length === 0) continue;
       const budgetFit =
         need.budget_max === null || need.budget_max === undefined
           ? 1
           : Math.max(0, 1 - Math.abs(toNumber(offer.base_price) - toNumber(need.budget_max)) / Math.max(toNumber(need.budget_max), 1));
       const tagScore = Math.min(1, overlap.length / Math.max(offer.tags.length, 1));
       const skillBoost = Number(offer.seller_skill_verification_count) > 0 ? 0.2 : 0;
-      const score = Number((0.7 * tagScore + 0.3 * budgetFit + skillBoost).toFixed(3));
+      let semanticScore: number | null = null;
+      let score: number;
+
+      if (!semanticEnabled) {
+        if (overlap.length === 0) continue;
+        score = Number((0.7 * tagScore + 0.3 * budgetFit + skillBoost).toFixed(3));
+      } else {
+        try {
+          const offerText = offerTexts.get(String(offer.id)) ?? buildSemanticText(offer);
+          const needText = needTexts.get(String(need.id)) ?? buildSemanticText(need);
+          semanticScore = await computeSemanticScore(offerText, needText);
+        } catch (error) {
+          app.log.warn({ err: error }, "Semantic score failed, reverting to tag-only matching");
+          semanticEnabled = false;
+          if (overlap.length === 0) continue;
+          score = Number((0.7 * tagScore + 0.3 * budgetFit + skillBoost).toFixed(3));
+          await sql`
+            INSERT INTO matches (offer_id, need_id, score, reason_json)
+            VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, semanticScore })}::jsonb)
+            ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
+          `;
+          writes += 1;
+          continue;
+        }
+
+        if (overlap.length === 0 && semanticScore <= 0.75) continue;
+        score = Number((0.5 * semanticScore + 0.2 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost).toFixed(3));
+      }
+
       await sql`
         INSERT INTO matches (offer_id, need_id, score, reason_json)
-        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, skillBoost })}::jsonb)
+        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, semanticScore })}::jsonb)
         ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
       `;
       writes += 1;
@@ -1702,6 +1789,53 @@ app.post("/api/autopilot/run", async (request, reply) => {
     matchesComputed,
     dealsProposed,
     skipped,
+    runId,
+  };
+});
+
+app.post("/api/embeddings/recompute", async (request, reply) => {
+  if (!isSemanticMatchingEnabled()) {
+    return reply.code(400).send({ error: "OPENAI_API_KEY is not configured" });
+  }
+
+  const offers = await sql`SELECT id, title, description_md, category, tags FROM offers`;
+  const needs = await sql`SELECT id, title, description_md, category, tags FROM needs`;
+
+  const offerTexts = offers.map((offer) => buildSemanticText(offer));
+  const needTexts = needs.map((need) => buildSemanticText(need));
+
+  const [offerEmbeddings, needEmbeddings] = await Promise.all([
+    generateEmbeddings(offerTexts),
+    generateEmbeddings(needTexts),
+  ]);
+
+  await sql.begin(async (txn) => {
+    for (let i = 0; i < offers.length; i += 1) {
+      await txn.unsafe(
+        `
+          UPDATE offers
+          SET description_embedding = $1::jsonb
+          WHERE id = $2
+        `,
+        [JSON.stringify(offerEmbeddings[i]), offers[i].id]
+      );
+    }
+    for (let i = 0; i < needs.length; i += 1) {
+      await txn.unsafe(
+        `
+          UPDATE needs
+          SET description_embedding = $1::jsonb
+          WHERE id = $2
+        `,
+        [JSON.stringify(needEmbeddings[i]), needs[i].id]
+      );
+    }
+  });
+
+  return {
+    offersUpdated: offers.length,
+    needsUpdated: needs.length,
+    totalUpdated: offers.length + needs.length,
   };
 });
 

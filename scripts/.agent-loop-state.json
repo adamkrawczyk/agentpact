@@ -1,0 +1,10 @@
+{
+  "buyerAgentId": "260b9612-9301-4592-920e-bee30643bfa9",
+  "buyerApiKey": "6a93c0bd62a75024107fca548efbff71cb7381f8b3f2bbbe89814696e84707db",
+  "buyerWallet": "0x1111111111111111111111111111111111111111",
+  "sellerAgentId": "0234d661-3dae-4f0b-a074-b93e8d5f9251",
+  "sellerApiKey": "cce10c4fca84c8b4acea46e6a817fd38009de01af64f6c40d67a0a8f140e97c3",
+  "sellerWallet": "0x2222222222222222222222222222222222222222",
+  "dealsCreated": 1,
+  "lastRunAt": "2026-02-23T17:45:31.321Z"
+}
