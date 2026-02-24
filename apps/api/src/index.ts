@@ -319,6 +319,13 @@ const proposeDealSchema = z.object({
   acceptanceTimeoutDays: z.number().int().min(0).max(30).default(0)
 });
 
+const autopilotSettingsSchema = z.object({
+  agentId: z.string().uuid(),
+  autoBuyEnabled: z.boolean().optional(),
+  maxAutoDealPrice: z.number().positive().nullable().optional(),
+  autoBuyCategories: z.array(z.string().min(1)).nullable().optional(),
+});
+
 const counterDealSchema = z.object({
   dealId: z.string().uuid(),
   actorAgentId: z.string().uuid(),
@@ -698,6 +705,67 @@ async function recomputeMatches(): Promise<number> {
   return writes;
 }
 
+type ProposeDealInput = z.infer<typeof proposeDealSchema>;
+
+async function createDealProposal(
+  proposal: ProposeDealInput,
+  opts: {
+    idempotencyKey: string;
+    auditAction: string;
+    auditActorAgentId: string | null;
+    negotiationActorAgentId: string;
+    auditPayload?: unknown;
+  },
+): Promise<Record<string, unknown>> {
+  const result = await sql.begin(async (txn) => {
+    const [deal] = await txn.unsafe(
+      `
+        INSERT INTO deals (
+          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days
+        ) VALUES ($1, $2, $3, $4, 'proposed', $5, 'USDC', $6, $7)
+        RETURNING *
+      `,
+      [
+        proposal.buyerAgentId,
+        proposal.sellerAgentId,
+        proposal.offerId,
+        proposal.needId,
+        proposal.negotiatedTotal,
+        proposal.maxPriceDeltaPct,
+        proposal.acceptanceTimeoutDays,
+      ]
+    );
+
+    const milestones = [];
+    for (const milestone of proposal.milestones) {
+      const dueAt = milestone.dueAt ?? null;
+      const [ms] = await txn.unsafe(
+        `
+          INSERT INTO milestones (deal_id, idx, title, amount, currency, acceptance_criteria, due_at)
+          VALUES ($1, $2, $3, $4, 'USDC', $5::jsonb, $6)
+          RETURNING *
+        `,
+        [deal.id, milestone.idx, milestone.title, milestone.amount, JSON.stringify(milestone.acceptanceCriteria), dueAt]
+      );
+      milestones.push(ms);
+    }
+
+    await txn.unsafe(
+      `
+        INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+        VALUES ($1, $2, 'propose', $3::jsonb)
+      `,
+      [deal.id, opts.negotiationActorAgentId, JSON.stringify(opts.auditPayload ?? proposal)]
+    );
+
+    await audit(opts.auditActorAgentId, opts.auditAction, "deal", String(deal.id), opts.idempotencyKey, opts.auditPayload ?? proposal);
+
+    return { ...deal, milestones };
+  });
+
+  return result as Record<string, unknown>;
+}
+
 async function enforceDealDelta(dealId: string, negotiatedTotal: number): Promise<void> {
   const [deal] = await sql`
     SELECT d.id, o.base_price, d.max_price_delta_pct
@@ -904,6 +972,10 @@ app.addHook("preHandler", async (request, reply) => {
 
   // Auto-complete timeout endpoint — cron-friendly, no agent auth required
   if (routePath.match(/^\/api\/deals\/[^/]+\/fulfillment\/auto-complete$/) && request.method === "POST") {
+    return;
+  }
+
+  if (routePath === "/api/autopilot/run" && request.method === "POST") {
     return;
   }
 
@@ -1201,6 +1273,36 @@ app.get("/api/agents/:id/skills", async (request, reply) => {
   };
 });
 
+app.post("/api/autopilot/settings", async (request, reply) => {
+  const idem = idempotencyKey(request.headers as Record<string, unknown>);
+  const body = autopilotSettingsSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (body.agentId !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to act as this agent" });
+  }
+
+  const [agent] = await sql`
+    UPDATE agents
+    SET
+      auto_buy_enabled = COALESCE(${body.autoBuyEnabled ?? null}, auto_buy_enabled),
+      max_auto_deal_price = CASE
+        WHEN ${body.maxAutoDealPrice !== undefined} THEN ${body.maxAutoDealPrice ?? null}
+        ELSE max_auto_deal_price
+      END,
+      auto_buy_categories = CASE
+        WHEN ${body.autoBuyCategories !== undefined} THEN ${body.autoBuyCategories ?? null}::text[]
+        ELSE auto_buy_categories
+      END
+    WHERE id = ${body.agentId}
+    RETURNING id, auto_buy_enabled, max_auto_deal_price, auto_buy_categories
+  `;
+  if (!agent) return reply.code(404).send({ error: "Agent not found" });
+
+  await audit(body.agentId, "autopilot.settings.update", "agent", body.agentId, idem, body);
+  return agent;
+});
+
 app.post("/api/offers", async (request, reply) => {
   const idem = idempotencyKey(request.headers as Record<string, unknown>);
   const body = createOfferSchema.parse(request.body);
@@ -1439,6 +1541,170 @@ app.post("/api/matches/recompute", async () => {
   return { matchesUpserted: writes };
 });
 
+app.post("/api/autopilot/run", async (request, reply) => {
+  const adminKey = process.env.ADMIN_API_KEY;
+  const authHeader = request.headers["x-admin-key"] || String(request.headers["authorization"] ?? "").replace("Bearer ", "");
+  if (adminKey && authHeader !== adminKey) return reply.code(403).send({ error: "Invalid admin key" });
+
+  const matchesComputed = await recomputeMatches();
+  const candidateMatches = await sql`
+    SELECT
+      m.offer_id,
+      m.need_id,
+      m.score,
+      o.agent_id AS seller_agent_id,
+      o.base_price,
+      o.max_price_delta_pct,
+      o.category,
+      o.title AS offer_title,
+      n.agent_id AS buyer_agent_id,
+      n.title AS need_title,
+      n.acceptance_criteria,
+      a.auto_buy_enabled,
+      a.max_auto_deal_price,
+      a.auto_buy_categories
+    FROM matches m
+    JOIN offers o ON o.id = m.offer_id
+    JOIN needs n ON n.id = m.need_id
+    JOIN agents a ON a.id = n.agent_id
+    WHERE m.score >= 0.8
+      AND o.status = 'active'
+      AND n.status = 'open'
+    ORDER BY m.score DESC
+  `;
+
+  const buyerIds = Array.from(new Set(candidateMatches.map((match) => String(match.buyer_agent_id))));
+  const recentAutopilotEvents = buyerIds.length > 0
+    ? await sql`
+        SELECT actor_agent_id, COUNT(*)::int AS deal_count
+        FROM audit_log
+        WHERE action = 'autopilot.deal.proposed'
+          AND created_at > NOW() - INTERVAL '1 hour'
+          AND actor_agent_id = ANY(${buyerIds})
+        GROUP BY actor_agent_id
+      `
+    : [];
+  const recentDealsByBuyer = new Map<string, number>(
+    recentAutopilotEvents.map((row) => [String(row.actor_agent_id), Number(row.deal_count)])
+  );
+
+  let dealsProposed = 0;
+  let skipped = 0;
+  const runId = randomUUID();
+
+  for (const match of candidateMatches) {
+    const buyerAgentId = String(match.buyer_agent_id);
+    const sellerAgentId = String(match.seller_agent_id);
+    const offerId = String(match.offer_id);
+    const needId = String(match.need_id);
+    const negotiatedTotal = toNumber(match.base_price);
+
+    if (!match.auto_buy_enabled) {
+      skipped += 1;
+      continue;
+    }
+
+    if (match.max_auto_deal_price !== null && match.max_auto_deal_price !== undefined && negotiatedTotal > toNumber(match.max_auto_deal_price)) {
+      skipped += 1;
+      continue;
+    }
+
+    const autoBuyCategories = Array.isArray(match.auto_buy_categories)
+      ? match.auto_buy_categories.filter((value: unknown): value is string => typeof value === "string")
+      : null;
+    if (autoBuyCategories && !autoBuyCategories.includes(String(match.category))) {
+      skipped += 1;
+      continue;
+    }
+
+    const dealsInWindow = recentDealsByBuyer.get(buyerAgentId) ?? 0;
+    if (dealsInWindow >= 5) {
+      skipped += 1;
+      continue;
+    }
+
+    const [existingDeal] = await sql`
+      SELECT id
+      FROM deals
+      WHERE offer_id = ${offerId}
+        AND need_id = ${needId}
+        AND status IN ('proposed', 'countered', 'accepted', 'active', 'delivered', 'disputed')
+      LIMIT 1
+    `;
+    if (existingDeal) {
+      skipped += 1;
+      continue;
+    }
+
+    const acceptanceCriteria = Array.isArray(match.acceptance_criteria)
+      ? match.acceptance_criteria.filter((value: unknown): value is string => typeof value === "string")
+      : [];
+    const milestoneAcceptanceCriteria = acceptanceCriteria.length > 0
+      ? acceptanceCriteria
+      : [`Deliver work matching need ${needId}`];
+    const proposal = proposeDealSchema.parse({
+      buyerAgentId,
+      sellerAgentId,
+      offerId,
+      needId,
+      negotiatedTotal,
+      maxPriceDeltaPct: toNumber(match.max_price_delta_pct),
+      acceptanceTimeoutDays: 0,
+      milestones: [
+        {
+          idx: 1,
+          title: `Autopilot: ${String(match.offer_title ?? "Deliver service")}`,
+          amount: negotiatedTotal,
+          acceptanceCriteria: milestoneAcceptanceCriteria,
+        },
+      ],
+    });
+
+    try {
+      const createdDeal = await createDealProposal(proposal, {
+        idempotencyKey: `autopilot-run:${runId}:${offerId}:${needId}`,
+        auditAction: "autopilot.deal.proposed",
+        auditActorAgentId: buyerAgentId,
+        negotiationActorAgentId: buyerAgentId,
+        auditPayload: {
+          runId,
+          score: toNumber(match.score),
+          offerId,
+          needId,
+          buyerAgentId,
+          sellerAgentId,
+          negotiatedTotal,
+          source: "autopilot",
+        },
+      });
+
+      recentDealsByBuyer.set(buyerAgentId, dealsInWindow + 1);
+      dealsProposed += 1;
+
+      notifyAgents(sql, [sellerAgentId], "deal.proposed", {
+        dealId: String(createdDeal.id),
+        buyerAgentId,
+        sellerAgentId,
+        negotiatedTotal,
+        source: "autopilot",
+      });
+    } catch (error) {
+      skipped += 1;
+      request.log.error({
+        err: error,
+        offerId,
+        needId,
+      }, "autopilot.run failed to propose deal");
+    }
+  }
+
+  return {
+    matchesComputed,
+    dealsProposed,
+    skipped,
+  };
+});
+
 app.post("/api/alerts/subscribe", async (request, reply) => {
   const body = z
     .object({
@@ -1480,42 +1746,12 @@ app.post("/api/deals/propose", async (request, reply) => {
     return reply.code(403).send({ error: "Not authorized" });
   }
 
-  const result = await sql.begin(async (txn) => {
-    const [deal] = await txn.unsafe(
-      `
-        INSERT INTO deals (
-          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days
-        ) VALUES ($1, $2, $3, $4, 'proposed', $5, 'USDC', $6, $7)
-        RETURNING *
-      `,
-      [body.buyerAgentId, body.sellerAgentId, body.offerId, body.needId, body.negotiatedTotal, body.maxPriceDeltaPct, body.acceptanceTimeoutDays]
-    );
-
-    const milestones = [];
-    for (const milestone of body.milestones) {
-      const dueAt = milestone.dueAt ?? null;
-      const [ms] = await txn.unsafe(
-        `
-          INSERT INTO milestones (deal_id, idx, title, amount, currency, acceptance_criteria, due_at)
-          VALUES ($1, $2, $3, $4, 'USDC', $5::jsonb, $6)
-          RETURNING *
-        `,
-        [deal.id, milestone.idx, milestone.title, milestone.amount, JSON.stringify(milestone.acceptanceCriteria), dueAt]
-      );
-      milestones.push(ms);
-    }
-
-    await txn.unsafe(
-      `
-        INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-        VALUES ($1, $2, 'propose', $3::jsonb)
-      `,
-      [deal.id, body.buyerAgentId, JSON.stringify(body)]
-    );
-
-    await audit(body.buyerAgentId, "deal.propose", "deal", deal.id, idem, body);
-
-    return { ...deal, milestones };
+  const result = await createDealProposal(body, {
+    idempotencyKey: idem,
+    auditAction: "deal.propose",
+    auditActorAgentId: body.buyerAgentId,
+    negotiationActorAgentId: body.buyerAgentId,
+    auditPayload: body,
   });
 
   notifyAgents(sql, [body.sellerAgentId], "deal.proposed", {
