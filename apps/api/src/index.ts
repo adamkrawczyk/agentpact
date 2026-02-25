@@ -68,7 +68,12 @@ async function getAgentStats(db: typeof sql, agentId: string): Promise<{ complet
   return { completedDeals: Number(stats.completed_deals), reputationScore: Number(stats.reputation_score) };
 }
 
-export const sql = postgres(DATABASE_URL, { max: 10 });
+export const sql = postgres(DATABASE_URL, {
+  max: 20,           // Up from 10 — Supabase free tier supports ~20 connections
+  idle_timeout: 30,  // Release idle connections after 30s to avoid Supabase connection cap
+  connect_timeout: 10, // Fail fast if pool can't get a connection in 10s
+  max_lifetime: 1800,  // Recycle connections every 30 min to avoid stale sockets
+});
 export const app = Fastify({ logger: true });
 const vaultSql = sql as unknown as Sql<Record<string, unknown>>;
 const credentialEncryptionKey = getCredentialEncryptionKey();
@@ -1030,6 +1035,38 @@ await app.register(import('@fastify/rate-limit'), {
   keyGenerator: (request) => request.headers['x-api-key'] as string || request.ip
 });
 
+// ── Request timeout middleware (prevent hung requests from blocking the pool) ──
+const REQUEST_TIMEOUT_MS = 30_000; // 30s hard limit per request
+app.addHook('onRequest', async (_request, reply) => {
+  const timer = setTimeout(() => {
+    if (!reply.sent) {
+      app.log.warn({ url: _request.url, method: _request.method }, 'Request timeout — forcing 503');
+      reply.code(503).send({ error: 'Request timeout — server is under load, please retry' });
+    }
+  }, REQUEST_TIMEOUT_MS);
+  // Clear timer when response finishes (success or error)
+  reply.raw.on('finish', () => clearTimeout(timer));
+  reply.raw.on('close', () => clearTimeout(timer));
+});
+
+// ── Connection pool health endpoint ──
+app.get('/health/pool', async () => {
+  // postgres.js exposes pool stats via the tagged-template function object
+  const pool = sql as unknown as Record<string, unknown>;
+  return {
+    maxConnections: 20,
+    note: 'postgres.js does not expose live pool stats via public API; check Supabase dashboard for active connections',
+    timestamp: new Date().toISOString(),
+    // Canary query to verify pool is not exhausted
+    canary: await sql`SELECT 1 AS ok`.then(() => 'ok').catch((e: Error) => `error: ${e.message}`),
+    ...(typeof pool.totalCount === 'number' ? {
+      total: pool.totalCount,
+      idle: pool.idleCount,
+      waiting: pool.waitingCount,
+    } : {}),
+  };
+});
+
 await initAuth(app);
 registerHealthChecks(app, sql);
 registerWebhookRoutes(app, sql);
@@ -1411,7 +1448,8 @@ app.post("/api/offers", async (request, reply) => {
   `;
 
   await audit(body.agentId, "offer.create", "offer", offer.id, idem, body);
-  await recomputeMatches();
+  // Fire-and-forget: don't block the response on N×M match recomputation
+  recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after offer.create"));
   return reply.code(201).send(offer);
 });
 
@@ -1450,7 +1488,8 @@ app.patch("/api/offers/:id", async (request, reply) => {
     WHERE id = ${id}
     RETURNING *
   `;
-  await recomputeMatches();
+  // Fire-and-forget: don't block the response on N×M match recomputation
+  recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after offer.update"));
   return offer;
 });
 
@@ -1524,7 +1563,8 @@ app.post("/api/needs", async (request, reply) => {
   `;
 
   await audit(body.agentId, "need.create", "need", need.id, idem, body);
-  await recomputeMatches();
+  // Fire-and-forget: don't block the response on N×M match recomputation
+  recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after need.create"));
   return reply.code(201).send(need);
 });
 
@@ -1563,7 +1603,8 @@ app.patch("/api/needs/:id", async (request, reply) => {
     WHERE id = ${id}
     RETURNING *
   `;
-  await recomputeMatches();
+  // Fire-and-forget: don't block the response on N×M match recomputation
+  recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after need.update"));
   return need;
 });
 
@@ -1959,45 +2000,65 @@ app.post("/api/deals/:id/accept", async (request, reply) => {
     return reply.code(403).send({ error: "Not authorized to act as this agent" });
   }
 
+  // LEFT JOIN so deals without an offer (e.g. counter-proposed) still resolve
   const [deal] = await sql`
-    SELECT d.buyer_agent_id, d.seller_agent_id, o.fulfillment_type
+    SELECT d.buyer_agent_id, d.seller_agent_id, d.status,
+           COALESCE(o.fulfillment_type, 'generic') AS fulfillment_type
     FROM deals d
-    JOIN offers o ON o.id = d.offer_id
+    LEFT JOIN offers o ON o.id = d.offer_id
     WHERE d.id = ${id}
   `;
   if (!deal) return reply.code(404).send({ error: "Deal not found" });
+  // Idempotency: if already active, return ok without re-running the transaction
+  if (deal.status === 'active') {
+    return { ok: true, note: "Deal already accepted" };
+  }
+  if (deal.status !== 'proposed' && deal.status !== 'countered') {
+    return reply.code(409).send({ error: `Cannot accept deal in status '${deal.status}'` });
+  }
   if (body.actorAgentId !== deal.seller_agent_id) {
     return reply.code(403).send({ error: "Not authorized" });
   }
 
-  await sql.begin(async (txn) => {
-    await txn.unsafe("UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = $1", [id]);
-    await txn.unsafe("UPDATE milestones SET status = 'in_progress' WHERE deal_id = $1 AND status = 'pending'", [id]);
-    await txn.unsafe(
-      `
-        INSERT INTO deal_fulfillment (deal_id, fulfillment_type, status)
-        VALUES ($1, $2, 'pending')
-        ON CONFLICT (deal_id) DO NOTHING
-      `,
-      [id, deal?.fulfillment_type ?? "generic"],
-    );
-    await txn.unsafe(
-      `
-        INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-        VALUES ($1, $2, 'accept', $3::jsonb)
-      `,
-      [id, body.actorAgentId, JSON.stringify(body)]
-    );
-  });
-
-  if (deal) {
-    notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.accepted", {
-      dealId: id,
-      acceptedBy: body.actorAgentId,
-      fulfillmentType: deal.fulfillment_type,
-      sellerActionRequired: "Provide fulfillment details via /api/deals/:id/fulfillment",
+  try {
+    await sql.begin(async (txn) => {
+      // CAS-style update: only succeeds if still in an acceptable status
+      const [updated] = await txn.unsafe(
+        "UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = $1 AND status IN ('proposed', 'countered') RETURNING id",
+        [id]
+      );
+      if (!updated) {
+        throw new Error(`Deal ${id} status changed concurrently — accept aborted`);
+      }
+      await txn.unsafe("UPDATE milestones SET status = 'in_progress' WHERE deal_id = $1 AND status = 'pending'", [id]);
+      await txn.unsafe(
+        `
+          INSERT INTO deal_fulfillment (deal_id, fulfillment_type, status)
+          VALUES ($1, $2, 'pending')
+          ON CONFLICT (deal_id) DO NOTHING
+        `,
+        [id, deal.fulfillment_type],
+      );
+      await txn.unsafe(
+        `
+          INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+          VALUES ($1, $2, 'accept', $3::jsonb)
+        `,
+        [id, body.actorAgentId, JSON.stringify(body)]
+      );
     });
+  } catch (err) {
+    app.log.error({ err, dealId: id }, "deal.accept transaction failed — deal status NOT changed");
+    return reply.code(500).send({ error: "Failed to accept deal — please retry" });
   }
+
+  // Fire-and-forget notification (don't let webhook errors fail the accept)
+  notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.accepted", {
+    dealId: id,
+    acceptedBy: body.actorAgentId,
+    fulfillmentType: deal.fulfillment_type,
+    sellerActionRequired: "Provide fulfillment details via /api/deals/:id/fulfillment",
+  });
 
   return { ok: true };
 });
