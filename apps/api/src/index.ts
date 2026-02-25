@@ -965,13 +965,14 @@ async function completeDealMilestones(
     }
 
     const intents = await sql`
-      SELECT CAST(pi."mode" AS text) AS payment_mode
+      SELECT pi.id, pi.tx_hash
       FROM payment_intents pi
       JOIN milestones m ON m.id = pi.milestone_id
       WHERE m.deal_id = ${dealId} AND pi.status = 'funded'
       ORDER BY pi.created_at DESC
     `;
-    const hasOnChainFundedIntent = intents.some((row) => String(row.payment_mode) === "on-chain");
+    // If on-chain mode is active and there are funded intents with real tx hashes, treat as on-chain funded
+    const hasOnChainFundedIntent = intents.some((row) => row.tx_hash && !String(row.tx_hash).startsWith("sim_"));
 
     if (hasOnChainFundedIntent) {
       // Try platform-initiated release via resolveDispute (pays seller)

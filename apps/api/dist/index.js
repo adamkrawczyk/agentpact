@@ -1,7 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import postgres from "postgres";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID, createHash, createHmac } from "node:crypto";
 import { z } from "zod";
 import { initAuth } from "./auth.js";
 import { registerHealthChecks } from "./health.js";
@@ -9,6 +9,7 @@ import { registerWebhookRoutes, notifyAgents } from "./webhooks.js";
 import { autoVerify } from "./auto-verify.js";
 import { decrypt, ensureCredentialVaultSchema, encrypt, getCredentialEncryptionKey, getSensitiveFields, vaultRetrieve, vaultRotate, vaultStore, } from "./credential-vault.js";
 import { isOnChainMode, generateFundingTransaction, generateAcceptTransaction, verifyFunding, resolveDisputeOnChain, getMilestoneStatus, ESCROW_ADDRESS, USDC_ADDRESS, } from "./chain.js";
+import { cacheEmbedding, computeSemanticScore, generateEmbeddings, isSemanticMatchingEnabled, } from "./semantic-match.js";
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/agentpact";
@@ -37,7 +38,12 @@ async function getAgentStats(db, agentId) {
   `;
     return { completedDeals: Number(stats.completed_deals), reputationScore: Number(stats.reputation_score) };
 }
-export const sql = postgres(DATABASE_URL, { max: 10 });
+export const sql = postgres(DATABASE_URL, {
+    max: 20, // Up from 10 — Supabase free tier supports ~20 connections
+    idle_timeout: 30, // Release idle connections after 30s to avoid Supabase connection cap
+    connect_timeout: 10, // Fail fast if pool can't get a connection in 10s
+    max_lifetime: 1800, // Recycle connections every 30 min to avoid stale sockets
+});
 export const app = Fastify({ logger: true });
 const vaultSql = sql;
 const credentialEncryptionKey = getCredentialEncryptionKey();
@@ -282,6 +288,12 @@ const proposeDealSchema = z.object({
     milestones: z.array(milestoneSchema).min(1),
     acceptanceTimeoutDays: z.number().int().min(0).max(30).default(0)
 });
+const autopilotSettingsSchema = z.object({
+    agentId: z.string().uuid(),
+    autoBuyEnabled: z.boolean().optional(),
+    maxAutoDealPrice: z.number().positive().nullable().optional(),
+    autoBuyCategories: z.array(z.string().min(1)).nullable().optional(),
+});
 const counterDealSchema = z.object({
     dealId: z.string().uuid(),
     actorAgentId: z.string().uuid(),
@@ -342,7 +354,7 @@ const confirmDeliverySchema = z.object({
     agentId: z.string().uuid(),
     rating: z.number().min(1).max(5).optional(),
     notes: z.string().optional(),
-    skipOnChainRelease: z.boolean().optional().default(true),
+    skipOnChainRelease: z.boolean().optional().default(false),
 });
 const revokeFulfillmentSchema = z.object({
     agentId: z.string().uuid(),
@@ -554,6 +566,29 @@ async function audit(actorId, action, objectType, objectId, idem, payload) {
     VALUES (${actorId}, ${action}, ${objectType}, ${objectId}, ${idem}, ${JSON.stringify(payload)}::jsonb)
   `;
 }
+function buildSemanticText(input) {
+    const tags = Array.isArray(input.tags) ? input.tags.join(", ") : "";
+    return [
+        input.title ?? "",
+        input.description_md ?? "",
+        input.category ?? "",
+        tags,
+    ]
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .join("\n");
+}
+function extractEmbedding(value) {
+    if (!Array.isArray(value))
+        return null;
+    const embedding = [];
+    for (const item of value) {
+        if (typeof item !== "number" || !Number.isFinite(item))
+            return null;
+        embedding.push(item);
+    }
+    return embedding.length > 0 ? embedding : null;
+}
 async function recomputeMatches() {
     const offers = await sql `
     SELECT o.*, COALESCE(a.skill_verification_count, 0)::int AS seller_skill_verification_count
@@ -563,26 +598,120 @@ async function recomputeMatches() {
   `;
     const needs = await sql `SELECT * FROM needs WHERE status = 'open'`;
     let writes = 0;
+    let semanticEnabled = isSemanticMatchingEnabled();
+    const offerTexts = new Map();
+    const needTexts = new Map();
+    if (semanticEnabled) {
+        try {
+            const allTexts = [];
+            for (const offer of offers) {
+                const text = buildSemanticText(offer);
+                offerTexts.set(String(offer.id), text);
+                const cachedEmbedding = extractEmbedding(offer.description_embedding);
+                if (cachedEmbedding) {
+                    cacheEmbedding(text, cachedEmbedding);
+                }
+                allTexts.push(text);
+            }
+            for (const need of needs) {
+                const text = buildSemanticText(need);
+                needTexts.set(String(need.id), text);
+                const cachedEmbedding = extractEmbedding(need.description_embedding);
+                if (cachedEmbedding) {
+                    cacheEmbedding(text, cachedEmbedding);
+                }
+                allTexts.push(text);
+            }
+            await generateEmbeddings(allTexts);
+        }
+        catch (error) {
+            app.log.warn({ err: error }, "Semantic matching warmup failed, using tag-only matching");
+            semanticEnabled = false;
+        }
+    }
     for (const offer of offers) {
         for (const need of needs) {
             const overlap = offer.tags.filter((t) => need.tags.includes(t));
-            if (overlap.length === 0)
-                continue;
             const budgetFit = need.budget_max === null || need.budget_max === undefined
                 ? 1
                 : Math.max(0, 1 - Math.abs(toNumber(offer.base_price) - toNumber(need.budget_max)) / Math.max(toNumber(need.budget_max), 1));
             const tagScore = Math.min(1, overlap.length / Math.max(offer.tags.length, 1));
             const skillBoost = Number(offer.seller_skill_verification_count) > 0 ? 0.2 : 0;
-            const score = Number((0.7 * tagScore + 0.3 * budgetFit + skillBoost).toFixed(3));
+            let semanticScore = null;
+            let score;
+            if (!semanticEnabled) {
+                if (overlap.length === 0)
+                    continue;
+                score = Number((0.7 * tagScore + 0.3 * budgetFit + skillBoost).toFixed(3));
+            }
+            else {
+                try {
+                    const offerText = offerTexts.get(String(offer.id)) ?? buildSemanticText(offer);
+                    const needText = needTexts.get(String(need.id)) ?? buildSemanticText(need);
+                    semanticScore = await computeSemanticScore(offerText, needText);
+                }
+                catch (error) {
+                    app.log.warn({ err: error }, "Semantic score failed, reverting to tag-only matching");
+                    semanticEnabled = false;
+                    if (overlap.length === 0)
+                        continue;
+                    score = Number((0.7 * tagScore + 0.3 * budgetFit + skillBoost).toFixed(3));
+                    await sql `
+            INSERT INTO matches (offer_id, need_id, score, reason_json)
+            VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, semanticScore })}::jsonb)
+            ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
+          `;
+                    writes += 1;
+                    continue;
+                }
+                if (overlap.length === 0 && semanticScore <= 0.75)
+                    continue;
+                score = Number((0.5 * semanticScore + 0.2 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost).toFixed(3));
+            }
             await sql `
         INSERT INTO matches (offer_id, need_id, score, reason_json)
-        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, skillBoost })}::jsonb)
+        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, semanticScore })}::jsonb)
         ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
       `;
             writes += 1;
         }
     }
     return writes;
+}
+async function createDealProposal(proposal, opts) {
+    const result = await sql.begin(async (txn) => {
+        const [deal] = await txn.unsafe(`
+        INSERT INTO deals (
+          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days
+        ) VALUES ($1, $2, $3, $4, 'proposed', $5, 'USDC', $6, $7)
+        RETURNING *
+      `, [
+            proposal.buyerAgentId,
+            proposal.sellerAgentId,
+            proposal.offerId,
+            proposal.needId,
+            proposal.negotiatedTotal,
+            proposal.maxPriceDeltaPct,
+            proposal.acceptanceTimeoutDays,
+        ]);
+        const milestones = [];
+        for (const milestone of proposal.milestones) {
+            const dueAt = milestone.dueAt ?? null;
+            const [ms] = await txn.unsafe(`
+          INSERT INTO milestones (deal_id, idx, title, amount, currency, acceptance_criteria, due_at)
+          VALUES ($1, $2, $3, $4, 'USDC', $5::jsonb, $6)
+          RETURNING *
+        `, [deal.id, milestone.idx, milestone.title, milestone.amount, JSON.stringify(milestone.acceptanceCriteria), dueAt]);
+            milestones.push(ms);
+        }
+        await txn.unsafe(`
+        INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+        VALUES ($1, $2, 'propose', $3::jsonb)
+      `, [deal.id, opts.negotiationActorAgentId, JSON.stringify(opts.auditPayload ?? proposal)]);
+        await audit(opts.auditActorAgentId, opts.auditAction, "deal", String(deal.id), opts.idempotencyKey, opts.auditPayload ?? proposal);
+        return { ...deal, milestones };
+    });
+    return result;
 }
 async function enforceDealDelta(dealId, negotiatedTotal) {
     const [deal] = await sql `
@@ -665,7 +794,7 @@ async function completeDealMilestones(dealId, opts = {}) {
             return { mode, action: "completed_without_onchain_release" };
         }
         const intents = await sql `
-      SELECT pi."mode" AS payment_mode
+      SELECT CAST(pi."mode" AS text) AS payment_mode
       FROM payment_intents pi
       JOIN milestones m ON m.id = pi.milestone_id
       WHERE m.deal_id = ${dealId} AND pi.status = 'funded'
@@ -728,6 +857,36 @@ await app.register(import('@fastify/rate-limit'), {
     allowList: ['127.0.0.1'],
     keyGenerator: (request) => request.headers['x-api-key'] || request.ip
 });
+// ── Request timeout middleware (prevent hung requests from blocking the pool) ──
+const REQUEST_TIMEOUT_MS = 30_000; // 30s hard limit per request
+app.addHook('onRequest', async (_request, reply) => {
+    const timer = setTimeout(() => {
+        if (!reply.sent) {
+            app.log.warn({ url: _request.url, method: _request.method }, 'Request timeout — forcing 503');
+            reply.code(503).send({ error: 'Request timeout — server is under load, please retry' });
+        }
+    }, REQUEST_TIMEOUT_MS);
+    // Clear timer when response finishes (success or error)
+    reply.raw.on('finish', () => clearTimeout(timer));
+    reply.raw.on('close', () => clearTimeout(timer));
+});
+// ── Connection pool health endpoint ──
+app.get('/health/pool', async () => {
+    // postgres.js exposes pool stats via the tagged-template function object
+    const pool = sql;
+    return {
+        maxConnections: 20,
+        note: 'postgres.js does not expose live pool stats via public API; check Supabase dashboard for active connections',
+        timestamp: new Date().toISOString(),
+        // Canary query to verify pool is not exhausted
+        canary: await sql `SELECT 1 AS ok`.then(() => 'ok').catch((e) => `error: ${e.message}`),
+        ...(typeof pool.totalCount === 'number' ? {
+            total: pool.totalCount,
+            idle: pool.idleCount,
+            waiting: pool.waitingCount,
+        } : {}),
+    };
+});
 await initAuth(app);
 registerHealthChecks(app, sql);
 registerWebhookRoutes(app, sql);
@@ -741,7 +900,7 @@ app.addHook("preHandler", async (request, reply) => {
     if (routePath.startsWith("/api/public/")) {
         return;
     }
-    const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills", "/api/fulfillment/types"];
+    const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
     if (request.method === "GET" && publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
         return;
     }
@@ -751,6 +910,9 @@ app.addHook("preHandler", async (request, reply) => {
     }
     // Auto-complete timeout endpoint — cron-friendly, no agent auth required
     if (routePath.match(/^\/api\/deals\/[^/]+\/fulfillment\/auto-complete$/) && request.method === "POST") {
+        return;
+    }
+    if (routePath === "/api/autopilot/run" && request.method === "POST") {
         return;
     }
     if (routePath.startsWith("/api/")) {
@@ -1022,6 +1184,35 @@ app.get("/api/agents/:id/skills", async (request, reply) => {
         history,
     };
 });
+app.post("/api/autopilot/settings", async (request, reply) => {
+    const idem = idempotencyKey(request.headers);
+    const body = autopilotSettingsSchema.parse(request.body);
+    const requesterAgentId = getRequesterAgentId(request, reply);
+    if (!requesterAgentId)
+        return;
+    if (body.agentId !== requesterAgentId) {
+        return reply.code(403).send({ error: "Not authorized to act as this agent" });
+    }
+    const [agent] = await sql `
+    UPDATE agents
+    SET
+      auto_buy_enabled = COALESCE(${body.autoBuyEnabled ?? null}, auto_buy_enabled),
+      max_auto_deal_price = CASE
+        WHEN ${body.maxAutoDealPrice !== undefined} THEN ${body.maxAutoDealPrice ?? null}
+        ELSE max_auto_deal_price
+      END,
+      auto_buy_categories = CASE
+        WHEN ${body.autoBuyCategories !== undefined} THEN ${body.autoBuyCategories ?? null}::text[]
+        ELSE auto_buy_categories
+      END
+    WHERE id = ${body.agentId}
+    RETURNING id, auto_buy_enabled, max_auto_deal_price, auto_buy_categories
+  `;
+    if (!agent)
+        return reply.code(404).send({ error: "Agent not found" });
+    await audit(body.agentId, "autopilot.settings.update", "agent", body.agentId, idem, body);
+    return agent;
+});
 app.post("/api/offers", async (request, reply) => {
     const idem = idempotencyKey(request.headers);
     const body = createOfferSchema.parse(request.body);
@@ -1042,7 +1233,8 @@ app.post("/api/offers", async (request, reply) => {
     RETURNING *
   `;
     await audit(body.agentId, "offer.create", "offer", offer.id, idem, body);
-    await recomputeMatches();
+    // Fire-and-forget: don't block the response on N×M match recomputation
+    recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after offer.create"));
     return reply.code(201).send(offer);
 });
 app.patch("/api/offers/:id", async (request, reply) => {
@@ -1081,7 +1273,8 @@ app.patch("/api/offers/:id", async (request, reply) => {
     WHERE id = ${id}
     RETURNING *
   `;
-    await recomputeMatches();
+    // Fire-and-forget: don't block the response on N×M match recomputation
+    recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after offer.update"));
     return offer;
 });
 app.post("/api/offers/:id/archive", async (request, reply) => {
@@ -1151,7 +1344,8 @@ app.post("/api/needs", async (request, reply) => {
     ) RETURNING *
   `;
     await audit(body.agentId, "need.create", "need", need.id, idem, body);
-    await recomputeMatches();
+    // Fire-and-forget: don't block the response on N×M match recomputation
+    recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after need.create"));
     return reply.code(201).send(need);
 });
 app.patch("/api/needs/:id", async (request, reply) => {
@@ -1190,7 +1384,8 @@ app.patch("/api/needs/:id", async (request, reply) => {
     WHERE id = ${id}
     RETURNING *
   `;
-    await recomputeMatches();
+    // Fire-and-forget: don't block the response on N×M match recomputation
+    recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after need.update"));
     return need;
 });
 app.post("/api/needs/:id/archive", async (request, reply) => {
@@ -1251,6 +1446,190 @@ app.post("/api/matches/recompute", async () => {
     const writes = await recomputeMatches();
     return { matchesUpserted: writes };
 });
+app.post("/api/autopilot/run", async (request, reply) => {
+    const adminKey = process.env.ADMIN_API_KEY;
+    const authHeader = request.headers["x-admin-key"] || String(request.headers["authorization"] ?? "").replace("Bearer ", "");
+    if (adminKey && authHeader !== adminKey)
+        return reply.code(403).send({ error: "Invalid admin key" });
+    const matchesComputed = await recomputeMatches();
+    const candidateMatches = await sql `
+    SELECT
+      m.offer_id,
+      m.need_id,
+      m.score,
+      o.agent_id AS seller_agent_id,
+      o.base_price,
+      o.max_price_delta_pct,
+      o.category,
+      o.title AS offer_title,
+      n.agent_id AS buyer_agent_id,
+      n.title AS need_title,
+      n.acceptance_criteria,
+      a.auto_buy_enabled,
+      a.max_auto_deal_price,
+      a.auto_buy_categories
+    FROM matches m
+    JOIN offers o ON o.id = m.offer_id
+    JOIN needs n ON n.id = m.need_id
+    JOIN agents a ON a.id = n.agent_id
+    WHERE m.score >= 0.8
+      AND o.status = 'active'
+      AND n.status = 'open'
+    ORDER BY m.score DESC
+  `;
+    const buyerIds = Array.from(new Set(candidateMatches.map((match) => String(match.buyer_agent_id))));
+    const recentAutopilotEvents = buyerIds.length > 0
+        ? await sql `
+        SELECT actor_agent_id, COUNT(*)::int AS deal_count
+        FROM audit_log
+        WHERE action = 'autopilot.deal.proposed'
+          AND created_at > NOW() - INTERVAL '1 hour'
+          AND actor_agent_id = ANY(${buyerIds})
+        GROUP BY actor_agent_id
+      `
+        : [];
+    const recentDealsByBuyer = new Map(recentAutopilotEvents.map((row) => [String(row.actor_agent_id), Number(row.deal_count)]));
+    let dealsProposed = 0;
+    let skipped = 0;
+    const runId = randomUUID();
+    for (const match of candidateMatches) {
+        const buyerAgentId = String(match.buyer_agent_id);
+        const sellerAgentId = String(match.seller_agent_id);
+        const offerId = String(match.offer_id);
+        const needId = String(match.need_id);
+        const negotiatedTotal = toNumber(match.base_price);
+        if (!match.auto_buy_enabled) {
+            skipped += 1;
+            continue;
+        }
+        if (match.max_auto_deal_price !== null && match.max_auto_deal_price !== undefined && negotiatedTotal > toNumber(match.max_auto_deal_price)) {
+            skipped += 1;
+            continue;
+        }
+        const autoBuyCategories = Array.isArray(match.auto_buy_categories)
+            ? match.auto_buy_categories.filter((value) => typeof value === "string")
+            : null;
+        if (autoBuyCategories && !autoBuyCategories.includes(String(match.category))) {
+            skipped += 1;
+            continue;
+        }
+        const dealsInWindow = recentDealsByBuyer.get(buyerAgentId) ?? 0;
+        if (dealsInWindow >= 5) {
+            skipped += 1;
+            continue;
+        }
+        const [existingDeal] = await sql `
+      SELECT id
+      FROM deals
+      WHERE offer_id = ${offerId}
+        AND need_id = ${needId}
+        AND status IN ('proposed', 'countered', 'accepted', 'active', 'delivered', 'disputed')
+      LIMIT 1
+    `;
+        if (existingDeal) {
+            skipped += 1;
+            continue;
+        }
+        const acceptanceCriteria = Array.isArray(match.acceptance_criteria)
+            ? match.acceptance_criteria.filter((value) => typeof value === "string")
+            : [];
+        const milestoneAcceptanceCriteria = acceptanceCriteria.length > 0
+            ? acceptanceCriteria
+            : [`Deliver work matching need ${needId}`];
+        const proposal = proposeDealSchema.parse({
+            buyerAgentId,
+            sellerAgentId,
+            offerId,
+            needId,
+            negotiatedTotal,
+            maxPriceDeltaPct: toNumber(match.max_price_delta_pct),
+            acceptanceTimeoutDays: 0,
+            milestones: [
+                {
+                    idx: 1,
+                    title: `Autopilot: ${String(match.offer_title ?? "Deliver service")}`,
+                    amount: negotiatedTotal,
+                    acceptanceCriteria: milestoneAcceptanceCriteria,
+                },
+            ],
+        });
+        try {
+            const createdDeal = await createDealProposal(proposal, {
+                idempotencyKey: `autopilot-run:${runId}:${offerId}:${needId}`,
+                auditAction: "autopilot.deal.proposed",
+                auditActorAgentId: buyerAgentId,
+                negotiationActorAgentId: buyerAgentId,
+                auditPayload: {
+                    runId,
+                    score: toNumber(match.score),
+                    offerId,
+                    needId,
+                    buyerAgentId,
+                    sellerAgentId,
+                    negotiatedTotal,
+                    source: "autopilot",
+                },
+            });
+            recentDealsByBuyer.set(buyerAgentId, dealsInWindow + 1);
+            dealsProposed += 1;
+            notifyAgents(sql, [sellerAgentId], "deal.proposed", {
+                dealId: String(createdDeal.id),
+                buyerAgentId,
+                sellerAgentId,
+                negotiatedTotal,
+                source: "autopilot",
+            });
+        }
+        catch (error) {
+            skipped += 1;
+            request.log.error({
+                err: error,
+                offerId,
+                needId,
+            }, "autopilot.run failed to propose deal");
+        }
+    }
+    return {
+        matchesComputed,
+        dealsProposed,
+        skipped,
+        runId,
+    };
+});
+app.post("/api/embeddings/recompute", async (request, reply) => {
+    if (!isSemanticMatchingEnabled()) {
+        return reply.code(400).send({ error: "OPENAI_API_KEY is not configured" });
+    }
+    const offers = await sql `SELECT id, title, description_md, category, tags FROM offers`;
+    const needs = await sql `SELECT id, title, description_md, category, tags FROM needs`;
+    const offerTexts = offers.map((offer) => buildSemanticText(offer));
+    const needTexts = needs.map((need) => buildSemanticText(need));
+    const [offerEmbeddings, needEmbeddings] = await Promise.all([
+        generateEmbeddings(offerTexts),
+        generateEmbeddings(needTexts),
+    ]);
+    await sql.begin(async (txn) => {
+        for (let i = 0; i < offers.length; i += 1) {
+            await txn.unsafe(`
+          UPDATE offers
+          SET description_embedding = $1::jsonb
+          WHERE id = $2
+        `, [JSON.stringify(offerEmbeddings[i]), offers[i].id]);
+        }
+        for (let i = 0; i < needs.length; i += 1) {
+            await txn.unsafe(`
+          UPDATE needs
+          SET description_embedding = $1::jsonb
+          WHERE id = $2
+        `, [JSON.stringify(needEmbeddings[i]), needs[i].id]);
+        }
+    });
+    return {
+        offersUpdated: offers.length,
+        needsUpdated: needs.length,
+        totalUpdated: offers.length + needs.length,
+    };
+});
 app.post("/api/alerts/subscribe", async (request, reply) => {
     const body = z
         .object({
@@ -1291,29 +1670,12 @@ app.post("/api/deals/propose", async (request, reply) => {
     if (!needOwner || needOwner.agent_id !== body.buyerAgentId) {
         return reply.code(403).send({ error: "Not authorized" });
     }
-    const result = await sql.begin(async (txn) => {
-        const [deal] = await txn.unsafe(`
-        INSERT INTO deals (
-          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days
-        ) VALUES ($1, $2, $3, $4, 'proposed', $5, 'USDC', $6, $7)
-        RETURNING *
-      `, [body.buyerAgentId, body.sellerAgentId, body.offerId, body.needId, body.negotiatedTotal, body.maxPriceDeltaPct, body.acceptanceTimeoutDays]);
-        const milestones = [];
-        for (const milestone of body.milestones) {
-            const dueAt = milestone.dueAt ?? null;
-            const [ms] = await txn.unsafe(`
-          INSERT INTO milestones (deal_id, idx, title, amount, currency, acceptance_criteria, due_at)
-          VALUES ($1, $2, $3, $4, 'USDC', $5::jsonb, $6)
-          RETURNING *
-        `, [deal.id, milestone.idx, milestone.title, milestone.amount, JSON.stringify(milestone.acceptanceCriteria), dueAt]);
-            milestones.push(ms);
-        }
-        await txn.unsafe(`
-        INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-        VALUES ($1, $2, 'propose', $3::jsonb)
-      `, [deal.id, body.buyerAgentId, JSON.stringify(body)]);
-        await audit(body.buyerAgentId, "deal.propose", "deal", deal.id, idem, body);
-        return { ...deal, milestones };
+    const result = await createDealProposal(body, {
+        idempotencyKey: idem,
+        auditAction: "deal.propose",
+        auditActorAgentId: body.buyerAgentId,
+        negotiationActorAgentId: body.buyerAgentId,
+        auditPayload: body,
     });
     notifyAgents(sql, [body.sellerAgentId], "deal.proposed", {
         dealId: result.id,
@@ -1370,38 +1732,56 @@ app.post("/api/deals/:id/accept", async (request, reply) => {
     if (body.actorAgentId !== requesterAgentId) {
         return reply.code(403).send({ error: "Not authorized to act as this agent" });
     }
+    // LEFT JOIN so deals without an offer (e.g. counter-proposed) still resolve
     const [deal] = await sql `
-    SELECT d.buyer_agent_id, d.seller_agent_id, o.fulfillment_type
+    SELECT d.buyer_agent_id, d.seller_agent_id, d.status,
+           COALESCE(o.fulfillment_type, 'generic') AS fulfillment_type
     FROM deals d
-    JOIN offers o ON o.id = d.offer_id
+    LEFT JOIN offers o ON o.id = d.offer_id
     WHERE d.id = ${id}
   `;
     if (!deal)
         return reply.code(404).send({ error: "Deal not found" });
+    // Idempotency: if already active, return ok without re-running the transaction
+    if (deal.status === 'active') {
+        return { ok: true, note: "Deal already accepted" };
+    }
+    if (deal.status !== 'proposed' && deal.status !== 'countered') {
+        return reply.code(409).send({ error: `Cannot accept deal in status '${deal.status}'` });
+    }
     if (body.actorAgentId !== deal.seller_agent_id) {
         return reply.code(403).send({ error: "Not authorized" });
     }
-    await sql.begin(async (txn) => {
-        await txn.unsafe("UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = $1", [id]);
-        await txn.unsafe("UPDATE milestones SET status = 'in_progress' WHERE deal_id = $1 AND status = 'pending'", [id]);
-        await txn.unsafe(`
-        INSERT INTO deal_fulfillment (deal_id, fulfillment_type, status)
-        VALUES ($1, $2, 'pending')
-        ON CONFLICT (deal_id) DO NOTHING
-      `, [id, deal?.fulfillment_type ?? "generic"]);
-        await txn.unsafe(`
-        INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-        VALUES ($1, $2, 'accept', $3::jsonb)
-      `, [id, body.actorAgentId, JSON.stringify(body)]);
-    });
-    if (deal) {
-        notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.accepted", {
-            dealId: id,
-            acceptedBy: body.actorAgentId,
-            fulfillmentType: deal.fulfillment_type,
-            sellerActionRequired: "Provide fulfillment details via /api/deals/:id/fulfillment",
+    try {
+        await sql.begin(async (txn) => {
+            // CAS-style update: only succeeds if still in an acceptable status
+            const [updated] = await txn.unsafe("UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = $1 AND status IN ('proposed', 'countered') RETURNING id", [id]);
+            if (!updated) {
+                throw new Error(`Deal ${id} status changed concurrently — accept aborted`);
+            }
+            await txn.unsafe("UPDATE milestones SET status = 'in_progress' WHERE deal_id = $1 AND status = 'pending'", [id]);
+            await txn.unsafe(`
+          INSERT INTO deal_fulfillment (deal_id, fulfillment_type, status)
+          VALUES ($1, $2, 'pending')
+          ON CONFLICT (deal_id) DO NOTHING
+        `, [id, deal.fulfillment_type]);
+            await txn.unsafe(`
+          INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+          VALUES ($1, $2, 'accept', $3::jsonb)
+        `, [id, body.actorAgentId, JSON.stringify(body)]);
         });
     }
+    catch (err) {
+        app.log.error({ err, dealId: id }, "deal.accept transaction failed — deal status NOT changed");
+        return reply.code(500).send({ error: "Failed to accept deal — please retry" });
+    }
+    // Fire-and-forget notification (don't let webhook errors fail the accept)
+    notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.accepted", {
+        dealId: id,
+        acceptedBy: body.actorAgentId,
+        fulfillmentType: deal.fulfillment_type,
+        sellerActionRequired: "Provide fulfillment details via /api/deals/:id/fulfillment",
+    });
     return { ok: true };
 });
 app.post("/api/deals/:id/cancel", async (request, reply) => {
@@ -1806,7 +2186,7 @@ app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
   `;
     if (body.accepted) {
         if (body.completeOnVerify) {
-            await completeDealMilestones(id, { skipOnChainRelease: true });
+            await completeDealMilestones(id, { skipOnChainRelease: false });
         }
         notifyAgents(sql, [deal.seller_agent_id], "deal.fulfillment_verified", {
             dealId: id,
@@ -1911,7 +2291,7 @@ app.post("/api/deals/:id/close", async (request, reply) => {
             agentId: z.string().uuid(),
             rating: z.number().min(1).max(5).optional(),
             notes: z.string().optional(),
-            skipOnChainRelease: z.boolean().optional().default(true),
+            skipOnChainRelease: z.boolean().optional().default(false),
         }).parse(request.body);
         const requesterAgentId = getRequesterAgentId(request, reply);
         if (!requesterAgentId)
@@ -1985,7 +2365,7 @@ app.post("/api/deals/:id/fulfillment/auto-complete", async (request, reply) => {
         return { ok: false, reason: `Acceptance timeout not reached. Expires at ${expiredAt.toISOString()}`, expiresAt: expiredAt.toISOString() };
     }
     await sql `UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
-    await completeDealMilestones(id, { skipOnChainRelease: true });
+    await completeDealMilestones(id, { skipOnChainRelease: false });
     if (deal.offer_id) {
         await sql `UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
     }
@@ -2012,7 +2392,7 @@ app.post("/api/admin/auto-complete-timeouts", async (request, reply) => {
     for (const deal of expiredDeals) {
         try {
             await sql `UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${deal.id} AND status NOT IN ('verified', 'revoked')`;
-            await completeDealMilestones(String(deal.id), { skipOnChainRelease: true });
+            await completeDealMilestones(String(deal.id), { skipOnChainRelease: false });
             await sql `UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
             notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.feedback_requested", {
                 dealId: String(deal.id),
@@ -2673,6 +3053,291 @@ app.get("/api/leaderboard", async (request) => {
             disputeRate: totalDeals > 0 ? Number((disputedDeals / totalDeals).toFixed(4)) : 0,
             memberSince: row.member_since,
         };
+    });
+});
+// ── Agent Reputation as a Service (RaaS) ─────────────────────────────────────
+// All GET endpoints are intentionally public — that's the point of RaaS.
+/**
+ * Compute composite RaaS score (0–100) with weighted breakdown.
+ * dealHistory 40% | reviewAvg 30% | disputeRate 20% | accountAge 10%
+ */
+function computeRaaSScore(completedDeals, avgRating, // 0–5
+totalDeals, disputedDeals, memberSinceMs) {
+    // Deal history: saturates at 50 completed deals → 100 pts
+    const dealHistory = Math.min(completedDeals / 50, 1) * 100;
+    // Review average: 0–5 → 0–100
+    const reviewAvg = (avgRating / 5) * 100;
+    // Dispute rate: 0 disputes → 100, 50%+ dispute rate → 0
+    const disputeRate = totalDeals > 0
+        ? Math.max(0, (1 - (disputedDeals / totalDeals) * 2)) * 100
+        : 100; // no deals → no disputes → full score
+    // Account age: saturates at 1 year → 100 pts
+    const ageMs = Date.now() - memberSinceMs;
+    const accountAge = Math.min(ageMs / (365 * 24 * 60 * 60 * 1000), 1) * 100;
+    const score = dealHistory * 0.4 +
+        reviewAvg * 0.3 +
+        disputeRate * 0.2 +
+        accountAge * 0.1;
+    return {
+        score: Number(score.toFixed(2)),
+        breakdown: {
+            dealHistory: Number(dealHistory.toFixed(2)),
+            reviewAvg: Number(reviewAvg.toFixed(2)),
+            disputeRate: Number(disputeRate.toFixed(2)),
+            accountAge: Number(accountAge.toFixed(2)),
+        },
+    };
+}
+/**
+ * Compute badges for an agent based on their stats.
+ */
+function computeBadges(opts) {
+    const badges = [];
+    const ageMs = Date.now() - opts.memberSinceMs;
+    const ageMonths = ageMs / (30 * 24 * 60 * 60 * 1000);
+    if (ageMonths <= 3)
+        badges.push("early-adopter");
+    if (opts.completedDeals >= 50)
+        badges.push("high-volume");
+    if (opts.totalVolume >= 10000)
+        badges.push("big-earner");
+    if (opts.disputedDeals === 0 && opts.totalDeals >= 5)
+        badges.push("zero-disputes");
+    if (opts.reviewCount >= 20)
+        badges.push("well-reviewed");
+    if (opts.endorsementCount >= 5)
+        badges.push("trusted-peer");
+    if (opts.completedDeals >= 100)
+        badges.push("century-club");
+    return badges;
+}
+// GET /api/reputation/leaderboard — public RaaS leaderboard with tier distribution
+app.get("/api/reputation/leaderboard", async (request) => {
+    const q = request.query;
+    const limit = Math.min(Math.max(Number(q.limit ?? 50), 1), 200);
+    const tierFilter = q.tier ?? null;
+    const rows = await sql `
+    SELECT
+      a.id AS agent_id,
+      a.display_name AS name,
+      a.created_at AS member_since,
+      COALESCE(f.avg_score, 0) AS avg_rating,
+      COALESCE(f.review_count, 0)::int AS review_count,
+      COALESCE(ds.completed_deals, 0)::int AS completed_deals,
+      COALESCE(ds.total_volume, 0) AS total_volume,
+      COALESCE(ds.disputed_deals, 0)::int AS disputed_deals,
+      COALESCE(ds.total_deals, 0)::int AS total_deals,
+      COALESCE(e.endorsement_count, 0)::int AS endorsement_count
+    FROM agents a
+    LEFT JOIN LATERAL (
+      SELECT
+        AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0) AS avg_score,
+        COUNT(*)::int AS review_count
+      FROM feedback WHERE to_agent_id = a.id
+    ) f ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) FILTER (WHERE d.status = 'completed')::int AS completed_deals,
+        COALESCE(SUM(d.negotiated_total) FILTER (WHERE d.status = 'completed'), 0) AS total_volume,
+        COUNT(*) FILTER (WHERE d.status = 'disputed')::int AS disputed_deals,
+        COUNT(*)::int AS total_deals
+      FROM deals d
+      WHERE d.buyer_agent_id = a.id OR d.seller_agent_id = a.id
+    ) ds ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*)::int AS endorsement_count
+      FROM endorsements WHERE endorsed_id = a.id
+    ) e ON true
+    ORDER BY a.reputation_score DESC, a.created_at ASC
+    LIMIT ${limit}
+  `;
+    const entries = rows.map((row, idx) => {
+        const completedDeals = Number(row.completed_deals);
+        const avgRating = Number(row.avg_rating);
+        const { score, breakdown } = computeRaaSScore(completedDeals, avgRating, Number(row.total_deals), Number(row.disputed_deals), new Date(row.member_since).getTime());
+        const trustTier = computeTrustTier(completedDeals, avgRating);
+        return {
+            rank: idx + 1,
+            agentId: row.agent_id,
+            name: row.name,
+            trustTier: trustTier.tier,
+            score,
+            breakdown,
+            avgRating: Number(Number(avgRating).toFixed(2)),
+            reviewCount: Number(row.review_count),
+            completedDeals,
+            totalVolume: Number(Number(row.total_volume).toFixed(2)),
+            endorsementCount: Number(row.endorsement_count),
+            memberSince: row.member_since,
+        };
+    });
+    // Tier distribution summary
+    const tierDist = { gold: 0, silver: 0, bronze: 0, new: 0 };
+    for (const e of entries) {
+        tierDist[e.trustTier] = (tierDist[e.trustTier] ?? 0) + 1;
+    }
+    const filtered = tierFilter
+        ? entries.filter(e => e.trustTier === tierFilter)
+        : entries;
+    return {
+        leaderboard: filtered,
+        meta: {
+            total: filtered.length,
+            tierDistribution: tierDist,
+        },
+    };
+});
+// GET /api/reputation/:agentId — Full public reputation profile
+app.get("/api/reputation/:agentId", async (request, reply) => {
+    const { agentId } = request.params;
+    const [agent] = await sql `SELECT id, display_name, created_at FROM agents WHERE id = ${agentId}`;
+    if (!agent)
+        return reply.code(404).send({ error: "Agent not found" });
+    const [feedback] = await sql `
+    SELECT
+      COALESCE(AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0), 0) AS avg_rating,
+      COUNT(*)::int AS review_count
+    FROM feedback
+    WHERE to_agent_id = ${agentId}
+  `;
+    const [dealStats] = await sql `
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_deals,
+      COALESCE(SUM(negotiated_total) FILTER (WHERE status = 'completed'), 0) AS total_volume,
+      COUNT(*) FILTER (WHERE status = 'disputed')::int AS disputed_deals,
+      COUNT(*)::int AS total_deals
+    FROM deals
+    WHERE buyer_agent_id = ${agentId} OR seller_agent_id = ${agentId}
+  `;
+    const [endorseStats] = await sql `
+    SELECT COUNT(*)::int AS endorsement_count
+    FROM endorsements
+    WHERE endorsed_id = ${agentId}
+  `;
+    const completedDeals = Number(dealStats.completed_deals);
+    const avgRating = Number(feedback.avg_rating);
+    const totalVolume = Number(Number(dealStats.total_volume).toFixed(2));
+    const reviewCount = Number(feedback.review_count);
+    const disputedDeals = Number(dealStats.disputed_deals);
+    const totalDeals = Number(dealStats.total_deals);
+    const endorsementCount = Number(endorseStats.endorsement_count);
+    const memberSinceMs = new Date(agent.created_at).getTime();
+    const { score, breakdown } = computeRaaSScore(completedDeals, avgRating, totalDeals, disputedDeals, memberSinceMs);
+    const trustTier = computeTrustTier(completedDeals, avgRating);
+    const badges = computeBadges({
+        completedDeals, totalVolume, disputedDeals, totalDeals, reviewCount, memberSinceMs, endorsementCount,
+    });
+    return {
+        agentId,
+        displayName: agent.display_name,
+        memberSince: agent.created_at,
+        completedDeals,
+        totalVolume,
+        avgRating: Number(avgRating.toFixed(2)),
+        reviewCount,
+        disputedDeals,
+        totalDeals,
+        disputeRate: totalDeals > 0 ? Number((disputedDeals / totalDeals).toFixed(4)) : 0,
+        endorsementCount,
+        score,
+        trustTier: {
+            tier: trustTier.tier,
+            label: trustTier.label,
+            color: trustTier.color,
+            thresholds: TRUST_TIERS.map(t => ({
+                tier: t.tier,
+                minDeals: t.minDeals,
+                minReputation: t.minReputation,
+            })),
+        },
+        scoreBreakdown: breakdown,
+        badges,
+    };
+});
+// GET /api/reputation/:agentId/attestation — HMAC-signed attestation for external verification
+app.get("/api/reputation/:agentId/attestation", async (request, reply) => {
+    const { agentId } = request.params;
+    const [agent] = await sql `SELECT id, display_name, created_at FROM agents WHERE id = ${agentId}`;
+    if (!agent)
+        return reply.code(404).send({ error: "Agent not found" });
+    const [feedback] = await sql `
+    SELECT
+      COALESCE(AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0), 0) AS avg_rating
+    FROM feedback
+    WHERE to_agent_id = ${agentId}
+  `;
+    const [dealStats] = await sql `
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_deals,
+      COUNT(*) FILTER (WHERE status = 'disputed')::int AS disputed_deals,
+      COUNT(*)::int AS total_deals
+    FROM deals
+    WHERE buyer_agent_id = ${agentId} OR seller_agent_id = ${agentId}
+  `;
+    const completedDeals = Number(dealStats.completed_deals);
+    const avgRating = Number(feedback.avg_rating);
+    const { score } = computeRaaSScore(completedDeals, avgRating, Number(dealStats.total_deals), Number(dealStats.disputed_deals), new Date(agent.created_at).getTime());
+    const trustTier = computeTrustTier(completedDeals, avgRating);
+    const timestamp = new Date().toISOString();
+    const signingKey = process.env.PLATFORM_SIGNING_KEY ?? "agentpact-dev-signing-key";
+    const payload = {
+        agentId,
+        score,
+        tier: trustTier.tier,
+        completedDeals,
+        avgRating: Number(avgRating.toFixed(2)),
+        timestamp,
+        issuer: "agentpact.xyz",
+    };
+    const signature = createHmac("sha256", signingKey)
+        .update(JSON.stringify(payload))
+        .digest("hex");
+    return {
+        ...payload,
+        signature,
+        verificationInstructions: "HMAC-SHA256 over JSON.stringify(payload without .signature) using PLATFORM_SIGNING_KEY",
+    };
+});
+// POST /api/reputation/:agentId/endorse — Agent-to-agent endorsement (requires auth)
+app.post("/api/reputation/:agentId/endorse", async (request, reply) => {
+    const { agentId } = request.params;
+    const body = z.object({
+        skillTag: z.string().min(2).max(64),
+        message: z.string().max(500).optional(),
+    }).parse(request.body);
+    const endorserId = request.agentId;
+    if (!endorserId)
+        return reply.code(401).send({ error: "Authentication required" });
+    if (endorserId === agentId)
+        return reply.code(400).send({ error: "Cannot endorse yourself" });
+    const [target] = await sql `SELECT id FROM agents WHERE id = ${agentId}`;
+    if (!target)
+        return reply.code(404).send({ error: "Agent not found" });
+    // Check if endorser has completed at least one deal with the endorsed agent
+    const [sharedDeal] = await sql `
+    SELECT id FROM deals
+    WHERE status = 'completed'
+      AND (
+        (buyer_agent_id = ${endorserId} AND seller_agent_id = ${agentId}) OR
+        (buyer_agent_id = ${agentId} AND seller_agent_id = ${endorserId})
+      )
+    LIMIT 1
+  `;
+    if (!sharedDeal) {
+        return reply.code(403).send({ error: "You must have completed at least one deal with this agent to endorse them" });
+    }
+    // Upsert endorsement (one endorsement per skill tag per pair)
+    const [endorsement] = await sql `
+    INSERT INTO endorsements (endorser_id, endorsed_id, skill_tag, message)
+    VALUES (${endorserId}, ${agentId}, ${body.skillTag}, ${body.message ?? null})
+    ON CONFLICT (endorser_id, endorsed_id, skill_tag) DO UPDATE SET
+      message = EXCLUDED.message,
+      created_at = NOW()
+    RETURNING *
+  `;
+    return reply.code(201).send({
+        endorsement,
+        message: "Endorsement recorded successfully",
     });
 });
 app.setErrorHandler((error, _request, reply) => {
