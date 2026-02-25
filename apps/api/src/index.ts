@@ -2,7 +2,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import postgres, { type Sql } from "postgres";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID, createHash, createHmac } from "node:crypto";
 import { z } from "zod";
 import { initAuth } from "./auth.js";
 import { registerHealthChecks } from "./health.js";
@@ -960,7 +960,7 @@ async function completeDealMilestones(
     }
 
     const intents = await sql`
-      SELECT pi."mode" AS payment_mode
+      SELECT CAST(pi."mode" AS text) AS payment_mode
       FROM payment_intents pi
       JOIN milestones m ON m.id = pi.milestone_id
       WHERE m.deal_id = ${dealId} AND pi.status = 'funded'
@@ -1047,7 +1047,7 @@ app.addHook("preHandler", async (request, reply) => {
     return;
   }
 
-  const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills", "/api/fulfillment/types"];
+  const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
   if (request.method === "GET" && publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
     return;
   }
@@ -3405,6 +3405,346 @@ app.get("/api/leaderboard", async (request) => {
       disputeRate: totalDeals > 0 ? Number((disputedDeals / totalDeals).toFixed(4)) : 0,
       memberSince: row.member_since,
     };
+  });
+});
+
+// ── Agent Reputation as a Service (RaaS) ─────────────────────────────────────
+// All GET endpoints are intentionally public — that's the point of RaaS.
+
+/**
+ * Compute composite RaaS score (0–100) with weighted breakdown.
+ * dealHistory 40% | reviewAvg 30% | disputeRate 20% | accountAge 10%
+ */
+function computeRaaSScore(
+  completedDeals: number,
+  avgRating: number,       // 0–5
+  totalDeals: number,
+  disputedDeals: number,
+  memberSinceMs: number,
+): { score: number; breakdown: { dealHistory: number; reviewAvg: number; disputeRate: number; accountAge: number } } {
+  // Deal history: saturates at 50 completed deals → 100 pts
+  const dealHistory = Math.min(completedDeals / 50, 1) * 100;
+
+  // Review average: 0–5 → 0–100
+  const reviewAvg = (avgRating / 5) * 100;
+
+  // Dispute rate: 0 disputes → 100, 50%+ dispute rate → 0
+  const disputeRate = totalDeals > 0
+    ? Math.max(0, (1 - (disputedDeals / totalDeals) * 2)) * 100
+    : 100; // no deals → no disputes → full score
+
+  // Account age: saturates at 1 year → 100 pts
+  const ageMs = Date.now() - memberSinceMs;
+  const accountAge = Math.min(ageMs / (365 * 24 * 60 * 60 * 1000), 1) * 100;
+
+  const score =
+    dealHistory * 0.4 +
+    reviewAvg * 0.3 +
+    disputeRate * 0.2 +
+    accountAge * 0.1;
+
+  return {
+    score: Number(score.toFixed(2)),
+    breakdown: {
+      dealHistory: Number(dealHistory.toFixed(2)),
+      reviewAvg: Number(reviewAvg.toFixed(2)),
+      disputeRate: Number(disputeRate.toFixed(2)),
+      accountAge: Number(accountAge.toFixed(2)),
+    },
+  };
+}
+
+/**
+ * Compute badges for an agent based on their stats.
+ */
+function computeBadges(opts: {
+  completedDeals: number;
+  totalVolume: number;
+  disputedDeals: number;
+  totalDeals: number;
+  reviewCount: number;
+  memberSinceMs: number;
+  endorsementCount: number;
+}): string[] {
+  const badges: string[] = [];
+  const ageMs = Date.now() - opts.memberSinceMs;
+  const ageMonths = ageMs / (30 * 24 * 60 * 60 * 1000);
+
+  if (ageMonths <= 3) badges.push("early-adopter");
+  if (opts.completedDeals >= 50) badges.push("high-volume");
+  if (opts.totalVolume >= 10000) badges.push("big-earner");
+  if (opts.disputedDeals === 0 && opts.totalDeals >= 5) badges.push("zero-disputes");
+  if (opts.reviewCount >= 20) badges.push("well-reviewed");
+  if (opts.endorsementCount >= 5) badges.push("trusted-peer");
+  if (opts.completedDeals >= 100) badges.push("century-club");
+
+  return badges;
+}
+
+// GET /api/reputation/leaderboard — public RaaS leaderboard with tier distribution
+app.get("/api/reputation/leaderboard", async (request) => {
+  const q = request.query as { limit?: string; tier?: string };
+  const limit = Math.min(Math.max(Number(q.limit ?? 50), 1), 200);
+  const tierFilter = q.tier ?? null;
+
+  const rows = await sql`
+    SELECT
+      a.id AS agent_id,
+      a.display_name AS name,
+      a.created_at AS member_since,
+      COALESCE(f.avg_score, 0) AS avg_rating,
+      COALESCE(f.review_count, 0)::int AS review_count,
+      COALESCE(ds.completed_deals, 0)::int AS completed_deals,
+      COALESCE(ds.total_volume, 0) AS total_volume,
+      COALESCE(ds.disputed_deals, 0)::int AS disputed_deals,
+      COALESCE(ds.total_deals, 0)::int AS total_deals,
+      COALESCE(e.endorsement_count, 0)::int AS endorsement_count
+    FROM agents a
+    LEFT JOIN LATERAL (
+      SELECT
+        AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0) AS avg_score,
+        COUNT(*)::int AS review_count
+      FROM feedback WHERE to_agent_id = a.id
+    ) f ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) FILTER (WHERE d.status = 'completed')::int AS completed_deals,
+        COALESCE(SUM(d.negotiated_total) FILTER (WHERE d.status = 'completed'), 0) AS total_volume,
+        COUNT(*) FILTER (WHERE d.status = 'disputed')::int AS disputed_deals,
+        COUNT(*)::int AS total_deals
+      FROM deals d
+      WHERE d.buyer_agent_id = a.id OR d.seller_agent_id = a.id
+    ) ds ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*)::int AS endorsement_count
+      FROM endorsements WHERE endorsed_id = a.id
+    ) e ON true
+    ORDER BY a.reputation_score DESC, a.created_at ASC
+    LIMIT ${limit}
+  `;
+
+  const entries = rows.map((row, idx: number) => {
+    const completedDeals = Number(row.completed_deals);
+    const avgRating = Number(row.avg_rating);
+    const { score, breakdown } = computeRaaSScore(
+      completedDeals,
+      avgRating,
+      Number(row.total_deals),
+      Number(row.disputed_deals),
+      new Date(row.member_since as string).getTime(),
+    );
+    const trustTier = computeTrustTier(completedDeals, avgRating);
+    return {
+      rank: idx + 1,
+      agentId: row.agent_id,
+      name: row.name,
+      trustTier: trustTier.tier,
+      score,
+      breakdown,
+      avgRating: Number(Number(avgRating).toFixed(2)),
+      reviewCount: Number(row.review_count),
+      completedDeals,
+      totalVolume: Number(Number(row.total_volume).toFixed(2)),
+      endorsementCount: Number(row.endorsement_count),
+      memberSince: row.member_since,
+    };
+  });
+
+  // Tier distribution summary
+  const tierDist = { gold: 0, silver: 0, bronze: 0, new: 0 } as Record<string, number>;
+  for (const e of entries) {
+    tierDist[e.trustTier] = (tierDist[e.trustTier] ?? 0) + 1;
+  }
+
+  const filtered = tierFilter
+    ? entries.filter(e => e.trustTier === tierFilter)
+    : entries;
+
+  return {
+    leaderboard: filtered,
+    meta: {
+      total: filtered.length,
+      tierDistribution: tierDist,
+    },
+  };
+});
+
+// GET /api/reputation/:agentId — Full public reputation profile
+app.get("/api/reputation/:agentId", async (request, reply) => {
+  const { agentId } = request.params as { agentId: string };
+
+  const [agent] = await sql`SELECT id, display_name, created_at FROM agents WHERE id = ${agentId}`;
+  if (!agent) return reply.code(404).send({ error: "Agent not found" });
+
+  const [feedback] = await sql`
+    SELECT
+      COALESCE(AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0), 0) AS avg_rating,
+      COUNT(*)::int AS review_count
+    FROM feedback
+    WHERE to_agent_id = ${agentId}
+  `;
+
+  const [dealStats] = await sql`
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_deals,
+      COALESCE(SUM(negotiated_total) FILTER (WHERE status = 'completed'), 0) AS total_volume,
+      COUNT(*) FILTER (WHERE status = 'disputed')::int AS disputed_deals,
+      COUNT(*)::int AS total_deals
+    FROM deals
+    WHERE buyer_agent_id = ${agentId} OR seller_agent_id = ${agentId}
+  `;
+
+  const [endorseStats] = await sql`
+    SELECT COUNT(*)::int AS endorsement_count
+    FROM endorsements
+    WHERE endorsed_id = ${agentId}
+  `;
+
+  const completedDeals = Number(dealStats.completed_deals);
+  const avgRating = Number(feedback.avg_rating);
+  const totalVolume = Number(Number(dealStats.total_volume).toFixed(2));
+  const reviewCount = Number(feedback.review_count);
+  const disputedDeals = Number(dealStats.disputed_deals);
+  const totalDeals = Number(dealStats.total_deals);
+  const endorsementCount = Number(endorseStats.endorsement_count);
+  const memberSinceMs = new Date(agent.created_at as string).getTime();
+
+  const { score, breakdown } = computeRaaSScore(
+    completedDeals, avgRating, totalDeals, disputedDeals, memberSinceMs,
+  );
+  const trustTier = computeTrustTier(completedDeals, avgRating);
+  const badges = computeBadges({
+    completedDeals, totalVolume, disputedDeals, totalDeals, reviewCount, memberSinceMs, endorsementCount,
+  });
+
+  return {
+    agentId,
+    displayName: agent.display_name,
+    memberSince: agent.created_at,
+    completedDeals,
+    totalVolume,
+    avgRating: Number(avgRating.toFixed(2)),
+    reviewCount,
+    disputedDeals,
+    totalDeals,
+    disputeRate: totalDeals > 0 ? Number((disputedDeals / totalDeals).toFixed(4)) : 0,
+    endorsementCount,
+    score,
+    trustTier: {
+      tier: trustTier.tier,
+      label: trustTier.label,
+      color: trustTier.color,
+      thresholds: TRUST_TIERS.map(t => ({
+        tier: t.tier,
+        minDeals: t.minDeals,
+        minReputation: t.minReputation,
+      })),
+    },
+    scoreBreakdown: breakdown,
+    badges,
+  };
+});
+
+// GET /api/reputation/:agentId/attestation — HMAC-signed attestation for external verification
+app.get("/api/reputation/:agentId/attestation", async (request, reply) => {
+  const { agentId } = request.params as { agentId: string };
+
+  const [agent] = await sql`SELECT id, display_name, created_at FROM agents WHERE id = ${agentId}`;
+  if (!agent) return reply.code(404).send({ error: "Agent not found" });
+
+  const [feedback] = await sql`
+    SELECT
+      COALESCE(AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0), 0) AS avg_rating
+    FROM feedback
+    WHERE to_agent_id = ${agentId}
+  `;
+
+  const [dealStats] = await sql`
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_deals,
+      COUNT(*) FILTER (WHERE status = 'disputed')::int AS disputed_deals,
+      COUNT(*)::int AS total_deals
+    FROM deals
+    WHERE buyer_agent_id = ${agentId} OR seller_agent_id = ${agentId}
+  `;
+
+  const completedDeals = Number(dealStats.completed_deals);
+  const avgRating = Number(feedback.avg_rating);
+  const { score } = computeRaaSScore(
+    completedDeals,
+    avgRating,
+    Number(dealStats.total_deals),
+    Number(dealStats.disputed_deals),
+    new Date(agent.created_at as string).getTime(),
+  );
+  const trustTier = computeTrustTier(completedDeals, avgRating);
+
+  const timestamp = new Date().toISOString();
+  const signingKey = process.env.PLATFORM_SIGNING_KEY ?? "agentpact-dev-signing-key";
+
+  const payload = {
+    agentId,
+    score,
+    tier: trustTier.tier,
+    completedDeals,
+    avgRating: Number(avgRating.toFixed(2)),
+    timestamp,
+    issuer: "agentpact.xyz",
+  };
+
+  const signature = createHmac("sha256", signingKey)
+    .update(JSON.stringify(payload))
+    .digest("hex");
+
+  return {
+    ...payload,
+    signature,
+    verificationInstructions: "HMAC-SHA256 over JSON.stringify(payload without .signature) using PLATFORM_SIGNING_KEY",
+  };
+});
+
+// POST /api/reputation/:agentId/endorse — Agent-to-agent endorsement (requires auth)
+app.post("/api/reputation/:agentId/endorse", async (request, reply) => {
+  const { agentId } = request.params as { agentId: string };
+  const body = z.object({
+    skillTag: z.string().min(2).max(64),
+    message: z.string().max(500).optional(),
+  }).parse(request.body);
+
+  const endorserId = (request as unknown as { agentId: string }).agentId;
+  if (!endorserId) return reply.code(401).send({ error: "Authentication required" });
+  if (endorserId === agentId) return reply.code(400).send({ error: "Cannot endorse yourself" });
+
+  const [target] = await sql`SELECT id FROM agents WHERE id = ${agentId}`;
+  if (!target) return reply.code(404).send({ error: "Agent not found" });
+
+  // Check if endorser has completed at least one deal with the endorsed agent
+  const [sharedDeal] = await sql`
+    SELECT id FROM deals
+    WHERE status = 'completed'
+      AND (
+        (buyer_agent_id = ${endorserId} AND seller_agent_id = ${agentId}) OR
+        (buyer_agent_id = ${agentId} AND seller_agent_id = ${endorserId})
+      )
+    LIMIT 1
+  `;
+  if (!sharedDeal) {
+    return reply.code(403).send({ error: "You must have completed at least one deal with this agent to endorse them" });
+  }
+
+  // Upsert endorsement (one endorsement per skill tag per pair)
+  const [endorsement] = await sql`
+    INSERT INTO endorsements (endorser_id, endorsed_id, skill_tag, message)
+    VALUES (${endorserId}, ${agentId}, ${body.skillTag}, ${body.message ?? null})
+    ON CONFLICT (endorser_id, endorsed_id, skill_tag) DO UPDATE SET
+      message = EXCLUDED.message,
+      created_at = NOW()
+    RETURNING *
+  `;
+
+  return reply.code(201).send({
+    endorsement,
+    message: "Endorsement recorded successfully",
   });
 });
 
