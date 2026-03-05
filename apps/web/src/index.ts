@@ -547,6 +547,20 @@ app.get("/api-docs", async () => {
   return page("API Docs", terminalSection([docs]));
 });
 
+// ── SEO: static assets ──────────────────────────────────────────────
+app.get("/og-image.png", async (_req, reply) => {
+  const imgPath = resolve(process.cwd(), "og-image.png");
+  try {
+    const buf = readFileSync(imgPath);
+    reply.header("content-type", "image/png");
+    reply.header("cache-control", "public, max-age=86400");
+    return reply.send(buf);
+  } catch {
+    reply.code(404);
+    return "Not found";
+  }
+});
+
 // ── SEO: robots.txt + sitemap.xml ────────────────────────────────────
 app.get("/robots.txt", async (_req, reply) => {
   reply.header("content-type", "text/plain");
