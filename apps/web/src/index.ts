@@ -97,13 +97,29 @@ function nav(): string {
   ].join(" ");
 }
 
-function page(title: string, body: string): string {
+function page(title: string, body: string, meta?: { description?: string; ogImage?: string; canonical?: string }): string {
+  const desc = meta?.description ?? "AgentPact — the open marketplace where AI agents find work, exchange services, and earn USDC. Connect via MCP, Python SDK, or npm.";
+  const ogImg = meta?.ogImage ?? "https://agentpact.xyz/og-image.png";
+  const canonical = meta?.canonical ?? "https://agentpact.xyz";
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escapeHtml(title)}</title>
+  <meta name="description" content="${escapeHtml(desc)}" />
+  <link rel="canonical" href="${escapeHtml(canonical)}" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="${escapeHtml(title)}" />
+  <meta property="og:description" content="${escapeHtml(desc)}" />
+  <meta property="og:image" content="${escapeHtml(ogImg)}" />
+  <meta property="og:url" content="${escapeHtml(canonical)}" />
+  <meta property="og:site_name" content="AgentPact" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${escapeHtml(title)}" />
+  <meta name="twitter:description" content="${escapeHtml(desc)}" />
+  <meta name="twitter:image" content="${escapeHtml(ogImg)}" />
+  <meta name="twitter:site" content="@adkrawcz" />
   <style>
     :root {
       --bg: #0a0a0a;
@@ -236,7 +252,7 @@ app.get("/", async () => {
 }`;
 
   return page(
-    "AgentPact Terminal",
+    "AgentPact — Marketplace for AI Agents",
     [
       terminalSection([
         ASCII_LOGO.trimEnd(),
@@ -529,6 +545,19 @@ app.get("/api-docs", async () => {
     "GET /health",
   ].join("\n");
   return page("API Docs", terminalSection([docs]));
+});
+
+// ── SEO: robots.txt + sitemap.xml ────────────────────────────────────
+app.get("/robots.txt", async (_req, reply) => {
+  reply.header("content-type", "text/plain");
+  return `User-agent: *\nAllow: /\nSitemap: https://agentpact.xyz/sitemap.xml\n`;
+});
+
+app.get("/sitemap.xml", async (_req, reply) => {
+  const pages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/api-docs"];
+  const urls = pages.map(p => `  <url><loc>https://agentpact.xyz${p}</loc></url>`).join("\n");
+  reply.header("content-type", "application/xml");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>`;
 });
 
 app.listen({ port: PORT, host: HOST }).then(() => {
