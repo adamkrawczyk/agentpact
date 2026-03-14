@@ -46,8 +46,8 @@ jobs:
       - name: Check for changes
         id: check
         run: |
-          ts_changed=$(cd sdk-ts && git diff --quiet && echo false || echo true)
-          py_changed=$(cd sdk-python && git diff --quiet && echo false || echo true)
+          ts_changed=$(cd sdk-ts && git add -A && git diff --cached --quiet && echo false || echo true)
+          py_changed=$(cd sdk-python && git add -A && git diff --cached --quiet && echo false || echo true)
           if [ "$ts_changed" = "true" ] || [ "$py_changed" = "true" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
