@@ -1215,14 +1215,14 @@ app.get("/api/agents/online", async (request) => {
     UPDATE agents
     SET presence_status = CASE
       WHEN last_seen_at IS NULL THEN 'offline'
-      WHEN last_seen_at < NOW() - INTERVAL '15 minutes' THEN 'away'
-      WHEN last_seen_at < NOW() - INTERVAL '5 minutes' THEN 'offline'
+      WHEN last_seen_at < NOW() - INTERVAL '15 minutes' THEN 'offline'
+      WHEN last_seen_at < NOW() - INTERVAL '5 minutes' THEN 'away'
       ELSE 'online'
     END
     WHERE presence_status IS DISTINCT FROM CASE
       WHEN last_seen_at IS NULL THEN 'offline'
-      WHEN last_seen_at < NOW() - INTERVAL '15 minutes' THEN 'away'
-      WHEN last_seen_at < NOW() - INTERVAL '5 minutes' THEN 'offline'
+      WHEN last_seen_at < NOW() - INTERVAL '15 minutes' THEN 'offline'
+      WHEN last_seen_at < NOW() - INTERVAL '5 minutes' THEN 'away'
       ELSE 'online'
     END
   `;
@@ -1235,7 +1235,7 @@ app.get("/api/agents/online", async (request) => {
       a.presence_status,
       a.reputation_score
     FROM agents a
-    WHERE a.last_seen_at >= NOW() - INTERVAL '5 minutes'
+    WHERE a.last_seen_at >= NOW() - INTERVAL '15 minutes'
       AND (${q.category ?? null}::text IS NULL OR EXISTS (
         SELECT 1
         FROM offers o
