@@ -379,8 +379,14 @@ const disputeSchema = z.object({
 const challengeIdParamSchema = z.object({
     id: z.string().uuid(),
 });
+const agentIdParamSchema = z.object({
+    id: z.string().uuid(),
+});
 const listChallengesQuerySchema = z.object({
     category: z.string().min(2).optional(),
+});
+const onlineAgentsQuerySchema = z.object({
+    category: z.string().min(1).optional(),
 });
 const startChallengeSchema = z.object({
     agentId: z.string().uuid(),
@@ -794,13 +800,14 @@ async function completeDealMilestones(dealId, opts = {}) {
             return { mode, action: "completed_without_onchain_release" };
         }
         const intents = await sql `
-      SELECT CAST(pi."mode" AS text) AS payment_mode
+      SELECT pi.id, pi.tx_hash
       FROM payment_intents pi
       JOIN milestones m ON m.id = pi.milestone_id
       WHERE m.deal_id = ${dealId} AND pi.status = 'funded'
       ORDER BY pi.created_at DESC
     `;
-        const hasOnChainFundedIntent = intents.some((row) => String(row.payment_mode) === "on-chain");
+        // If on-chain mode is active and there are funded intents with real tx hashes, treat as on-chain funded
+        const hasOnChainFundedIntent = intents.some((row) => row.tx_hash && !String(row.tx_hash).startsWith("sim_"));
         if (hasOnChainFundedIntent) {
             // Try platform-initiated release via resolveDispute (pays seller)
             const releaseResults = [];
@@ -900,7 +907,7 @@ app.addHook("preHandler", async (request, reply) => {
     if (routePath.startsWith("/api/public/")) {
         return;
     }
-    const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
+    const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/agents/online", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
     if (request.method === "GET" && publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
         return;
     }
@@ -977,6 +984,84 @@ app.get("/api/agents/:id/reputation", async (request) => {
         agentId: id,
         score: Number(aggregate.score ?? 0),
         reviewCount: Number(aggregate.review_count ?? 0)
+    };
+});
+app.post("/api/agents/:id/heartbeat", async (request, reply) => {
+    const { id } = agentIdParamSchema.parse(request.params);
+    const requesterAgentId = getRequesterAgentId(request, reply);
+    if (!requesterAgentId)
+        return;
+    if (id !== requesterAgentId) {
+        return reply.code(403).send({ error: "Not authorized to heartbeat for this agent" });
+    }
+    const [agent] = await sql `
+    UPDATE agents
+    SET
+      last_seen_at = NOW(),
+      presence_status = 'online'
+    WHERE id = ${id}
+    RETURNING id, last_seen_at
+  `;
+    if (!agent)
+        return reply.code(404).send({ error: "Agent not found" });
+    return {
+        ok: true,
+        last_seen_at: agent.last_seen_at,
+    };
+});
+app.get("/api/agents/online", async (request) => {
+    const q = onlineAgentsQuerySchema.parse(request.query ?? {});
+    await sql `
+    UPDATE agents
+    SET presence_status = CASE
+      WHEN last_seen_at IS NULL THEN 'offline'
+      WHEN last_seen_at < NOW() - INTERVAL '15 minutes' THEN 'away'
+      WHEN last_seen_at < NOW() - INTERVAL '5 minutes' THEN 'offline'
+      ELSE 'online'
+    END
+    WHERE presence_status IS DISTINCT FROM CASE
+      WHEN last_seen_at IS NULL THEN 'offline'
+      WHEN last_seen_at < NOW() - INTERVAL '15 minutes' THEN 'away'
+      WHEN last_seen_at < NOW() - INTERVAL '5 minutes' THEN 'offline'
+      ELSE 'online'
+    END
+  `;
+    const rows = await sql `
+    SELECT
+      a.id,
+      a.display_name AS name,
+      a.last_seen_at,
+      a.presence_status,
+      a.reputation_score
+    FROM agents a
+    WHERE a.last_seen_at >= NOW() - INTERVAL '5 minutes'
+      AND (${q.category ?? null}::text IS NULL OR EXISTS (
+        SELECT 1
+        FROM offers o
+        WHERE o.agent_id = a.id
+          AND o.status = 'active'
+          AND o.category = ${q.category ?? null}::text
+      ))
+    ORDER BY a.last_seen_at DESC
+  `;
+    return rows;
+});
+app.get("/api/agents/:id/presence", async (request, reply) => {
+    const { id } = agentIdParamSchema.parse(request.params);
+    const [agent] = await sql `
+    SELECT
+      last_seen_at,
+      presence_status,
+      (last_seen_at IS NOT NULL AND last_seen_at >= NOW() - INTERVAL '5 minutes') AS online
+    FROM agents
+    WHERE id = ${id}
+  `;
+    if (!agent)
+        return reply.code(404).send({ error: "Agent not found" });
+    return {
+        online: Boolean(agent.online),
+        last_seen_at: agent.last_seen_at,
+        presence_status: agent.presence_status,
     };
 });
 app.get("/api/skills/challenges", async (request) => {
