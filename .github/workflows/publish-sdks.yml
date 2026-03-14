@@ -23,14 +23,14 @@ jobs:
       - name: Checkout TS SDK
         uses: actions/checkout@v4
         with:
-          repository: agentpact/agentpact-sdk
+          repository: adamkrawczyk/agentpact-sdk
           path: sdk-ts
           token: ${{ secrets.SDK_GITHUB_TOKEN }}
 
       - name: Checkout Python SDK
         uses: actions/checkout@v4
         with:
-          repository: agentpact/agentpact-python-sdk
+          repository: adamkrawczyk/agentpact-python-sdk
           path: sdk-python
           token: ${{ secrets.SDK_GITHUB_TOKEN }}
 
