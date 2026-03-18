@@ -67,7 +67,6 @@ describe("Auth", () => {
   });
 
   it("registers an agent API key without a wallet address", async () => {
-  it("registers an agent API key without a wallet address", async () => {
     const app = Fastify();
     await initAuth(app, createMockSql());
 
@@ -75,14 +74,11 @@ describe("Auth", () => {
       method: "POST",
       url: "/api/auth/register",
       payload: {
-        agentId
         agentId,
       }
     });
 
     expect(response.statusCode).toBe(201);
-    const body = JSON.parse(response.body) as { apiKey: string };
-    expect(body.apiKey).toBeTruthy();
     const body = JSON.parse(response.body) as { apiKey: string; agentId: string };
     expect(body.apiKey).toBeTruthy();
     expect(body.agentId).toBe(agentId);

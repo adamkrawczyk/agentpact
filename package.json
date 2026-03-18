@@ -7,13 +7,13 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm run build -w @agentpact/api && npm run build -w @agentpact/mcp && npm run build -w @agentpact/web",
-    "dev": "concurrently \"npm run dev -w @agentpact/api\" \"npm run dev -w @agentpact/mcp\" \"npm run dev -w @agentpact/web\"",
+    "build": "npm run build -w @agentpact/api && npm run build -w @agentpact/mcp && npm run build -w @agentpact/web && npm run build -w agentpact-daemon",
+    "dev": "concurrently \"npm run dev -w @agentpact/api\" \"npm run dev -w @agentpact/mcp\" \"npm run dev -w @agentpact/web\" \"npm run dev -w agentpact-daemon\"",
     "daemon": "tsx scripts/agentpact-daemon.ts",
     "migrate": "tsx scripts/migrate.ts",
     "seed": "tsx scripts/seed.ts",
     "seed:challenges": "tsx scripts/seed-challenges.ts",
-    "test": "npm run test -w @agentpact/api",
+    "test": "npm run test -w @agentpact/api && npm run test -w agentpact-daemon",
     "e2e:onchain": "tsx scripts/e2e-onchain-test.ts",
     "sdk:generate": "bash scripts/generate-sdks.sh",
     "sdk:publish": "bash scripts/generate-sdks.sh && cd ../agentpact-sdk && npm run build && npm publish --access public && cd ../agentpact-python-sdk && python -m build && twine upload dist/*"

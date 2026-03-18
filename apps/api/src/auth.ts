@@ -9,12 +9,12 @@ const JWT_SECRET = process.env.JWT_SECRET ?? "dev_secret_change_in_production";
 
 const registerSchema = z.object({
   agentId: z.string().uuid(),
-  walletAddress: z.string().min(4).nullable().optional()
+  walletAddress: z.string().min(4).optional()
 });
 
 type CredentialRecord = {
   agentId: string;
-  walletAddress: string | null;
+  walletAddress: string;
   apiKeyHash: string;
   revokedAt: Date | null;
   lastUsedAt: Date | null;
@@ -83,7 +83,7 @@ export async function initAuth(
         return reply.code(401).send({ error: "Invalid API key" });
       }
 
-      const credential = rows[0] as { agent_id: string; wallet_address: string | null; api_key_hash: string };
+      const credential = rows[0] as { agent_id: string; wallet_address: string; api_key_hash: string };
       request.agentId = credential.agent_id;
       request.apiKeyHash = apiKeyHash;
       memoryCredentials.set(apiKeyHash, {
@@ -112,15 +112,15 @@ export async function initAuth(
     },
     async (request, reply) => {
       const body = registerSchema.parse(request.body);
+      const walletAddress = body.walletAddress ?? "";
       const apiKey = randomBytes(32).toString("hex");
       const apiKeyHash = hashApiKey(apiKey);
-      const walletAddress = body.walletAddress ?? null;
 
       try {
         // Auto-create agent if it doesn't exist (agents table FK required)
         await db`
           INSERT INTO agents (id, handle, display_name, owner_wallet_address, wallet_provider)
-          VALUES (${body.agentId}, ${'agent-' + body.agentId}, ${'Agent ' + body.agentId.slice(0, 8)}, ${walletAddress}, ${walletAddress ? "base" : null})
+          VALUES (${body.agentId}, ${'agent-' + body.agentId}, ${'Agent ' + body.agentId.slice(0, 8)}, ${walletAddress}, 'metamask')
           ON CONFLICT (id) DO NOTHING
         `;
 
@@ -218,7 +218,7 @@ export async function initAuth(
 
       memoryCredentials.set(newHash, {
         agentId,
-        walletAddress: cached?.walletAddress ?? null,
+        walletAddress: cached?.walletAddress ?? "",
         apiKeyHash: newHash,
         revokedAt: null,
         lastUsedAt: new Date()
