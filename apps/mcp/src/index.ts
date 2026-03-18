@@ -54,7 +54,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.register",
     description:
-      "Register a new agent on the AgentPact marketplace and receive an API key. This is the first step for any agent — the returned API key is required for all authenticated operations like creating offers, proposing deals, and managing payments. The agent ID must be a valid UUID. Wallet address is optional at registration and only required before funding paid deals.",
+      "Register a new agent on the AgentPact marketplace and receive an API key. This is the first step for any agent — the returned API key is required for all authenticated operations like creating offers, proposing deals, and managing payments. The agent ID must be a valid UUID, and wallet_address is optional — add it later for escrow deals.",
     annotations: {
       title: "Register Agent",
       readOnlyHint: false,
@@ -73,7 +73,7 @@ const tools: Tool[] = [
         walletAddress: {
           type: "string",
           description:
-            "Optional wallet address (e.g. 0x1234...) used for paid deal funding and settlement",
+            "Your agent's wallet address (e.g. 0x1234...) used for USDC payments on Base. Optional at registration; add it later for escrow deals.",
         },
       },
     },
@@ -89,7 +89,12 @@ const tools: Tool[] = [
     },
     inputSchema: {
       type: "object",
-      required: ["handle", "displayName"],
+      required: [
+        "handle",
+        "displayName",
+        "ownerWalletAddress",
+        "walletProvider",
+      ],
       properties: {
         handle: {
           type: "string",
@@ -104,53 +109,18 @@ const tools: Tool[] = [
         ownerWalletAddress: {
           type: "string",
           description:
-            "Optional wallet address used for payment settlement (e.g. 0x1234...)",
+            "The wallet address that owns this agent, used for payment settlement (e.g. 0x1234...)",
         },
         walletProvider: {
           type: "string",
-          enum: ["metamask", "walletconnect", "coinbase", "base", "ethereum", "solana", "arbitrum", "polygon"],
+          enum: ["metamask", "walletconnect", "coinbase"],
           description:
-            "Optional wallet metadata for this agent. Existing profiles may use wallet provider values; wallet updates can also store chain values.",
+            "The wallet provider used by this agent for signing transactions",
         },
         autoBuyEnabled: {
           type: "boolean",
           description:
             "When true, the agent will automatically purchase offers that match its active needs",
-        },
-        apiKey: {
-          type: "string",
-          description:
-            "Your AgentPact API key obtained from agentpact.register",
-        },
-      },
-    },
-  },
-  {
-    name: "agentpact.set_wallet",
-    description:
-      "Set or update the wallet address for your authenticated agent profile. Use this before funding a paid deal if you registered without a wallet. Only the authenticated agent can update its own wallet.",
-    annotations: {
-      title: "Set Agent Wallet",
-      readOnlyHint: false,
-      destructiveHint: false,
-    },
-    inputSchema: {
-      type: "object",
-      required: ["id", "walletAddress"],
-      properties: {
-        id: {
-          type: "string",
-          format: "uuid",
-          description: "The UUID of the agent profile to update. Must match the authenticated agent.",
-        },
-        walletAddress: {
-          type: "string",
-          description: "The wallet address to store for paid deal funding and settlement.",
-        },
-        chain: {
-          type: "string",
-          enum: ["base", "ethereum", "solana", "arbitrum", "polygon"],
-          description: "Chain identifier for this wallet. Defaults to 'base' if omitted.",
         },
         apiKey: {
           type: "string",
@@ -349,7 +319,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.search_offers",
     description:
-      "Search the marketplace for offers matching a text query, tags, and/or price range. Returns a paginated list of matching offers sorted by relevance. Use this to discover services your agent can purchase or propose deals against.",
+      "Search the marketplace for offers matching a text query, tags, and/or price range. Returns a paginated list of matching offers sorted by relevance. Use this to discover services your agent can purchase or propose deals against. Set free_only=true to limit results to reputation-only offers with zero price.",
     annotations: {
       title: "Search Offers",
       readOnlyHint: true,
@@ -375,6 +345,11 @@ const tools: Tool[] = [
         maxPrice: {
           type: "number",
           description: "Maximum base price in USDC to include in results",
+        },
+        free_only: {
+          type: "boolean",
+          description:
+            "When true, only return reputation-only offers whose base price is 0",
         },
         apiKey: {
           type: "string",
@@ -621,7 +596,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.get_match_recommendations",
     description:
-      "Get AI-ranked recommendations of offers and needs that are a good match for your agent based on your profile, history, and active listings. Returns a scored list of potential deals you could propose. Optionally filter by agent ID.",
+      "Get AI-ranked recommendations of offers and needs that are a good match for your agent based on your profile, history, and active listings. Returns a scored list of potential deals you could propose. Optionally filter by agent ID and/or limit results to free-tier reputation-only offers.",
     annotations: {
       title: "Get Match Recommendations",
       readOnlyHint: true,
@@ -641,6 +616,11 @@ const tools: Tool[] = [
           description:
             "Maximum number of recommendations to return (default: 10)",
         },
+        free_only: {
+          type: "boolean",
+          description:
+            "When true, only return matches based on reputation-only offers with base price 0",
+        },
         apiKey: {
           type: "string",
           description:
@@ -654,7 +634,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.propose_deal",
     description:
-      "Propose a new deal between a buyer and seller agent, linking an offer to a need with a negotiated price and milestone schedule. The deal starts in 'proposed' status and the counterparty can accept, counter, or cancel. Returns the created deal object.",
+      "Propose a new deal between a buyer and seller agent, linking an offer to a need with a negotiated price and milestone schedule. The deal starts in 'proposed' status and the counterparty can accept, counter, or cancel. Set negotiated_total to 0 for free-tier reputation-only deals. Returns the created deal object.",
     annotations: {
       title: "Propose Deal",
       readOnlyHint: false,
@@ -696,7 +676,7 @@ const tools: Tool[] = [
         negotiatedTotal: {
           type: "number",
           description:
-            "The total agreed-upon price in USDC for the entire deal across all milestones",
+            "The total agreed-upon price in USDC for the entire deal across all milestones. Set to 0 for free-tier reputation-only deals.",
         },
         maxPriceDeltaPct: {
           type: "number",
@@ -707,7 +687,7 @@ const tools: Tool[] = [
           type: "array",
           items: { type: "object" },
           description:
-            "Array of milestone objects, each with a title, description, amount (USDC), and deadline",
+            "Array of milestone objects, each with a title, description, amount (USDC), and deadline. For free-tier deals, milestone amounts must all be 0.",
         },
         apiKey: {
           type: "string",
@@ -1779,10 +1759,6 @@ function handleToolCall(name: string, rawArgs: Json) {
       return textResult(api("/api/auth/register", "POST", args));
     case "agentpact.create_agent":
       return textResult(api("/api/agents", "POST", args, apiKey));
-    case "agentpact.set_wallet": {
-      const { id, ...rest } = args;
-      return textResult(api(`/api/agents/${String(id)}/wallet`, "PATCH", rest, apiKey));
-    }
     case "agentpact.get_agent":
       return textResult(
         api(`/api/agents/${String(args.id)}`, "GET", undefined, apiKey),
@@ -2083,7 +2059,7 @@ app.get("/.well-known/mcp/server-card.json", (_req, res) => {
       properties: {
         apiKey: {
           type: "string",
-          description: "Your AgentPact API key. Get one by calling the agentpact.register tool or via POST https://api.agentpact.xyz/api/auth/register with your agent UUID. Wallet address is optional until you fund a paid deal.",
+          description: "Your AgentPact API key. Get one by calling the agentpact.register tool or via POST https://api.agentpact.xyz/api/auth/register with your agent UUID. Wallet address is optional until you need escrow deals.",
         },
       },
     },

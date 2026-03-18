@@ -306,7 +306,7 @@ const createOfferSchema = z.object({
   descriptionMd: z.string().min(10),
   category: z.string().min(2),
   tags: z.array(z.string()).default([]),
-  basePrice: z.number().positive(),
+  basePrice: z.number().min(0),
   currency: z.literal("USDC").default("USDC"),
   maxPriceDeltaPct: z.number().min(0).max(100).default(15),
   slaDays: z.number().int().positive().default(7),
@@ -480,6 +480,39 @@ function idempotencyKey(headers: Record<string, unknown>): string {
 
 function toNumber(v: unknown): number {
   return Number(v);
+}
+
+function isZeroPrice(value: unknown): boolean {
+  return toNumber(value) === 0;
+}
+
+function withReputationOnlyTag(tags: unknown): string[] {
+  const normalized = Array.isArray(tags)
+    ? tags.filter((tag): tag is string => typeof tag === "string")
+    : [];
+  return normalized.includes("reputation-only")
+    ? normalized
+    : [...normalized, "reputation-only"];
+}
+
+function normalizeTags(tags: unknown): string[] {
+  return Array.isArray(tags)
+    ? tags.filter((tag): tag is string => typeof tag === "string")
+    : [];
+}
+
+function enrichOfferRow<T extends Record<string, unknown>>(offer: T): T & {
+  tags: string[];
+  is_free_tier: boolean;
+  pricing_model: "paid" | "reputation-only";
+} {
+  const isFreeTier = isZeroPrice(offer.base_price);
+  return {
+    ...offer,
+    tags: isFreeTier ? withReputationOnlyTag(offer.tags) : normalizeTags(offer.tags),
+    is_free_tier: isFreeTier,
+    pricing_model: isFreeTier ? "reputation-only" : "paid",
+  };
 }
 
 function parseBooleanish(value: unknown): boolean {
@@ -833,12 +866,13 @@ async function createDealProposal(
     auditPayload?: unknown;
   },
 ): Promise<Record<string, unknown>> {
+  const isFreeTier = isZeroPrice(proposal.negotiatedTotal);
   const result = await sql.begin(async (txn) => {
     const [deal] = await txn.unsafe(
       `
         INSERT INTO deals (
-          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days
-        ) VALUES ($1, $2, $3, $4, 'proposed', $5, 'USDC', $6, $7)
+          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days, is_free_tier
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'USDC', $7, $8, $9)
         RETURNING *
       `,
       [
@@ -846,9 +880,11 @@ async function createDealProposal(
         proposal.sellerAgentId,
         proposal.offerId,
         proposal.needId,
+        "proposed",
         proposal.negotiatedTotal,
         proposal.maxPriceDeltaPct,
         proposal.acceptanceTimeoutDays,
+        isFreeTier,
       ]
     );
 
@@ -857,11 +893,19 @@ async function createDealProposal(
       const dueAt = milestone.dueAt ?? null;
       const [ms] = await txn.unsafe(
         `
-          INSERT INTO milestones (deal_id, idx, title, amount, currency, acceptance_criteria, due_at)
-          VALUES ($1, $2, $3, $4, 'USDC', $5::jsonb, $6)
+          INSERT INTO milestones (deal_id, idx, title, amount, currency, acceptance_criteria, due_at, status)
+          VALUES ($1, $2, $3, $4, 'USDC', $5::jsonb, $6, $7)
           RETURNING *
         `,
-        [deal.id, milestone.idx, milestone.title, milestone.amount, JSON.stringify(milestone.acceptanceCriteria), dueAt]
+        [
+          deal.id,
+          milestone.idx,
+          milestone.title,
+          milestone.amount,
+          JSON.stringify(milestone.acceptanceCriteria),
+          dueAt,
+          "pending",
+        ]
       );
       milestones.push(ms);
     }
@@ -883,6 +927,9 @@ async function createDealProposal(
 }
 
 async function enforceDealDelta(dealId: string, negotiatedTotal: number): Promise<void> {
+  if (isZeroPrice(negotiatedTotal)) {
+    return;
+  }
   const [deal] = await sql`
     SELECT d.id, o.base_price, d.max_price_delta_pct
     FROM deals d
@@ -894,6 +941,9 @@ async function enforceDealDelta(dealId: string, negotiatedTotal: number): Promis
   }
   const maxDelta = toNumber(deal.max_price_delta_pct) / 100;
   const base = toNumber(deal.base_price);
+  if (base === 0) {
+    return;
+  }
   const delta = Math.abs(negotiatedTotal - base) / base;
   if (delta > maxDelta) {
     throw new Error("Counter exceeds max negotiation delta");
@@ -967,9 +1017,15 @@ async function releaseMilestonePayment(milestoneId: string): Promise<void> {
 
 async function completeDealMilestones(
   dealId: string,
-  opts: { skipOnChainRelease?: boolean } = {},
+  opts: { skipOnChainRelease?: boolean; skipPaymentRelease?: boolean } = {},
 ): Promise<{ mode: "simulation" | "on-chain"; action: "released" | "buyer_sign_required" | "completed_without_onchain_release"; txData?: Array<{ milestoneId: string; to: string; data: string; value: string; description: string }>; onChainReleaseResults?: Array<{ milestoneId: string; txHash?: string; error?: string }> }> {
   const mode = isOnChainMode() ? "on-chain" : "simulation";
+  const [deal] = await sql`
+    SELECT is_free_tier
+    FROM deals
+    WHERE id = ${dealId}
+  `;
+  const skipPaymentRelease = opts.skipPaymentRelease ?? Boolean(deal?.is_free_tier);
   const milestones = await sql`
     SELECT id
     FROM milestones
@@ -978,6 +1034,12 @@ async function completeDealMilestones(
   `;
 
   if (milestones.length === 0) {
+    return { mode, action: "released" };
+  }
+
+  if (skipPaymentRelease) {
+    await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
+    await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
     return { mode, action: "released" };
   }
 
@@ -1650,12 +1712,14 @@ app.get("/api/offers", async (request) => {
     minPrice: z.string().optional(),
     maxPrice: z.string().optional(),
     verifiedOnly: z.string().optional(),
+    free_only: z.string().optional(),
   }).parse(request.query ?? {});
   const tags = q.tags ? q.tags.split(",").filter(Boolean) : [];
   const query = `%${q.query ?? ""}%`;
   const min = q.minPrice ? Number(q.minPrice) : 0;
   const max = q.maxPrice ? Number(q.maxPrice) : Number.MAX_SAFE_INTEGER;
   const verifiedOnly = parseBooleanish(q.verifiedOnly);
+  const freeOnly = parseBooleanish(q.free_only);
 
   const rows = await sql`
     SELECT o.* FROM offers o
@@ -1665,17 +1729,18 @@ app.get("/api/offers", async (request) => {
       AND o.base_price BETWEEN ${min} AND ${max}
       AND (${tags.length} = 0 OR o.tags && ${tags})
       AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)
+      AND (${freeOnly} = FALSE OR o.base_price = 0)
     ORDER BY o.created_at DESC
     LIMIT 200
   `;
-  return rows;
+  return rows.map((row) => enrichOfferRow(row as Record<string, unknown>));
 });
 
 app.get("/api/offers/:id", async (request, reply) => {
   const { id } = request.params as { id: string };
   const [offer] = await sql`SELECT * FROM offers WHERE id = ${id}`;
   if (!offer) return reply.code(404).send({ error: "Offer not found" });
-  return offer;
+  return enrichOfferRow(offer as Record<string, unknown>);
 });
 
 app.post("/api/needs", async (request, reply) => {
@@ -1785,21 +1850,32 @@ app.get("/api/matches/recommendations", async (request) => {
     agentId: z.string().uuid().optional(),
     limit: z.string().optional(),
     verifiedOnly: z.string().optional(),
+    free_only: z.string().optional(),
   }).parse(request.query ?? {});
   const limit = Number(q.limit ?? 20);
   const verifiedOnly = parseBooleanish(q.verifiedOnly);
+  const freeOnly = parseBooleanish(q.free_only);
   const rows = await sql`
-    SELECT m.*, o.title AS offer_title, n.title AS need_title
+    SELECT m.*, o.title AS offer_title, o.base_price AS offer_base_price, o.tags AS offer_tags, n.title AS need_title
     FROM matches m
     JOIN offers o ON o.id = m.offer_id
     JOIN needs n ON n.id = m.need_id
     JOIN agents a ON a.id = o.agent_id
     WHERE (${q.agentId ?? null}::uuid IS NULL OR o.agent_id = ${q.agentId ?? null}::uuid OR n.agent_id = ${q.agentId ?? null}::uuid)
       AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)
+      AND (${freeOnly} = FALSE OR o.base_price = 0)
     ORDER BY m.score DESC
     LIMIT ${limit}
   `;
-  return rows;
+  return rows.map((row) => {
+    const isFreeTier = isZeroPrice(row.offer_base_price);
+    return {
+      ...row,
+      offer_tags: isFreeTier ? withReputationOnlyTag(row.offer_tags) : normalizeTags(row.offer_tags),
+      is_free_tier: isFreeTier,
+      pricing_model: isFreeTier ? "reputation-only" : "paid",
+    };
+  });
 });
 
 app.post("/api/matches/recompute", async () => {
@@ -2058,6 +2134,9 @@ app.post("/api/deals/propose", async (request, reply) => {
   if (!needOwner || needOwner.agent_id !== body.buyerAgentId) {
     return reply.code(403).send({ error: "Not authorized" });
   }
+  if (isZeroPrice(body.negotiatedTotal) && body.milestones.some((milestone) => !isZeroPrice(milestone.amount))) {
+    return reply.code(400).send({ error: "Free-tier deals must use zero-value milestones" });
+  }
 
   const result = await createDealProposal(body, {
     idempotencyKey: idem,
@@ -2092,8 +2171,12 @@ app.post("/api/deals/:id/counter", async (request, reply) => {
   if (body.actorAgentId !== deal.buyer_agent_id && body.actorAgentId !== deal.seller_agent_id) {
     return reply.code(403).send({ error: "Not authorized" });
   }
+  if (isZeroPrice(body.negotiatedTotal) && body.milestones.some((milestone) => !isZeroPrice(milestone.amount))) {
+    return reply.code(400).send({ error: "Free-tier deals must use zero-value milestones" });
+  }
 
   await enforceDealDelta(id, body.negotiatedTotal);
+  const isFreeTier = isZeroPrice(body.negotiatedTotal);
 
   await sql.begin(async (txn) => {
     await txn.unsafe("DELETE FROM milestones WHERE deal_id = $1", [id]);
@@ -2111,10 +2194,10 @@ app.post("/api/deals/:id/counter", async (request, reply) => {
     await txn.unsafe(
       `
         UPDATE deals
-        SET status = 'countered', negotiated_total = $1, updated_at = NOW()
-        WHERE id = $2
+        SET status = 'countered', negotiated_total = $1, is_free_tier = $2, updated_at = NOW()
+        WHERE id = $3
       `,
-      [body.negotiatedTotal, id]
+      [body.negotiatedTotal, isFreeTier, id]
     );
 
     await txn.unsafe(
@@ -2352,8 +2435,8 @@ app.post("/api/deals/:id/fulfillment", async (request, reply) => {
   });
 
   // ── Instant auto-complete: if acceptance_timeout_days = 0, close the deal immediately ──
-  const [dealFull] = await sql`SELECT acceptance_timeout_days FROM deals WHERE id = ${id}`;
-  if (Number(dealFull?.acceptance_timeout_days ?? 7) === 0) {
+  const [dealFull] = await sql`SELECT acceptance_timeout_days, is_free_tier FROM deals WHERE id = ${id}`;
+  if (!dealFull?.is_free_tier && Number(dealFull?.acceptance_timeout_days ?? 7) === 0) {
     try {
       await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
       await completeDealMilestones(id, { skipOnChainRelease: false });
@@ -2782,7 +2865,7 @@ app.post("/api/deals/:id/close", async (request, reply) => {
     const rating = body.rating ?? 5;
 
     const [deal] = await sql`
-      SELECT id, status, buyer_agent_id, seller_agent_id, offer_id
+      SELECT id, status, buyer_agent_id, seller_agent_id, offer_id, is_free_tier
       FROM deals WHERE id = ${id}
     `;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
@@ -2791,6 +2874,20 @@ app.post("/api/deals/:id/close", async (request, reply) => {
     }
     if (!["active", "delivered", "proposed", "countered"].includes(String(deal.status))) {
       return reply.code(400).send({ error: `Deal status '${deal.status}' cannot be closed` });
+    }
+
+    if (deal.is_free_tier) {
+      const [fulfillment] = await sql`
+        SELECT status
+        FROM deal_fulfillment
+        WHERE deal_id = ${id}
+      `;
+      if (!fulfillment) {
+        return reply.code(400).send({ error: "Free-tier deals require fulfillment before close" });
+      }
+      if (!["active", "verified"].includes(String(fulfillment.status))) {
+        return reply.code(400).send({ error: "Free-tier deals require verified fulfillment before close" });
+      }
     }
 
     // Mark any pending fulfillment as verified
@@ -2993,6 +3090,7 @@ app.post("/api/payments/create-intent", async (request, reply) => {
       d.buyer_agent_id,
       d.id AS deal_id,
       d.status AS deal_status,
+      d.is_free_tier,
       seller.owner_wallet_address AS seller_wallet_address,
       buyer.owner_wallet_address AS buyer_wallet_address
     FROM milestones m
@@ -3008,6 +3106,9 @@ app.post("/api/payments/create-intent", async (request, reply) => {
   }
   if (!["in_progress", "pending"].includes(milestone.status)) {
     return reply.code(400).send({ error: `Milestone status ${milestone.status} cannot be funded` });
+  }
+  if (milestone.is_free_tier || isZeroPrice(milestone.amount)) {
+    return reply.code(400).send({ error: "Free-tier milestones do not require payment funding" });
   }
 
   const amount = Number(milestone.amount);

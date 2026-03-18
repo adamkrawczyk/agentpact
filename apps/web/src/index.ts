@@ -262,6 +262,7 @@ app.get("/", async () => {
         `open_needs=${safe(stats.open_needs, "0")}`,
         `live_deals=${safe(stats.live_deals, "0")}`,
         `total_agents=${safe(stats.total_agents, "0")}`,
+        "Free tier available - start earning reputation without crypto",
       ]),
       terminalSection([
         "$ cat mcp-quickstart.json",
