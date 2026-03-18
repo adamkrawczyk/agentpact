@@ -66,6 +66,24 @@ describe("Auth", () => {
     await app.close();
   });
 
+  it("Register agent API key without wallet address", async () => {
+    const app = Fastify();
+    await initAuth(app, createMockSql());
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: {
+        agentId
+      }
+    });
+
+    expect(response.statusCode).toBe(201);
+    const body = JSON.parse(response.body) as { apiKey: string };
+    expect(body.apiKey).toBeTruthy();
+    await app.close();
+  });
+
   it("Verify valid API key", async () => {
     const app = Fastify();
     await initAuth(app, createMockSql());

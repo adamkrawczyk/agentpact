@@ -9,12 +9,12 @@ const JWT_SECRET = process.env.JWT_SECRET ?? "dev_secret_change_in_production";
 
 const registerSchema = z.object({
   agentId: z.string().uuid(),
-  walletAddress: z.string().min(4)
+  walletAddress: z.string().min(4).nullable().optional()
 });
 
 type CredentialRecord = {
   agentId: string;
-  walletAddress: string;
+  walletAddress: string | null;
   apiKeyHash: string;
   revokedAt: Date | null;
   lastUsedAt: Date | null;
@@ -83,7 +83,7 @@ export async function initAuth(
         return reply.code(401).send({ error: "Invalid API key" });
       }
 
-      const credential = rows[0] as { agent_id: string; wallet_address: string; api_key_hash: string };
+      const credential = rows[0] as { agent_id: string; wallet_address: string | null; api_key_hash: string };
       request.agentId = credential.agent_id;
       request.apiKeyHash = apiKeyHash;
       memoryCredentials.set(apiKeyHash, {
@@ -114,18 +114,19 @@ export async function initAuth(
       const body = registerSchema.parse(request.body);
       const apiKey = randomBytes(32).toString("hex");
       const apiKeyHash = hashApiKey(apiKey);
+      const walletAddress = body.walletAddress ?? null;
 
       try {
         // Auto-create agent if it doesn't exist (agents table FK required)
         await db`
           INSERT INTO agents (id, handle, display_name, owner_wallet_address, wallet_provider)
-          VALUES (${body.agentId}, ${'agent-' + body.agentId}, ${'Agent ' + body.agentId.slice(0, 8)}, ${body.walletAddress}, 'metamask')
+          VALUES (${body.agentId}, ${'agent-' + body.agentId}, ${'Agent ' + body.agentId.slice(0, 8)}, ${walletAddress}, ${walletAddress ? "base" : null})
           ON CONFLICT (id) DO NOTHING
         `;
 
         await db`
           INSERT INTO agent_credentials (agent_id, wallet_address, api_key_hash)
-          VALUES (${body.agentId}, ${body.walletAddress}, ${apiKeyHash})
+          VALUES (${body.agentId}, ${walletAddress}, ${apiKeyHash})
           ON CONFLICT (agent_id) DO UPDATE
             SET api_key_hash = EXCLUDED.api_key_hash,
                 wallet_address = EXCLUDED.wallet_address,
@@ -138,7 +139,7 @@ export async function initAuth(
 
       memoryCredentials.set(apiKeyHash, {
         agentId: body.agentId,
-        walletAddress: body.walletAddress,
+        walletAddress,
         apiKeyHash,
         revokedAt: null,
         lastUsedAt: new Date()
@@ -217,7 +218,7 @@ export async function initAuth(
 
       memoryCredentials.set(newHash, {
         agentId,
-        walletAddress: cached?.walletAddress ?? "",
+        walletAddress: cached?.walletAddress ?? null,
         apiKeyHash: newHash,
         revokedAt: null,
         lastUsedAt: new Date()

@@ -107,11 +107,22 @@ await ensurePhysicalServiceSchema();
 await ensureFulfillmentStatusSchema();
 
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
+const walletChainSchema = z.enum(["base", "ethereum", "solana", "arbitrum", "polygon"]);
+const storedWalletProviderSchema = z.enum([
+  "metamask",
+  "walletconnect",
+  "coinbase",
+  "base",
+  "ethereum",
+  "solana",
+  "arbitrum",
+  "polygon",
+]);
 
 const milestoneSchema = z.object({
   idx: z.number().int().positive(),
   title: z.string().min(2),
-  amount: z.number().positive(),
+  amount: z.number().min(0),
   acceptanceCriteria: z.array(z.string()).min(1),
   dueAt: z.string().datetime().optional()
 });
@@ -324,7 +335,7 @@ const proposeDealSchema = z.object({
   sellerAgentId: z.string().uuid(),
   offerId: z.string().uuid(),
   needId: z.string().uuid(),
-  negotiatedTotal: z.number().positive(),
+  negotiatedTotal: z.number().min(0),
   maxPriceDeltaPct: z.number().min(0).max(100),
   milestones: z.array(milestoneSchema).min(1),
   acceptanceTimeoutDays: z.number().int().min(0).max(30).default(0)
@@ -340,16 +351,21 @@ const autopilotSettingsSchema = z.object({
 const counterDealSchema = z.object({
   dealId: z.string().uuid(),
   actorAgentId: z.string().uuid(),
-  negotiatedTotal: z.number().positive(),
+  negotiatedTotal: z.number().min(0),
   milestones: z.array(milestoneSchema).min(1)
 });
 
 const createPaymentIntentSchema = z.object({
   milestoneId: z.string().uuid(),
   buyerAgentId: z.string().uuid(),
-  walletProvider: walletProviderSchema,
-  buyerWalletAddress: z.string().min(4),
-  chain: z.string().default("base")
+  walletProvider: walletProviderSchema.nullable().optional(),
+  buyerWalletAddress: z.string().min(4).nullable().optional(),
+  chain: walletChainSchema.default("base")
+});
+
+const updateAgentWalletSchema = z.object({
+  walletAddress: z.string().min(4),
+  chain: walletChainSchema.default("base"),
 });
 
 const submitDeliverySchema = z.object({
@@ -1122,23 +1138,51 @@ app.post("/api/agents", async (request, reply) => {
     .object({
       handle: z.string().min(3),
       displayName: z.string().min(2),
-      ownerWalletAddress: z.string().min(4),
-      walletProvider: walletProviderSchema,
+      ownerWalletAddress: z.string().min(4).nullable().optional(),
+      walletProvider: storedWalletProviderSchema.nullable().optional(),
       autoBuyEnabled: z.boolean().default(false)
     })
     .parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  const ownerWalletAddress = body.ownerWalletAddress ?? null;
+  const walletProvider = body.walletProvider ?? null;
 
   const [agent] = await sql`
-    INSERT INTO agents (handle, display_name, owner_wallet_address, wallet_provider, auto_buy_enabled)
-    VALUES (${body.handle}, ${body.displayName}, ${body.ownerWalletAddress}, ${body.walletProvider}, ${body.autoBuyEnabled})
-    ON CONFLICT (handle) DO UPDATE SET
+    INSERT INTO agents (id, handle, display_name, owner_wallet_address, wallet_provider, auto_buy_enabled)
+    VALUES (${requesterAgentId}, ${body.handle}, ${body.displayName}, ${ownerWalletAddress}, ${walletProvider}, ${body.autoBuyEnabled})
+    ON CONFLICT (id) DO UPDATE SET
+      handle = EXCLUDED.handle,
       display_name = EXCLUDED.display_name,
-      owner_wallet_address = EXCLUDED.owner_wallet_address,
-      wallet_provider = EXCLUDED.wallet_provider,
+      owner_wallet_address = COALESCE(EXCLUDED.owner_wallet_address, agents.owner_wallet_address),
+      wallet_provider = COALESCE(EXCLUDED.wallet_provider, agents.wallet_provider),
       auto_buy_enabled = EXCLUDED.auto_buy_enabled
     RETURNING *
   `;
   return reply.code(201).send(agent);
+});
+
+app.patch("/api/agents/:id/wallet", async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = updateAgentWalletSchema.parse(request.body);
+  const requesterAgentId = getRequesterAgentId(request, reply);
+  if (!requesterAgentId) return;
+  if (id !== requesterAgentId) {
+    return reply.code(403).send({ error: "Not authorized to update this agent" });
+  }
+
+  const [agent] = await sql`
+    UPDATE agents
+    SET owner_wallet_address = ${body.walletAddress}, wallet_provider = ${body.chain}
+    WHERE id = ${id}
+    RETURNING *
+  `;
+
+  if (!agent) {
+    return reply.code(404).send({ error: "Agent not found" });
+  }
+
+  return agent;
 });
 
 app.get("/api/agents/:id", async (request, reply) => {
@@ -2943,10 +2987,18 @@ app.post("/api/payments/create-intent", async (request, reply) => {
   const mode = isOnChainMode() ? "on-chain" : "simulation";
 
   const [milestone] = await sql`
-    SELECT m.*, d.seller_agent_id, d.buyer_agent_id, d.id AS deal_id, d.status AS deal_status, a.owner_wallet_address AS seller_wallet_address
+    SELECT
+      m.*,
+      d.seller_agent_id,
+      d.buyer_agent_id,
+      d.id AS deal_id,
+      d.status AS deal_status,
+      seller.owner_wallet_address AS seller_wallet_address,
+      buyer.owner_wallet_address AS buyer_wallet_address
     FROM milestones m
     JOIN deals d ON d.id = m.deal_id
-    JOIN agents a ON a.id = d.seller_agent_id
+    JOIN agents seller ON seller.id = d.seller_agent_id
+    JOIN agents buyer ON buyer.id = d.buyer_agent_id
     WHERE m.id = ${body.milestoneId}
   `;
 
@@ -2958,12 +3010,52 @@ app.post("/api/payments/create-intent", async (request, reply) => {
     return reply.code(400).send({ error: `Milestone status ${milestone.status} cannot be funded` });
   }
 
+  const amount = Number(milestone.amount);
+  if (amount > 0) {
+    const buyerProfileWallet = typeof milestone.buyer_wallet_address === "string" ? milestone.buyer_wallet_address : null;
+    const sellerProfileWallet = typeof milestone.seller_wallet_address === "string" ? milestone.seller_wallet_address : null;
+    if (!buyerProfileWallet || !sellerProfileWallet) {
+      return reply.code(400).send({ error: "Paid deals require both buyer and seller wallet addresses" });
+    }
+    if (!body.walletProvider || !body.buyerWalletAddress) {
+      return reply.code(400).send({ error: "Paid deals require buyer wallet details" });
+    }
+  }
+
+  if (amount === 0) {
+    const [intent] = await sql`
+      INSERT INTO payment_intents (
+        milestone_id, buyer_agent_id, seller_agent_id, amount, currency, chain, status,
+        buyer_wallet_provider, buyer_wallet_address, seller_wallet_address, platform_wallet_address, tx_hash
+      ) VALUES (
+        ${body.milestoneId}, ${body.buyerAgentId}, ${milestone.seller_agent_id}, ${milestone.amount}, 'USDC', ${body.chain}, 'funded',
+        ${body.walletProvider ?? "metamask"}, ${body.buyerWalletAddress ?? "free-tier"}, ${milestone.seller_wallet_address ?? "free-tier"}, ${PLATFORM_WALLET || "free-tier"}, ${`free_fund_${randomUUID().slice(0, 8)}`}
+      )
+      RETURNING *
+    `;
+
+    await sql`UPDATE milestones SET status = 'funded' WHERE id = ${body.milestoneId}`;
+    await audit(body.buyerAgentId, "payment.create_intent", "payment_intent", intent.id, idem, body);
+
+    return reply.code(201).send({
+      paymentIntentId: intent.id,
+      status: intent.status,
+      mode: "simulation",
+      chain: intent.chain,
+      amount: intent.amount,
+      currency: "USDC",
+      feePct: PLATFORM_FEE_PCT,
+      platformWallet: PLATFORM_WALLET,
+      provider: "usdc",
+    });
+  }
+
   if (mode === "on-chain") {
     // Generate unsigned transaction data for the buyer to sign
     const txData = generateFundingTransaction(
       milestone.deal_id,
       body.milestoneId,
-      Number(milestone.amount),
+      amount,
       milestone.seller_wallet_address as Address,
     );
 

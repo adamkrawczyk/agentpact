@@ -263,4 +263,116 @@ describe("Deals API", () => {
       expect(afterScore).toBe(beforeScore + 4);
     });
   });
+
+  describe("POST /api/payments/create-intent", () => {
+    async function setupAcceptedDeal(params?: {
+      buyerHasWallet?: boolean;
+      sellerHasWallet?: boolean;
+      amount?: number;
+    }) {
+      const { app, sql } = await createTestApp();
+      await cleanDatabase();
+
+      const paidBuyerId = randomUUID();
+      const paidSellerId = randomUUID();
+      const paidBuyerHeaders = await getAuthHeadersForAgent(paidBuyerId, {
+        walletAddress: params?.buyerHasWallet === false ? null : undefined
+      });
+      const paidSellerHeaders = await getAuthHeadersForAgent(paidSellerId, {
+        walletAddress: params?.sellerHasWallet === false ? null : undefined
+      });
+
+      const offerRes = await app.inject({
+        method: "POST",
+        url: "/api/offers",
+        headers: paidSellerHeaders,
+        payload: generateTestOffer(paidSellerId)
+      });
+      const paidOfferId = (JSON.parse(offerRes.body) as { id: string }).id;
+
+      const needRes = await app.inject({
+        method: "POST",
+        url: "/api/needs",
+        headers: paidBuyerHeaders,
+        payload: generateTestNeed(paidBuyerId)
+      });
+      const paidNeedId = (JSON.parse(needRes.body) as { id: string }).id;
+
+      const amount = params?.amount ?? 120;
+      const proposeRes = await app.inject({
+        method: "POST",
+        url: "/api/deals/propose",
+        headers: paidBuyerHeaders,
+        payload: {
+          buyerAgentId: paidBuyerId,
+          sellerAgentId: paidSellerId,
+          offerId: paidOfferId,
+          needId: paidNeedId,
+          negotiatedTotal: amount,
+          maxPriceDeltaPct: 20,
+          milestones: [{ idx: 1, title: "Delivery", amount, acceptanceCriteria: ["Done"] }]
+        }
+      });
+      expect(proposeRes.statusCode).toBe(201);
+      const dealId = (JSON.parse(proposeRes.body) as { id: string }).id;
+
+      const acceptRes = await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/accept`,
+        headers: paidSellerHeaders,
+        payload: { actorAgentId: paidSellerId }
+      });
+      expect(acceptRes.statusCode).toBe(200);
+
+      const [milestone] = await sql`SELECT id FROM milestones WHERE deal_id = ${dealId} ORDER BY idx LIMIT 1`;
+      return { app, paidBuyerId, paidSellerId, paidBuyerHeaders, milestoneId: milestone.id };
+    }
+
+    it("rejects paid funding when either party is missing a wallet", async () => {
+      const { app, paidBuyerId, paidBuyerHeaders, milestoneId } = await setupAcceptedDeal({
+        buyerHasWallet: false
+      });
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/payments/create-intent",
+        headers: paidBuyerHeaders,
+        payload: {
+          milestoneId,
+          buyerAgentId: paidBuyerId,
+          walletProvider: "metamask",
+          buyerWalletAddress: "0x1234567890123456789012345678901234567890",
+          chain: "base"
+        }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body)).toEqual({
+        error: "Paid deals require both buyer and seller wallet addresses"
+      });
+    });
+
+    it("allows free funding without wallet details", async () => {
+      const { app, paidBuyerId, paidBuyerHeaders, milestoneId } = await setupAcceptedDeal({
+        buyerHasWallet: false,
+        sellerHasWallet: false,
+        amount: 0
+      });
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/payments/create-intent",
+        headers: paidBuyerHeaders,
+        payload: {
+          milestoneId,
+          buyerAgentId: paidBuyerId
+        }
+      });
+
+      expect(response.statusCode).toBe(201);
+      const body = JSON.parse(response.body) as { amount: number; status: string };
+      expect(body.amount).toBe(0);
+      expect(body.status).toBe("funded");
+    });
+  });
 });

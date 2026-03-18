@@ -11,14 +11,20 @@ export async function getAuthHeaders() {
   return getAuthHeadersForAgent(TEST_AGENT_ID);
 }
 
-export async function getAuthHeadersForAgent(agentId: string) {
+export async function getAuthHeadersForAgent(agentId: string, options?: { walletAddress?: string | null }) {
+  const payload: { agentId: string; walletAddress?: string | null } = {
+    agentId
+  };
+  if (options && "walletAddress" in options) {
+    payload.walletAddress = options.walletAddress;
+  } else {
+    payload.walletAddress = "0x1234567890123456789012345678901234567890";
+  }
+
   const registerRes = await app.inject({
     method: "POST",
     url: "/api/auth/register",
-    payload: {
-      agentId,
-      walletAddress: "0x1234567890123456789012345678901234567890"
-    }
+    payload
   });
   const { apiKey } = JSON.parse(registerRes.body) as { apiKey: string };
   return { "x-api-key": apiKey };
