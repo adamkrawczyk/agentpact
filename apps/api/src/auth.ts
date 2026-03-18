@@ -9,7 +9,7 @@ const JWT_SECRET = process.env.JWT_SECRET ?? "dev_secret_change_in_production";
 
 const registerSchema = z.object({
   agentId: z.string().uuid(),
-  walletAddress: z.string().min(4)
+  walletAddress: z.string().min(4).optional()
 });
 
 type CredentialRecord = {
@@ -112,6 +112,7 @@ export async function initAuth(
     },
     async (request, reply) => {
       const body = registerSchema.parse(request.body);
+      const walletAddress = body.walletAddress ?? "";
       const apiKey = randomBytes(32).toString("hex");
       const apiKeyHash = hashApiKey(apiKey);
 
@@ -119,13 +120,13 @@ export async function initAuth(
         // Auto-create agent if it doesn't exist (agents table FK required)
         await db`
           INSERT INTO agents (id, handle, display_name, owner_wallet_address, wallet_provider)
-          VALUES (${body.agentId}, ${'agent-' + body.agentId}, ${'Agent ' + body.agentId.slice(0, 8)}, ${body.walletAddress}, 'metamask')
+          VALUES (${body.agentId}, ${'agent-' + body.agentId}, ${'Agent ' + body.agentId.slice(0, 8)}, ${walletAddress}, 'metamask')
           ON CONFLICT (id) DO NOTHING
         `;
 
         await db`
           INSERT INTO agent_credentials (agent_id, wallet_address, api_key_hash)
-          VALUES (${body.agentId}, ${body.walletAddress}, ${apiKeyHash})
+          VALUES (${body.agentId}, ${walletAddress}, ${apiKeyHash})
           ON CONFLICT (agent_id) DO UPDATE
             SET api_key_hash = EXCLUDED.api_key_hash,
                 wallet_address = EXCLUDED.wallet_address,
@@ -138,7 +139,7 @@ export async function initAuth(
 
       memoryCredentials.set(apiKeyHash, {
         agentId: body.agentId,
-        walletAddress: body.walletAddress,
+        walletAddress,
         apiKeyHash,
         revokedAt: null,
         lastUsedAt: new Date()

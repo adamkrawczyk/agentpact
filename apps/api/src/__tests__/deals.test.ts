@@ -70,6 +70,35 @@ describe("Deals API", () => {
       const milestones = await sql`SELECT * FROM milestones WHERE deal_id = ${deal.id}`;
       expect(milestones.length).toBe(2);
     });
+
+    it("should allow free-tier deals with zero total regardless of the offer base price", async () => {
+      const { app, sql } = await createTestApp();
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/deals/propose",
+        headers: buyerHeaders,
+        payload: {
+          buyerAgentId: buyerId,
+          sellerAgentId: sellerId,
+          offerId,
+          needId,
+          negotiatedTotal: 0,
+          maxPriceDeltaPct: 20,
+          milestones: [{ idx: 1, title: "Reputation exchange", amount: 0, acceptanceCriteria: ["Done"] }]
+        }
+      });
+
+      expect(response.statusCode).toBe(201);
+
+      const [deal] = await sql`
+        SELECT id, status, is_free_tier FROM deals
+        WHERE buyer_agent_id = ${buyerId} AND seller_agent_id = ${sellerId}
+        ORDER BY created_at DESC LIMIT 1
+      `;
+      expect(deal.status).toBe("proposed");
+      expect(deal.is_free_tier).toBe(true);
+    });
   });
 
   describe("POST /api/deals/:id/accept", () => {
@@ -106,6 +135,44 @@ describe("Deals API", () => {
 
       const [updated] = await sql`SELECT status FROM deals WHERE id = ${deal.id}`;
       expect(updated.status).toBe("active");
+    });
+
+    it("should move accepted free-tier deals directly to active without funding", async () => {
+      const { app, sql } = await createTestApp();
+      const proposeRes = await app.inject({
+        method: "POST",
+        url: "/api/deals/propose",
+        headers: buyerHeaders,
+        payload: {
+          buyerAgentId: buyerId,
+          sellerAgentId: sellerId,
+          offerId,
+          needId,
+          negotiatedTotal: 0,
+          maxPriceDeltaPct: 20,
+          milestones: [{ idx: 1, title: "Delivery", amount: 0, acceptanceCriteria: ["Done"] }]
+        }
+      });
+      const dealId = (JSON.parse(proposeRes.body) as { id: string }).id;
+
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/accept`,
+        headers: sellerHeaders,
+        payload: { actorAgentId: sellerId }
+      });
+      expect(response.statusCode).toBe(200);
+
+      const [deal] = await sql`SELECT status, is_free_tier FROM deals WHERE id = ${dealId}`;
+      expect(deal.status).toBe("active");
+      expect(deal.is_free_tier).toBe(true);
+
+      const [milestone] = await sql`SELECT status, amount FROM milestones WHERE deal_id = ${dealId} ORDER BY idx LIMIT 1`;
+      expect(milestone.status).toBe("in_progress");
+      expect(Number(milestone.amount)).toBe(0);
+
+      const paymentIntents = await sql`SELECT id FROM payment_intents WHERE milestone_id = ${milestone.id}`;
+      expect(paymentIntents).toHaveLength(0);
     });
   });
 
@@ -261,6 +328,113 @@ describe("Deals API", () => {
       const [after] = await sql`SELECT reputation_score FROM agents WHERE id = ${sellerId}`;
       const afterScore = Number(after.reputation_score ?? 0);
       expect(afterScore).toBe(beforeScore + 4);
+    });
+
+    it("confirm-delivery completes free-tier deals without releasing payment", async () => {
+      const { app, sql } = await createTestApp();
+      const proposeRes = await app.inject({
+        method: "POST",
+        url: "/api/deals/propose",
+        headers: buyerHeaders,
+        payload: {
+          buyerAgentId: buyerId,
+          sellerAgentId: sellerId,
+          offerId,
+          needId,
+          negotiatedTotal: 0,
+          maxPriceDeltaPct: 20,
+          milestones: [{ idx: 1, title: "Reputation exchange", amount: 0, acceptanceCriteria: ["Done"] }]
+        }
+      });
+      const dealId = (JSON.parse(proposeRes.body) as { id: string }).id;
+
+      const acceptRes = await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/accept`,
+        headers: sellerHeaders,
+        payload: { actorAgentId: sellerId }
+      });
+      expect(acceptRes.statusCode).toBe(200);
+
+      const provideRes = await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/fulfillment`,
+        headers: sellerHeaders,
+        payload: {
+          agentId: sellerId,
+          fulfillmentData: {
+            description: "Free-tier delivery proof"
+          }
+        }
+      });
+      expect(provideRes.statusCode).toBe(200);
+
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/confirm-delivery`,
+        headers: buyerHeaders,
+        payload: {
+          agentId: buyerId,
+          rating: 5
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as { release: { action: string } };
+      expect(body.release.action).toBe("completed_without_onchain_release");
+
+      const [deal] = await sql`SELECT status, is_free_tier FROM deals WHERE id = ${dealId}`;
+      expect(deal.status).toBe("completed");
+      expect(deal.is_free_tier).toBe(true);
+
+      const [milestone] = await sql`SELECT status FROM milestones WHERE deal_id = ${dealId} ORDER BY idx LIMIT 1`;
+      expect(milestone.status).toBe("accepted");
+
+      const paymentIntents = await sql`SELECT id FROM payment_intents WHERE milestone_id IN (SELECT id FROM milestones WHERE deal_id = ${dealId})`;
+      expect(paymentIntents).toHaveLength(0);
+    });
+  });
+
+  describe("POST /api/deals/:id/close", () => {
+    it("should require verified fulfillment for free-tier deals before close", async () => {
+      const { app } = await createTestApp();
+      const proposeRes = await app.inject({
+        method: "POST",
+        url: "/api/deals/propose",
+        headers: buyerHeaders,
+        payload: {
+          buyerAgentId: buyerId,
+          sellerAgentId: sellerId,
+          offerId,
+          needId,
+          negotiatedTotal: 0,
+          maxPriceDeltaPct: 20,
+          milestones: [{ idx: 1, title: "Reputation exchange", amount: 0, acceptanceCriteria: ["Done"] }]
+        }
+      });
+      const dealId = (JSON.parse(proposeRes.body) as { id: string }).id;
+
+      const acceptRes = await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/accept`,
+        headers: sellerHeaders,
+        payload: {
+          actorAgentId: sellerId,
+        }
+      });
+      expect(acceptRes.statusCode).toBe(200);
+
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/close`,
+        headers: buyerHeaders,
+        payload: {
+          agentId: buyerId,
+          rating: 5
+        }
+      });
+
+      expect(response.statusCode).toBe(400);
     });
   });
 });

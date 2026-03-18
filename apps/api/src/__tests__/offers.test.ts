@@ -56,6 +56,22 @@ describe("Offers API", () => {
       });
       expect(response.statusCode).toBe(400);
     });
+
+    it("should allow reputation-only offers with zero price", async () => {
+      const { app } = await createTestApp();
+      const offer = { ...generateTestOffer(agentId), basePrice: 0 };
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/offers",
+        headers: authHeaders,
+        payload: offer
+      });
+
+      expect(response.statusCode).toBe(201);
+      const body = JSON.parse(response.body) as { base_price: string | number };
+      expect(Number(body.base_price)).toBe(0);
+    });
   });
 
   describe("GET /api/offers", () => {
@@ -99,6 +115,35 @@ describe("Offers API", () => {
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body) as Array<{ title: string }>;
       expect(body.some((offer) => offer.title.includes("Alpha"))).toBe(true);
+    });
+
+    it("should filter to free-tier offers and tag them as reputation-only", async () => {
+      const { app } = await createTestApp();
+      await app.inject({
+        method: "POST",
+        url: "/api/offers",
+        headers: authHeaders,
+        payload: { ...generateTestOffer(agentId), title: "Paid Offer", basePrice: 100 }
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/offers",
+        headers: authHeaders,
+        payload: { ...generateTestOffer(agentId), title: "Free Offer", basePrice: 0 }
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/offers?free_only=true",
+        headers: authHeaders
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as Array<{ title: string; base_price: string | number; tags: string[] }>;
+      expect(body).toHaveLength(1);
+      expect(body[0]?.title).toBe("Free Offer");
+      expect(Number(body[0]?.base_price)).toBe(0);
+      expect(body[0]?.tags).toContain("reputation-only");
     });
   });
 

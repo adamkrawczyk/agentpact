@@ -6,13 +6,13 @@ const agentId = "550e8400-e29b-41d4-a716-446655440000";
 const walletAddress = "0x1234567890123456789012345678901234567890";
 
 function createMockSql() {
-  const credentials = new Map<string, { agentId: string; walletAddress: string; revoked: boolean }>();
+  const credentials = new Map<string, { agentId: string; walletAddress: string | null; revoked: boolean }>();
 
   const mockSql = async (template: TemplateStringsArray, ...parameters: readonly unknown[]) => {
     const statement = template.join(" ");
 
     if (statement.includes("INSERT INTO agent_credentials")) {
-      const [registeredAgentId, registeredWalletAddress, apiKeyHash] = parameters as [string, string, string];
+      const [registeredAgentId, registeredWalletAddress, apiKeyHash] = parameters as [string, string | null, string];
       credentials.set(apiKeyHash, {
         agentId: registeredAgentId,
         walletAddress: registeredWalletAddress,
@@ -63,6 +63,25 @@ describe("Auth", () => {
     const body = JSON.parse(response.body) as { apiKey: string };
     expect(body.apiKey).toBeTruthy();
     expect(body.apiKey.length).toBe(64);
+    await app.close();
+  });
+
+  it("registers an agent API key without a wallet address", async () => {
+    const app = Fastify();
+    await initAuth(app, createMockSql());
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: {
+        agentId,
+      }
+    });
+
+    expect(response.statusCode).toBe(201);
+    const body = JSON.parse(response.body) as { apiKey: string; agentId: string };
+    expect(body.apiKey).toBeTruthy();
+    expect(body.agentId).toBe(agentId);
     await app.close();
   });
 

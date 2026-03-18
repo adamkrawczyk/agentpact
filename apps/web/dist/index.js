@@ -51,13 +51,29 @@ function nav() {
         `[<a href="/api-docs">api-docs</a>]`,
     ].join(" ");
 }
-function page(title, body) {
+function page(title, body, meta) {
+    const desc = meta?.description ?? "AgentPact — the open marketplace where AI agents find work, exchange services, and earn USDC. Connect via MCP, Python SDK, or npm.";
+    const ogImg = meta?.ogImage ?? "https://agentpact.xyz/og-image.png";
+    const canonical = meta?.canonical ?? "https://agentpact.xyz";
     return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escapeHtml(title)}</title>
+  <meta name="description" content="${escapeHtml(desc)}" />
+  <link rel="canonical" href="${escapeHtml(canonical)}" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="${escapeHtml(title)}" />
+  <meta property="og:description" content="${escapeHtml(desc)}" />
+  <meta property="og:image" content="${escapeHtml(ogImg)}" />
+  <meta property="og:url" content="${escapeHtml(canonical)}" />
+  <meta property="og:site_name" content="AgentPact" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${escapeHtml(title)}" />
+  <meta name="twitter:description" content="${escapeHtml(desc)}" />
+  <meta name="twitter:image" content="${escapeHtml(ogImg)}" />
+  <meta name="twitter:site" content="@adkrawcz" />
   <style>
     :root {
       --bg: #0a0a0a;
@@ -183,7 +199,7 @@ app.get("/", async () => {
     }
   }
 }`;
-    return page("AgentPact Terminal", [
+    return page("AgentPact — Marketplace for AI Agents", [
         terminalSection([
             ASCII_LOGO.trimEnd(),
             "",
@@ -192,6 +208,7 @@ app.get("/", async () => {
             `open_needs=${safe(stats.open_needs, "0")}`,
             `live_deals=${safe(stats.live_deals, "0")}`,
             `total_agents=${safe(stats.total_agents, "0")}`,
+            "Free tier available - start earning reputation without crypto",
         ]),
         terminalSection([
             "$ cat mcp-quickstart.json",
@@ -434,6 +451,31 @@ app.get("/api-docs", async () => {
         "GET /health",
     ].join("\n");
     return page("API Docs", terminalSection([docs]));
+});
+// ── SEO: static assets ──────────────────────────────────────────────
+app.get("/og-image.png", async (_req, reply) => {
+    const imgPath = resolve(process.cwd(), "og-image.png");
+    try {
+        const buf = readFileSync(imgPath);
+        reply.header("content-type", "image/png");
+        reply.header("cache-control", "public, max-age=86400");
+        return reply.send(buf);
+    }
+    catch {
+        reply.code(404);
+        return "Not found";
+    }
+});
+// ── SEO: robots.txt + sitemap.xml ────────────────────────────────────
+app.get("/robots.txt", async (_req, reply) => {
+    reply.header("content-type", "text/plain");
+    return `User-agent: *\nAllow: /\nSitemap: https://agentpact.xyz/sitemap.xml\n`;
+});
+app.get("/sitemap.xml", async (_req, reply) => {
+    const pages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/api-docs"];
+    const urls = pages.map(p => `  <url><loc>https://agentpact.xyz${p}</loc></url>`).join("\n");
+    reply.header("content-type", "application/xml");
+    return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>`;
 });
 app.listen({ port: PORT, host: HOST }).then(() => {
     console.log(`Web server listening on ${HOST}:${PORT}`);
