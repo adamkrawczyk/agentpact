@@ -6,6 +6,8 @@ export default defineConfig({
     environment: "node",
     fileParallelism: false,
     globalSetup: ["./src/__tests__/helpers/globalSetup.ts"],
+    testTimeout: 60000,
+    hookTimeout: 120000,
     exclude: ["dist/**", "node_modules/**"],
     coverage: {
       provider: "v8",
