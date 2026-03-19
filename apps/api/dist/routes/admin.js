@@ -127,4 +127,129 @@ export default async function adminRoutes(app) {
             reason: body.reason || "admin force-release",
         };
     });
+    // ── WIS-107: Mark agent as internal (WiseChef-owned) ──────────────────────
+    app.patch("/api/admin/agents/:id/mark-internal", async (request, reply) => {
+        if (!checkAdminKey(request, reply))
+            return;
+        const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+        const body = z.object({ isInternal: z.boolean() }).parse(request.body);
+        const [agent] = await sql `
+      UPDATE agents
+      SET is_internal = ${body.isInternal}
+      WHERE id = ${id}
+      RETURNING id, handle, display_name, is_internal
+    `;
+        if (!agent)
+            return reply.code(404).send({ error: "Agent not found" });
+        return { ok: true, agent };
+    });
+    // ── WIS-107: Bulk-mark agents by wallet prefix / handle pattern ──────────
+    app.post("/api/admin/agents/bulk-mark-internal", async (request, reply) => {
+        if (!checkAdminKey(request, reply))
+            return;
+        const body = z.object({
+            walletAddresses: z.array(z.string()).optional(),
+            handlePatterns: z.array(z.string()).optional(),
+            isInternal: z.boolean(),
+        }).parse(request.body);
+        const results = [];
+        if (body.walletAddresses && body.walletAddresses.length > 0) {
+            const wallets = body.walletAddresses;
+            const rows = await sql `
+        UPDATE agents
+        SET is_internal = ${body.isInternal}
+        WHERE owner_wallet_address = ANY(${wallets}::text[])
+        RETURNING id, handle, is_internal
+      `;
+            results.push(...rows.map(r => ({
+                id: String(r.id), handle: String(r.handle), isInternal: Boolean(r.is_internal)
+            })));
+        }
+        if (body.handlePatterns && body.handlePatterns.length > 0) {
+            for (const pattern of body.handlePatterns) {
+                const rows = await sql `
+          UPDATE agents
+          SET is_internal = ${body.isInternal}
+          WHERE handle ILIKE ${"%" + pattern + "%"}
+          RETURNING id, handle, is_internal
+        `;
+                results.push(...rows.map(r => ({
+                    id: String(r.id), handle: String(r.handle), isInternal: Boolean(r.is_internal)
+                })));
+            }
+        }
+        return { ok: true, updated: results.length, agents: results };
+    });
+    // ── WIS-107: Real traction metrics (external agents only) ─────────────────
+    app.get("/api/admin/traction", async (request, reply) => {
+        if (!checkAdminKey(request, reply))
+            return;
+        const [overview] = await sql `
+      SELECT
+        COUNT(*)::int AS total_agents,
+        COUNT(*) FILTER (WHERE NOT is_internal)::int AS external_agents,
+        COUNT(*) FILTER (WHERE is_internal)::int AS internal_agents
+      FROM agents
+    `;
+        const [offerStats] = await sql `
+      SELECT
+        COUNT(*)::int AS total_active_offers,
+        COUNT(*) FILTER (WHERE a.is_internal = FALSE)::int AS external_active_offers
+      FROM offers o
+      JOIN agents a ON a.id = o.agent_id
+      WHERE o.status = 'active'
+    `;
+        const [dealStats] = await sql `
+      SELECT
+        COUNT(*)::int AS total_deals,
+        COUNT(*) FILTER (
+          WHERE a_buyer.is_internal = FALSE OR a_seller.is_internal = FALSE
+        )::int AS deals_with_external_party,
+        COUNT(*) FILTER (
+          WHERE a_buyer.is_internal = FALSE AND a_seller.is_internal = FALSE
+        )::int AS fully_external_deals
+      FROM deals d
+      JOIN agents a_buyer ON a_buyer.id = d.buyer_agent_id
+      JOIN agents a_seller ON a_seller.id = d.seller_agent_id
+    `;
+        const [needStats] = await sql `
+      SELECT
+        COUNT(*)::int AS total_open_needs,
+        COUNT(*) FILTER (WHERE a.is_internal = FALSE)::int AS external_open_needs
+      FROM needs n
+      JOIN agents a ON a.id = n.agent_id
+      WHERE n.status = 'open'
+    `;
+        const recentExternal = await sql `
+      SELECT id, handle, display_name, created_at, reputation_score, is_internal
+      FROM agents
+      WHERE is_internal = FALSE
+      ORDER BY created_at DESC
+      LIMIT 10
+    `;
+        return {
+            agents: {
+                total: overview.total_agents,
+                external: overview.external_agents,
+                internal: overview.internal_agents,
+                externalPct: overview.total_agents > 0
+                    ? Number(((overview.external_agents / overview.total_agents) * 100).toFixed(1))
+                    : 0,
+            },
+            offers: {
+                totalActive: offerStats.total_active_offers,
+                externalActive: offerStats.external_active_offers,
+            },
+            deals: {
+                total: dealStats.total_deals,
+                withExternalParty: dealStats.deals_with_external_party,
+                fullyExternal: dealStats.fully_external_deals,
+            },
+            needs: {
+                totalOpen: needStats.total_open_needs,
+                externalOpen: needStats.external_open_needs,
+            },
+            recentExternalAgents: recentExternal,
+        };
+    });
 }

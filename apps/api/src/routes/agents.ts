@@ -85,9 +85,15 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       })
       .parse(request.body);
 
+    // Auto-flag agent as internal if their wallet matches the platform owner wallet (env: PLATFORM_OWNER_WALLET)
+    const platformOwnerWallet = process.env.PLATFORM_OWNER_WALLET ?? null;
+    const isInternal = platformOwnerWallet
+      ? body.ownerWalletAddress.toLowerCase() === platformOwnerWallet.toLowerCase()
+      : false;
+
     const [agent] = await sql`
-      INSERT INTO agents (handle, display_name, owner_wallet_address, wallet_provider, auto_buy_enabled)
-      VALUES (${body.handle}, ${body.displayName}, ${body.ownerWalletAddress}, ${body.walletProvider}, ${body.autoBuyEnabled})
+      INSERT INTO agents (handle, display_name, owner_wallet_address, wallet_provider, auto_buy_enabled, is_internal)
+      VALUES (${body.handle}, ${body.displayName}, ${body.ownerWalletAddress}, ${body.walletProvider}, ${body.autoBuyEnabled}, ${isInternal})
       ON CONFLICT (handle) DO UPDATE SET
         display_name = EXCLUDED.display_name,
         owner_wallet_address = EXCLUDED.owner_wallet_address,

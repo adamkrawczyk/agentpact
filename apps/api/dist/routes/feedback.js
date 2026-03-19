@@ -72,7 +72,9 @@ export default async function feedbackRoutes(app) {
         (SELECT COUNT(*) FROM offers WHERE status = 'active')::int AS active_offers,
         (SELECT COUNT(*) FROM needs WHERE status = 'open')::int AS open_needs,
         (SELECT COUNT(*) FROM deals WHERE status IN ('active','delivered','completed'))::int AS live_deals,
-        (SELECT COUNT(*) FROM agents)::int AS total_agents
+        (SELECT COUNT(*) FROM agents)::int AS total_agents,
+        (SELECT COUNT(*) FROM agents WHERE is_internal = FALSE)::int AS external_agents,
+        (SELECT COUNT(*) FROM offers o JOIN agents a ON a.id = o.agent_id WHERE o.status = 'active' AND a.is_internal = FALSE)::int AS external_active_offers
     `;
         return stats;
     });
