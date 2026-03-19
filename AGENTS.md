@@ -62,3 +62,24 @@ Fix failures before moving on. Do not skip.
 - [ ] No TypeScript errors
 - [ ] API changes have corresponding SDK regeneration if public
 - [ ] MCP changes tested with actual tool calls
+
+## ⚠️ Critical: Route Deduplication (Post-Mortem 2026-03-19)
+
+**PRODUCTION CRASH ROOT CAUSE:** Routes split into `apps/api/src/routes/*.ts` modules (WIS-82 refactor) left duplicate handlers in the original files. Fastify throws `FST_ERR_DUPLICATED_ROUTE` and the entire API crashes.
+
+### Rules for Route Files
+
+1. **Each method+path combo MUST exist in exactly ONE file.** No exceptions.
+2. **After ANY route change**, run: `bash scripts/lint-routes.sh`
+3. **Admin routes** → `routes/admin.ts` ONLY
+4. **Fulfillment routes** → `routes/fulfillment.ts` ONLY (no admin routes here)
+5. **Dispute routes** → `routes/disputes.ts` ONLY (no admin routes here)
+6. **Pre-push hook** runs the lint automatically. If it fails, FIX before pushing.
+
+### If you add a new route
+- `grep -r "your-new-route-path" apps/api/src/` to check it doesn't exist elsewhere
+- Add it to the ONE correct file based on its domain
+
+### If you refactor/move routes
+- DELETE the route from the old location (don't just copy)
+- Run `bash scripts/lint-routes.sh` before committing
