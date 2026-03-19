@@ -5,6 +5,12 @@ import type { Deps } from "./types.js";
 import { createOfferSchema, autopilotSettingsSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, enrichOfferRow, parseBooleanish } from "./utils.js";
 
+/** Maximum active offers an agent may have at one time (anti-spam). */
+const MAX_ACTIVE_OFFERS_PER_AGENT = 15;
+
+/** Auto-archive offers with zero deals older than this many days. */
+const STALE_OFFER_DAYS = 30;
+
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
   await sql`
     INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
@@ -51,6 +57,21 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (body.agentId !== requesterAgentId) {
       return reply.code(403).send({ error: "Not authorized to act as this agent" });
     }
+
+    // ── Rate limit: cap active offers per agent ─────────────────────────────
+    const [{ active_count }] = await sql`
+      SELECT COUNT(*)::int AS active_count
+      FROM offers
+      WHERE agent_id = ${body.agentId} AND status = 'active'
+    `;
+    if (Number(active_count) >= MAX_ACTIVE_OFFERS_PER_AGENT) {
+      return reply.code(429).send({
+        error: `Agent already has ${active_count} active offers (max ${MAX_ACTIVE_OFFERS_PER_AGENT}). Archive some before creating new ones.`,
+        activeCount: Number(active_count),
+        limit: MAX_ACTIVE_OFFERS_PER_AGENT,
+      });
+    }
+
     const location = body.location ?? null;
 
     const [offer] = await sql`
@@ -150,10 +171,129 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     return rows.map((row) => enrichOfferRow(row as Record<string, unknown>));
   });
 
+  /**
+   * GET /api/offers/grouped
+   * Returns one card per category with ranked providers and aggregate stats.
+   * Filters out categories dominated by a single agent (spam detection).
+   *
+   * Response shape per category:
+   * {
+   *   category: string,
+   *   offerCount: number,
+   *   agentCount: number,
+   *   minPrice: number,
+   *   maxPrice: number,
+   *   avgPrice: number,
+   *   topProviders: [{ agentId, handle, offerCount, minPrice, reputationScore }],
+   *   sampleOffer: {...}   // cheapest offer in category
+   * }
+   */
+  app.get("/api/offers/grouped", async (request) => {
+    const q = z.object({
+      query: z.string().optional(),
+    }).parse(request.query ?? {});
+
+    const queryFilter = `%${q.query ?? ""}%`;
+
+    const rows = await sql`
+      SELECT
+        o.category,
+        COUNT(o.id)::int                          AS offer_count,
+        COUNT(DISTINCT o.agent_id)::int           AS agent_count,
+        MIN(o.base_price)::float                  AS min_price,
+        MAX(o.base_price)::float                  AS max_price,
+        AVG(o.base_price)::float                  AS avg_price,
+        -- Sample offer: cheapest active, soonest SLA
+        (
+          SELECT row_to_json(s)
+          FROM (
+            SELECT s2.id, s2.title, s2.description_md, s2.base_price, s2.sla_days, s2.tags, s2.agent_id
+            FROM offers s2
+            WHERE s2.category = o.category AND s2.status = 'active'
+              AND (s2.title ILIKE ${queryFilter} OR s2.description_md ILIKE ${queryFilter} OR ${q.query ?? ""} = '')
+            ORDER BY s2.base_price ASC, s2.sla_days ASC
+            LIMIT 1
+          ) s
+        ) AS sample_offer,
+        -- Top providers: up to 5, ranked by reputation then offer count
+        (
+          SELECT json_agg(p ORDER BY p.reputation_score DESC, p.offer_count DESC)
+          FROM (
+            SELECT
+              a.id        AS agent_id,
+              a.handle,
+              a.display_name,
+              COUNT(o2.id)::int AS offer_count,
+              MIN(o2.base_price)::float AS min_price,
+              COALESCE(a.reputation_score, 0)::float AS reputation_score
+            FROM offers o2
+            JOIN agents a ON a.id = o2.agent_id
+            WHERE o2.category = o.category AND o2.status = 'active'
+            GROUP BY a.id, a.handle, a.display_name, a.reputation_score
+            ORDER BY a.reputation_score DESC, COUNT(o2.id) DESC
+            LIMIT 5
+          ) p
+        ) AS top_providers
+      FROM offers o
+      WHERE o.status = 'active'
+        AND (
+          ${q.query ?? ""} = ''
+          OR o.title ILIKE ${queryFilter}
+          OR o.description_md ILIKE ${queryFilter}
+          OR o.category ILIKE ${queryFilter}
+        )
+      GROUP BY o.category
+      ORDER BY offer_count DESC
+    `;
+
+    return rows;
+  });
+
   app.get("/api/offers/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     const [offer] = await sql`SELECT * FROM offers WHERE id = ${id}`;
     if (!offer) return reply.code(404).send({ error: "Offer not found" });
     return enrichOfferRow(offer as Record<string, unknown>);
+  });
+
+  /**
+   * POST /api/admin/offers/auto-archive-stale
+   * Archives offers that have zero associated deals and are older than STALE_OFFER_DAYS.
+   * Admin-key protected.
+   */
+  app.post("/api/admin/offers/auto-archive-stale", async (request, reply) => {
+    const adminKey = process.env.ADMIN_API_KEY;
+    const authHeader =
+      (request.headers["x-admin-key"] as string | undefined) ||
+      String(request.headers["authorization"] ?? "").replace("Bearer ", "");
+    if (adminKey && authHeader !== adminKey) {
+      return reply.code(403).send({ error: "Invalid admin key" });
+    }
+
+    // Archive active offers older than STALE_OFFER_DAYS with no deals
+    const archived = await sql`
+      UPDATE offers
+      SET status = 'archived', updated_at = NOW()
+      WHERE status = 'active'
+        AND created_at < NOW() - (${STALE_OFFER_DAYS} || ' days')::interval
+        AND id NOT IN (
+          SELECT DISTINCT offer_id FROM deals WHERE offer_id IS NOT NULL
+        )
+      RETURNING id, agent_id, title, category, created_at
+    `;
+
+    app.log.info({ count: archived.length }, "auto-archive-stale: archived offers");
+
+    return {
+      archivedCount: archived.length,
+      staleDays: STALE_OFFER_DAYS,
+      archivedOffers: archived.map((o) => ({
+        id: o.id,
+        agentId: o.agent_id,
+        title: o.title,
+        category: o.category,
+        createdAt: o.created_at,
+      })),
+    };
   });
 }
