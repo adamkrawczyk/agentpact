@@ -350,6 +350,86 @@ export async function resolveDisputeOnChain(
   return { txHash };
 }
 
+// ── Multi-chain support ───────────────────────────────────────────────────────
+
+/** Supported chains and their USDC contract addresses. */
+export const CHAIN_CONFIG: Record<string, { usdcAddress: Address; rpcUrl: string; name: string }> = {
+  base: {
+    usdcAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    rpcUrl: process.env.BASE_RPC_URL ?? "https://mainnet.base.org",
+    name: "Base",
+  },
+  arbitrum: {
+    usdcAddress: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    rpcUrl: process.env.ARBITRUM_RPC_URL ?? "https://arb1.arbitrum.io/rpc",
+    name: "Arbitrum One",
+  },
+  polygon: {
+    usdcAddress: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+    rpcUrl: process.env.POLYGON_RPC_URL ?? "https://polygon-rpc.com",
+    name: "Polygon",
+  },
+  solana: {
+    // USDC-SPL on Solana mainnet
+    usdcAddress: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" as Address,
+    rpcUrl: process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
+    name: "Solana",
+  },
+};
+
+/**
+ * Infer the blockchain from a wallet address format.
+ *
+ * - EVM addresses: "0x" prefix + 40 hex chars → base (default EVM)
+ * - Solana addresses: base58, 32-44 chars, no "0x" prefix
+ *
+ * The caller can optionally pass an explicit `chainHint` (e.g. "arbitrum") which
+ * overrides auto-detection when the same wallet address format appears on multiple EVM chains.
+ */
+export function resolveChainFromAddress(
+  walletAddress: string,
+  chainHint?: string,
+): string {
+  if (chainHint && CHAIN_CONFIG[chainHint]) {
+    return chainHint;
+  }
+
+  if (/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {
+    // EVM address — default to base unless a hint says otherwise
+    return "base";
+  }
+
+  // Solana: base58 alphabet, 32-44 characters
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(walletAddress)) {
+    return "solana";
+  }
+
+  // Fallback
+  return "base";
+}
+
+/**
+ * Validate that a wallet address is syntactically valid for the given chain.
+ * Returns `{ valid: true }` or `{ valid: false, reason: string }`.
+ */
+export function validateWalletAddress(
+  walletAddress: string,
+  chain: string,
+): { valid: boolean; reason?: string } {
+  if (chain === "solana") {
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(walletAddress)) {
+      return { valid: false, reason: "Invalid Solana address (expected base58, 32-44 chars)" };
+    }
+    return { valid: true };
+  }
+
+  // All EVM chains (base, arbitrum, polygon)
+  if (!/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {
+    return { valid: false, reason: `Invalid EVM address for chain ${chain} (expected 0x + 40 hex chars)` };
+  }
+  return { valid: true };
+}
+
 /**
  * Read on-chain milestone status from the escrow contract.
  */

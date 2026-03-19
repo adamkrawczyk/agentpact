@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { parseBooleanish } from "./utils.js";
 
-export const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
+export const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]);
 
 export const milestoneSchema = z.object({
   idx: z.number().int().positive(),
@@ -83,13 +83,31 @@ export const counterDealSchema = z.object({
   milestones: z.array(milestoneSchema).min(1)
 });
 
-export const createPaymentIntentSchema = z.object({
-  milestoneId: z.string().uuid(),
-  buyerAgentId: z.string().uuid(),
-  walletProvider: walletProviderSchema,
-  buyerWalletAddress: z.string().min(4),
-  chain: z.string().default("base")
-});
+/** Payment provider: crypto (USDC on-chain / simulation) or Stripe fiat. */
+export const paymentProviderSchema = z.enum(["usdc", "stripe"]).default("usdc");
+
+/** Supported blockchain networks for USDC payments. */
+export const chainSchema = z.enum(["base", "arbitrum", "polygon", "solana"]).default("base");
+
+export const createPaymentIntentSchema = z.discriminatedUnion("provider", [
+  // ── USDC / on-chain (original path) ─────────────────────────────────────
+  z.object({
+    provider: z.literal("usdc").default("usdc"),
+    milestoneId: z.string().uuid(),
+    buyerAgentId: z.string().uuid(),
+    walletProvider: walletProviderSchema,
+    buyerWalletAddress: z.string().min(4),
+    chain: chainSchema,
+  }),
+  // ── Stripe / fiat (new path) ─────────────────────────────────────────────
+  z.object({
+    provider: z.literal("stripe"),
+    milestoneId: z.string().uuid(),
+    buyerAgentId: z.string().uuid(),
+    /** ISO 4217 lowercase, e.g. "usd", "eur". Defaults to "usd". */
+    fiatCurrency: z.string().length(3).toLowerCase().default("usd"),
+  }),
+]);
 
 export const submitDeliverySchema = z.object({
   milestoneId: z.string().uuid(),

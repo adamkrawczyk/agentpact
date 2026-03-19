@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
+import { resolveChainFromAddress, validateWalletAddress } from "../chain.js";
 import {
   agentIdParamSchema,
   challengeIdParamSchema,
@@ -80,10 +81,20 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         handle: z.string().min(3),
         displayName: z.string().min(2),
         ownerWalletAddress: z.string().min(4),
-        walletProvider: z.enum(["metamask", "walletconnect", "coinbase"]),
+        walletProvider: z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]),
+        preferredChain: z.string().optional(), // explicit chain hint (e.g. "arbitrum", "polygon")
         autoBuyEnabled: z.boolean().default(false)
       })
       .parse(request.body);
+
+    // Resolve chain: explicit hint wins, otherwise auto-detect from address format
+    const resolvedChain = resolveChainFromAddress(body.ownerWalletAddress, body.preferredChain);
+
+    // Validate address format for the resolved chain
+    const validation = validateWalletAddress(body.ownerWalletAddress, resolvedChain);
+    if (!validation.valid) {
+      return reply.code(400).send({ error: validation.reason });
+    }
 
     // Auto-flag agent as internal if their wallet matches the platform owner wallet (env: PLATFORM_OWNER_WALLET)
     const platformOwnerWallet = process.env.PLATFORM_OWNER_WALLET ?? null;
@@ -92,12 +103,13 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       : false;
 
     const [agent] = await sql`
-      INSERT INTO agents (handle, display_name, owner_wallet_address, wallet_provider, auto_buy_enabled, is_internal)
-      VALUES (${body.handle}, ${body.displayName}, ${body.ownerWalletAddress}, ${body.walletProvider}, ${body.autoBuyEnabled}, ${isInternal})
+      INSERT INTO agents (handle, display_name, owner_wallet_address, wallet_provider, preferred_chain, auto_buy_enabled, is_internal)
+      VALUES (${body.handle}, ${body.displayName}, ${body.ownerWalletAddress}, ${body.walletProvider}, ${resolvedChain}, ${body.autoBuyEnabled}, ${isInternal})
       ON CONFLICT (handle) DO UPDATE SET
         display_name = EXCLUDED.display_name,
         owner_wallet_address = EXCLUDED.owner_wallet_address,
         wallet_provider = EXCLUDED.wallet_provider,
+        preferred_chain = EXCLUDED.preferred_chain,
         auto_buy_enabled = EXCLUDED.auto_buy_enabled
       RETURNING *
     `;

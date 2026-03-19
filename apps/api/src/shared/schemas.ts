@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
+export const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]);
 
 export const milestoneSchema = z.object({
   idx: z.number().int().positive(),
