@@ -422,5 +422,11 @@ export async function completeDealMilestones(
     await releaseMilestonePaymentFn(String(milestone.id));
   }
 
+  // Ensure deal and milestones are always transitioned to completed/accepted,
+  // even when no funded payment_intent exists (e.g. intent never created or already
+  // released upstream). Without this explicit UPDATE the deal stays stuck at 'delivered'.
+  await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
+  await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
+
   return { mode, action: "released" };
 }

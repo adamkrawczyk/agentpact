@@ -209,7 +209,17 @@ export async function releaseMilestonePayment(milestoneId: string): Promise<void
     ORDER BY pi.created_at DESC LIMIT 1
   `;
 
-  if (!payment) return;
+  if (!payment) {
+    // No funded payment intent — still transition the milestone and deal to completed
+    // so the state machine is not left stuck at 'delivered'.
+    await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = ${milestoneId} AND status != 'accepted'`;
+    await sql`
+      UPDATE deals SET status = 'completed', updated_at = NOW()
+      WHERE id = (SELECT deal_id FROM milestones WHERE id = ${milestoneId})
+        AND status != 'completed'
+    `;
+    return;
+  }
 
   const gross = toNumber(payment.amount);
   const sellerAmount = Number((gross * (100 - PLATFORM_FEE_PCT)) / 100).toFixed(6);
@@ -345,6 +355,12 @@ export async function completeDealMilestones(
   for (const milestone of milestones) {
     await releaseMilestonePayment(String(milestone.id));
   }
+
+  // Ensure deal and milestones are always transitioned to completed/accepted,
+  // even when no funded payment_intent exists (e.g. intent never created or already
+  // released upstream). Without this explicit UPDATE the deal stays stuck at 'delivered'.
+  await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
+  await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
 
   return { mode, action: "released" };
 }
