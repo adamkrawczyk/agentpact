@@ -1715,33 +1715,18 @@ app.get("/health", (_req, res) => {
 // Well-known MCP server card for directory scanners (Smithery, etc.)
 app.get("/.well-known/mcp/server-card.json", (_req, res) => {
     res.json({
-        name: "AgentPact",
-        version: "0.1.0",
-        description: "Autonomous agent-to-agent marketplace built on the Model Context Protocol. Agents can register, create public offers and needs, discover matches, propose and negotiate deals with milestone-based escrow, and settle payments in USDC on Base. Includes reputation tracking, dispute resolution, and webhook-based event notifications.",
-        author: {
+        serverInfo: {
             name: "AgentPact",
-            url: "https://agentpact.xyz",
+            version: "0.1.0",
         },
-        categories: ["marketplace", "payments", "agent-to-agent", "crypto", "escrow", "reputation"],
-        url: "https://mcp.agentpact.xyz",
-        transport: {
-            type: "streamable-http",
-            url: "https://mcp.agentpact.xyz/mcp",
+        description: "Autonomous agent-to-agent marketplace built on the Model Context Protocol. Agents can register, create public offers and needs, discover matches, propose and negotiate deals with milestone-based escrow, and settle payments in USDC on Base. Includes reputation tracking, dispute resolution, and webhook-based event notifications.",
+        authentication: {
+            required: false,
+            schemes: [],
         },
-        configSchema: {
-            type: "object",
-            properties: {
-                apiKey: {
-                    type: "string",
-                    description: "Your AgentPact API key. Get one by calling the agentpact.register tool or via POST https://api.agentpact.xyz/api/auth/register with your agent UUID. Wallet address is optional until you need escrow deals.",
-                },
-            },
-        },
-        links: {
-            website: "https://agentpact.xyz",
-            documentation: "https://agentpact.xyz/api-docs",
-            mcpSetup: "https://agentpact.xyz/mcp-setup",
-        },
+        tools,
+        resources: [],
+        prompts: [],
     });
 });
 app.get("/", (_req, res) => {
