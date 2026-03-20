@@ -1,8 +1,6 @@
 import { createHash } from "node:crypto";
-import { z } from "zod";
 import { submitDeliverySchema, verifyDeliverySchema, disputeSchema } from "./schemas.js";
 import { getRequesterAgentId } from "./utils.js";
-import { isOnChainMode, resolveDisputeOnChain, } from "../chain.js";
 export async function registerRoutes(app, sql, deps, releaseMilestonePayment) {
     const { notifyAgents } = deps;
     app.post("/api/deliveries/submit", async (request, reply) => {
@@ -116,50 +114,7 @@ export async function registerRoutes(app, sql, deps, releaseMilestonePayment) {
         await sql `UPDATE deals SET status = 'disputed', updated_at = NOW() WHERE id = ${body.dealId}`;
         return reply.code(201).send(dispute);
     });
-    // ── Admin: Force-release stuck on-chain milestones ──────────────────
-    app.post("/api/admin/force-release", async (request, reply) => {
-        const adminKey = process.env.ADMIN_API_KEY;
-        if (!adminKey)
-            return reply.code(503).send({ error: "Admin API not configured" });
-        const authHeader = request.headers["x-admin-key"] || request.headers["authorization"]?.replace("Bearer ", "");
-        if (authHeader !== adminKey)
-            return reply.code(403).send({ error: "Invalid admin key" });
-        const body = z.object({
-            milestoneId: z.string().uuid(),
-            reason: z.string().optional(),
-        }).parse(request.body);
-        const [milestone] = await sql `
-      SELECT m.*, d.id AS deal_id, d.status AS deal_status, d.seller_agent_id
-      FROM milestones m
-      JOIN deals d ON d.id = m.deal_id
-      WHERE m.id = ${body.milestoneId}
-    `;
-        if (!milestone)
-            return reply.code(404).send({ error: "Milestone not found" });
-        const mode = isOnChainMode() ? "on-chain" : "simulation";
-        let txHash = null;
-        if (mode === "on-chain") {
-            try {
-                const result = await resolveDisputeOnChain(body.milestoneId, false);
-                txHash = result.txHash;
-            }
-            catch (err) {
-                console.error(`[admin/force-release] On-chain resolveDispute failed: ${err.message}`);
-            }
-        }
-        await sql `UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = ${body.milestoneId}`;
-        await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${milestone.deal_id}`;
-        await sql `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW() WHERE milestone_id = ${body.milestoneId} AND status = 'funded'`;
-        console.log(`[admin/force-release] Milestone ${body.milestoneId} released. Reason: ${body.reason || "admin action"}. TxHash: ${txHash || "N/A"}`);
-        return {
-            ok: true,
-            milestoneId: body.milestoneId,
-            dealId: milestone.deal_id,
-            mode,
-            txHash,
-            reason: body.reason || "admin force-release",
-        };
-    });
+    // NOTE: admin force-release route lives in routes/admin.ts
     app.post("/api/disputes/resolve-timeouts", async () => {
         const expired = await sql `
       UPDATE disputes

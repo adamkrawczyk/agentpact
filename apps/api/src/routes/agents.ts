@@ -80,31 +80,36 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       .object({
         handle: z.string().min(3),
         displayName: z.string().min(2),
-        ownerWalletAddress: z.string().min(4),
-        walletProvider: z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]),
-        preferredChain: z.string().optional(), // explicit chain hint (e.g. "arbitrum", "polygon")
+        ownerWalletAddress: z.string().min(4).optional().nullable(),
+        walletProvider: z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]).optional().nullable(),
+        preferredChain: z.string().optional(),
         autoBuyEnabled: z.boolean().default(false)
       })
       .parse(request.body);
 
-    // Resolve chain: explicit hint wins, otherwise auto-detect from address format
-    const resolvedChain = resolveChainFromAddress(body.ownerWalletAddress, body.preferredChain);
+    const ownerWalletAddress = body.ownerWalletAddress ?? null;
+    const walletProvider = body.walletProvider ?? null;
+
+    // Resolve chain if wallet provided
+    const resolvedChain = ownerWalletAddress ? resolveChainFromAddress(ownerWalletAddress, body.preferredChain) : null;
 
     // Validate address format for the resolved chain
-    const validation = validateWalletAddress(body.ownerWalletAddress, resolvedChain);
-    if (!validation.valid) {
-      return reply.code(400).send({ error: validation.reason });
+    if (ownerWalletAddress && resolvedChain) {
+      const validation = validateWalletAddress(ownerWalletAddress, resolvedChain);
+      if (!validation.valid) {
+        return reply.code(400).send({ error: validation.reason });
+      }
     }
 
     // Auto-flag agent as internal if their wallet matches the platform owner wallet (env: PLATFORM_OWNER_WALLET)
     const platformOwnerWallet = process.env.PLATFORM_OWNER_WALLET ?? null;
-    const isInternal = platformOwnerWallet
-      ? body.ownerWalletAddress.toLowerCase() === platformOwnerWallet.toLowerCase()
+    const isInternal = platformOwnerWallet && ownerWalletAddress
+      ? ownerWalletAddress.toLowerCase() === platformOwnerWallet.toLowerCase()
       : false;
 
     const [agent] = await sql`
       INSERT INTO agents (handle, display_name, owner_wallet_address, wallet_provider, preferred_chain, auto_buy_enabled, is_internal)
-      VALUES (${body.handle}, ${body.displayName}, ${body.ownerWalletAddress}, ${body.walletProvider}, ${resolvedChain}, ${body.autoBuyEnabled}, ${isInternal})
+      VALUES (${body.handle}, ${body.displayName}, ${ownerWalletAddress}, ${walletProvider}, ${resolvedChain}, ${body.autoBuyEnabled}, ${isInternal})
       ON CONFLICT (handle) DO UPDATE SET
         display_name = EXCLUDED.display_name,
         owner_wallet_address = EXCLUDED.owner_wallet_address,
@@ -114,6 +119,30 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       RETURNING *
     `;
     return reply.code(201).send(agent);
+  });
+
+  app.patch("/api/agents/:id/wallet", async (request, reply) => {
+    const { id } = agentIdParamSchema.parse(request.params);
+    const body = z.object({
+      walletAddress: z.string().min(4),
+      walletProvider: z.enum(["metamask", "walletconnect", "coinbase"]).optional(),
+    }).parse(request.body);
+    const requesterAgentId = getRequesterAgentId(request, reply);
+    if (!requesterAgentId) return;
+    if (id !== requesterAgentId) {
+      return reply.code(403).send({ error: "Not authorized to update this wallet" });
+    }
+
+    const [agent] = await sql`
+      UPDATE agents
+      SET
+        owner_wallet_address = ${body.walletAddress},
+        wallet_provider = ${body.walletProvider ?? "metamask"}
+      WHERE id = ${id}
+      RETURNING *
+    `;
+    if (!agent) return reply.code(404).send({ error: "Agent not found" });
+    return agent;
   });
 
   app.get("/api/agents/:id", async (request, reply) => {
@@ -139,23 +168,6 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         reviewCount: Number(reputation.review_count ?? 0)
       },
       trustTier
-    };
-  });
-
-  app.get("/api/agents/:id/reputation", async (request) => {
-    const { id } = request.params as { id: string };
-    const [aggregate] = await sql`
-      SELECT
-        COALESCE(AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0), 0) AS score,
-        COUNT(*)::int AS review_count
-      FROM feedback
-      WHERE to_agent_id = ${id}
-    `;
-
-    return {
-      agentId: id,
-      score: Number(aggregate.score ?? 0),
-      reviewCount: Number(aggregate.review_count ?? 0)
     };
   });
 

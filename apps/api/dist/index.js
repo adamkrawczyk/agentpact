@@ -10,6 +10,7 @@ import { autoVerify } from "./auto-verify.js";
 import { decrypt, ensureCredentialVaultSchema, encrypt, getCredentialEncryptionKey, getSensitiveFields, } from "./credential-vault.js";
 import { isOnChainMode, generateAcceptTransaction, resolveDisputeOnChain, } from "./chain.js";
 import { cacheEmbedding, computeSemanticScore, generateEmbeddings, isSemanticMatchingEnabled, } from "./semantic-match.js";
+import "./mpp.js";
 import { registerRoutes as registerAgentRoutes } from './routes/agents.js';
 import { registerRoutes as registerOffersRoutes } from './routes/offers.js';
 import { registerRoutes as registerNeedsRoutes } from './routes/needs.js';
@@ -18,6 +19,8 @@ import { registerRoutes as registerDealsRoutes } from './routes/deals.js';
 import { registerRoutes as registerFulfillmentRoutes } from './routes/fulfillment.js';
 import { registerRoutes as registerDisputesRoutes } from './routes/disputes.js';
 import { registerRoutes as registerPaymentsRoutes } from './routes/payments.js';
+import { registerRoutes as registerReputationRoutes } from './routes/reputation.js';
+import { archiveStaleOffersWithoutDeals } from './routes/offers.js';
 import adminRoutes from './routes/admin.js';
 import feedbackRoutes from './routes/feedback.js';
 import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/deal-helpers.js';
@@ -81,8 +84,55 @@ async function ensureFulfillmentStatusSchema() {
     CHECK (status IN ('pending', 'provided', 'active', 'verified', 'expired', 'revoked'))
   `;
 }
+async function ensureOfferCompoundingSchema() {
+    await sql `
+    CREATE UNIQUE INDEX IF NOT EXISTS offers_active_agent_category_title_unique
+    ON offers (agent_id, lower(btrim(category)), lower(btrim(title)))
+    WHERE status = 'active'
+  `;
+    await sql `
+    CREATE INDEX IF NOT EXISTS idx_offers_status_created_at
+    ON offers (status, created_at DESC)
+  `;
+    await sql `
+    CREATE INDEX IF NOT EXISTS idx_deals_offer_status
+    ON deals (offer_id, status)
+  `;
+}
+async function ensureConsultationSchema() {
+    await sql `ALTER TABLE offers ADD COLUMN IF NOT EXISTS max_respondents INTEGER`;
+    await sql `ALTER TABLE offers ADD COLUMN IF NOT EXISTS time_limit_minutes INTEGER`;
+    await sql `
+    CREATE TABLE IF NOT EXISTS consultation_responses (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      deal_id UUID NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
+      respondent_agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      response_md TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (deal_id, respondent_agent_id)
+    )
+  `;
+    await sql `
+    CREATE INDEX IF NOT EXISTS idx_consultation_responses_deal
+    ON consultation_responses (deal_id, created_at DESC)
+  `;
+}
+async function ensureMppSchema() {
+    await sql `ALTER TABLE deals ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'legacy-usdc'`;
+    await sql `ALTER TABLE deals ADD COLUMN IF NOT EXISTS mpp_receipt JSONB DEFAULT NULL`;
+    await sql `ALTER TABLE deals DROP CONSTRAINT IF EXISTS deals_status_check`;
+    await sql `
+    ALTER TABLE deals
+    ADD CONSTRAINT deals_status_check
+    CHECK (status IN ('proposed', 'countered', 'accepted', 'active', 'funded', 'delivered', 'completed', 'cancelled', 'disputed'))
+  `;
+}
 await ensurePhysicalServiceSchema();
 await ensureFulfillmentStatusSchema();
+await ensureOfferCompoundingSchema();
+await ensureConsultationSchema();
+await ensureMppSchema();
+await archiveStaleOffersWithoutDeals(sql);
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
 const milestoneSchema = z.object({
     idx: z.number().int().positive(),
@@ -227,6 +277,19 @@ const FULFILLMENT_TYPES = {
             completion_notes: z.string().optional(),
         }),
         autoVerify: false,
+    },
+    consultation: {
+        label: "Consultation",
+        description: "Collect time-boxed written responses from multiple respondents",
+        fields: {
+            summary: { type: "string", required: false },
+            instructions: { type: "string", required: false },
+        },
+        schema: z.object({
+            summary: z.string().optional(),
+            instructions: z.string().optional(),
+        }).passthrough(),
+        autoVerify: null,
     },
     generic: {
         label: "Generic",
@@ -976,8 +1039,11 @@ app.addHook("preHandler", async (request, reply) => {
     if (routePath.startsWith("/api/public/")) {
         return;
     }
-    const publicGetRoutes = ["/api/offers", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/agents/online", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
-    if (request.method === "GET" && publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
+    const publicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/agents/online", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
+    const isConsultationResponsesRoute = /^\/api\/deals\/[^/]+\/consultation-responses$/.test(routePath);
+    if (request.method === "GET" &&
+        !isConsultationResponsesRoute &&
+        publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
         return;
     }
     // Cron/admin endpoints use their own auth (X-Admin-Key) or are intentionally public
@@ -1022,6 +1088,7 @@ app.addHook("preHandler", async (request, reply) => {
     await registerFulfillmentRoutes(app, _sql, deps);
     await registerDisputesRoutes(app, _sql, deps, _releaseMilestonePayment);
     await registerPaymentsRoutes(app, _sql, deps, _releaseMilestonePayment);
+    await registerReputationRoutes(app, _sql, deps);
     await app.register(adminRoutes);
     await app.register(feedbackRoutes);
 }

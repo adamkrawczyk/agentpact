@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { parseBooleanish } from "./utils.js";
-export const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
+export const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]);
 export const milestoneSchema = z.object({
     idx: z.number().int().positive(),
     title: z.string().min(2),
@@ -14,6 +14,7 @@ export const fulfillmentTypeSchema = z.enum([
     "data-delivery",
     "compute-access",
     "consulting",
+    "consultation",
     "physical-service",
     "generic",
 ]);
@@ -23,7 +24,7 @@ export const locationSchema = z.object({
     country: z.string().optional(),
     remote: z.boolean().optional(),
 }).optional();
-export const createOfferSchema = z.object({
+const baseOfferSchema = z.object({
     agentId: z.string().uuid(),
     title: z.string().min(4),
     descriptionMd: z.string().min(10),
@@ -35,7 +36,47 @@ export const createOfferSchema = z.object({
     slaDays: z.number().int().positive().default(7),
     proofs: z.array(z.record(z.any())).default([]),
     fulfillmentType: fulfillmentTypeSchema.optional().default("generic"),
+    maxRespondents: z.number().int().positive().max(20).optional(),
+    timeLimitMinutes: z.number().int().positive().max(7 * 24 * 60).optional(),
     location: locationSchema,
+});
+export const createOfferSchema = baseOfferSchema.superRefine((value, ctx) => {
+    if (value.fulfillmentType !== "consultation") {
+        return;
+    }
+    if (!value.maxRespondents) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "maxRespondents is required for consultation offers",
+            path: ["maxRespondents"],
+        });
+    }
+    if (!value.timeLimitMinutes) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "timeLimitMinutes is required for consultation offers",
+            path: ["timeLimitMinutes"],
+        });
+    }
+});
+export const updateOfferSchema = baseOfferSchema.partial().superRefine((value, ctx) => {
+    if (value.fulfillmentType !== "consultation") {
+        return;
+    }
+    if (value.maxRespondents !== undefined && value.maxRespondents <= 0) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "maxRespondents must be positive",
+            path: ["maxRespondents"],
+        });
+    }
+    if (value.timeLimitMinutes !== undefined && value.timeLimitMinutes <= 0) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "timeLimitMinutes must be positive",
+            path: ["timeLimitMinutes"],
+        });
+    }
 });
 export const createNeedSchema = z.object({
     agentId: z.string().uuid(),
@@ -59,7 +100,7 @@ export const proposeDealSchema = z.object({
     negotiatedTotal: z.number().min(0),
     maxPriceDeltaPct: z.number().min(0).max(100),
     milestones: z.array(milestoneSchema).min(1),
-    acceptanceTimeoutDays: z.number().int().min(0).max(30).default(0)
+    acceptanceTimeoutDays: z.number().int().min(0).max(30).default(7)
 });
 export const autopilotSettingsSchema = z.object({
     agentId: z.string().uuid(),
@@ -73,13 +114,29 @@ export const counterDealSchema = z.object({
     negotiatedTotal: z.number().min(0),
     milestones: z.array(milestoneSchema).min(1)
 });
-export const createPaymentIntentSchema = z.object({
-    milestoneId: z.string().uuid(),
-    buyerAgentId: z.string().uuid(),
-    walletProvider: walletProviderSchema,
-    buyerWalletAddress: z.string().min(4),
-    chain: z.string().default("base")
-});
+/** Payment provider: crypto (USDC on-chain / simulation) or Stripe fiat. */
+export const paymentProviderSchema = z.enum(["usdc", "stripe"]).default("usdc");
+/** Supported blockchain networks for USDC payments. */
+export const chainSchema = z.enum(["base", "arbitrum", "polygon", "solana"]).default("base");
+export const createPaymentIntentSchema = z.discriminatedUnion("provider", [
+    // ── USDC / on-chain (original path) ─────────────────────────────────────
+    z.object({
+        provider: z.literal("usdc").default("usdc"),
+        milestoneId: z.string().uuid(),
+        buyerAgentId: z.string().uuid(),
+        walletProvider: walletProviderSchema,
+        buyerWalletAddress: z.string().min(4),
+        chain: chainSchema,
+    }),
+    // ── Stripe / fiat (new path) ─────────────────────────────────────────────
+    z.object({
+        provider: z.literal("stripe"),
+        milestoneId: z.string().uuid(),
+        buyerAgentId: z.string().uuid(),
+        /** ISO 4217 lowercase, e.g. "usd", "eur". Defaults to "usd". */
+        fiatCurrency: z.string().length(3).toLowerCase().default("usd"),
+    }),
+]);
 export const submitDeliverySchema = z.object({
     milestoneId: z.string().uuid(),
     submittedBy: z.string().uuid(),
@@ -141,6 +198,10 @@ export const feedbackSchema = z.object({
     ratingCommunication: z.number().int().min(1).max(5),
     ratingAccuracy: z.number().int().min(1).max(5),
     comment: z.string().optional()
+});
+export const consultationResponseSchema = z.object({
+    agentId: z.string().uuid(),
+    responseMd: z.string().min(10),
 });
 export const disputeSchema = z.object({
     dealId: z.string().uuid(),

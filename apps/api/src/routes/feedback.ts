@@ -26,8 +26,21 @@ export default async function feedbackRoutes(app: FastifyInstance) {
     if (body.fromAgentId !== deal.buyer_agent_id && body.fromAgentId !== deal.seller_agent_id) {
       return reply.code(403).send({ error: "Not authorized" });
     }
-    if (body.toAgentId !== deal.buyer_agent_id && body.toAgentId !== deal.seller_agent_id) {
+    const [consultationResponse] = await sql`
+      SELECT respondent_agent_id
+      FROM consultation_responses
+      WHERE deal_id = ${body.dealId} AND respondent_agent_id = ${body.toAgentId}
+    `;
+    const isConsultationRespondent = Boolean(consultationResponse);
+    if (
+      body.toAgentId !== deal.buyer_agent_id &&
+      body.toAgentId !== deal.seller_agent_id &&
+      !isConsultationRespondent
+    ) {
       return reply.code(400).send({ error: "Feedback target must be a participant in the deal" });
+    }
+    if (isConsultationRespondent && body.fromAgentId !== deal.buyer_agent_id) {
+      return reply.code(403).send({ error: "Only the buyer can rate consultation respondents" });
     }
     if (body.fromAgentId === body.toAgentId) {
       return reply.code(400).send({ error: "Feedback target must differ from author" });
@@ -76,85 +89,12 @@ export default async function feedbackRoutes(app: FastifyInstance) {
       SELECT
         (SELECT COUNT(*) FROM offers WHERE status = 'active')::int AS active_offers,
         (SELECT COUNT(*) FROM needs WHERE status = 'open')::int AS open_needs,
-        (SELECT COUNT(*) FROM deals WHERE status IN ('active','delivered','completed'))::int AS live_deals,
+        (SELECT COUNT(*) FROM deals WHERE status IN ('active','funded','delivered','completed'))::int AS live_deals,
         (SELECT COUNT(*) FROM agents)::int AS total_agents,
         (SELECT COUNT(*) FROM agents WHERE is_internal = FALSE)::int AS external_agents,
         (SELECT COUNT(*) FROM offers o JOIN agents a ON a.id = o.agent_id WHERE o.status = 'active' AND a.is_internal = FALSE)::int AS external_active_offers
     `;
     return stats;
-  });
-
-  // ── Leaderboard ───────────────────────────────────────────────────
-  app.get("/api/leaderboard", async (request) => {
-    const q = request.query as { sortBy?: string; limit?: string; period?: string };
-    const sortBy = q.sortBy ?? "reputation";
-    const limit = Math.min(Math.max(Number(q.limit ?? 50), 1), 200);
-    const period = q.period ?? "all";
-
-    let periodFilter = "";
-    if (period === "30d") periodFilter = "AND d.created_at >= NOW() - INTERVAL '30 days'";
-    else if (period === "7d") periodFilter = "AND d.created_at >= NOW() - INTERVAL '7 days'";
-
-    let orderClause = "reputation_score DESC";
-    if (sortBy === "deals") orderClause = "completed_deals DESC";
-    else if (sortBy === "volume") orderClause = "total_volume DESC";
-    else if (sortBy === "skills") orderClause = "skill_verification_count DESC";
-
-    const rows = await sql.unsafe(`
-      SELECT
-        a.id AS agent_id,
-        a.display_name AS name,
-        a.created_at AS member_since,
-        COALESCE(a.skills_verified, '{}'::text[]) AS skills_verified,
-        COALESCE(a.skill_verification_count, 0)::int AS skill_verification_count,
-        COALESCE(f.avg_score, 0) AS reputation_score,
-        COALESCE(f.review_count, 0)::int AS review_count,
-        COALESCE(ds.completed_deals, 0)::int AS completed_deals,
-        COALESCE(ds.total_volume, 0) AS total_volume,
-        COALESCE(ds.disputed_deals, 0)::int AS disputed_deals,
-        COALESCE(ds.total_deals, 0)::int AS total_deals
-      FROM agents a
-      LEFT JOIN LATERAL (
-        SELECT
-          AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0) AS avg_score,
-          COUNT(*)::int AS review_count
-        FROM feedback WHERE to_agent_id = a.id
-      ) f ON true
-      LEFT JOIN LATERAL (
-        SELECT
-          COUNT(*) FILTER (WHERE d.status = 'completed')::int AS completed_deals,
-          COALESCE(SUM(d.negotiated_total) FILTER (WHERE d.status = 'completed'), 0) AS total_volume,
-          COUNT(*) FILTER (WHERE d.status = 'disputed')::int AS disputed_deals,
-          COUNT(*)::int AS total_deals
-        FROM deals d
-        WHERE (d.buyer_agent_id = a.id OR d.seller_agent_id = a.id)
-          ${periodFilter}
-      ) ds ON true
-      ORDER BY ${orderClause}
-      LIMIT ${limit}
-    `);
-
-    return rows.map((row: Record<string, unknown>, idx: number) => {
-      const completedDeals = Number(row.completed_deals);
-      const reputationScore = Number(Number(row.reputation_score).toFixed(2));
-      const totalDeals = Number(row.total_deals);
-      const disputedDeals = Number(row.disputed_deals);
-      const trustTier = computeTrustTier(completedDeals, reputationScore);
-      return {
-        rank: idx + 1,
-        agentId: row.agent_id,
-        name: row.name,
-        trustTier: trustTier.tier,
-        reputationScore,
-        reviewCount: Number(row.review_count),
-        completedDeals,
-        skillsVerified: row.skills_verified,
-        verificationCount: Number(row.skill_verification_count),
-        totalVolume: Number(Number(row.total_volume).toFixed(2)),
-        disputeRate: totalDeals > 0 ? Number((disputedDeals / totalDeals).toFixed(4)) : 0,
-        memberSince: row.member_since,
-      };
-    });
   });
 
   // ── Reputation as a Service (RaaS) ────────────────────────────────

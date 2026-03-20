@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import { z } from "zod";
+import { Request as MppRequest } from "mppx/server";
 import type { Hex, Address } from "viem";
 import type { Deps } from "./types.js";
 import { createPaymentIntentSchema, confirmFundingSchema } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey, isZeroPrice, PLATFORM_FEE_PCT, PLATFORM_WALLET, toNumber } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, isZeroPrice, PLATFORM_FEE_PCT, PLATFORM_WALLET, toNumber, sendFetchResponse } from "./utils.js";
 import {
   isOnChainMode,
   generateFundingTransaction,
@@ -24,6 +25,11 @@ import {
   constructWebhookEvent,
   isStripeEnabled,
 } from "../stripe.js";
+import { chargeDeal, getAvailableDealPaymentMethods, getMppConfigurationError, type DealPaymentMethod } from "../mpp.js";
+
+function getDealPaymentMethodFromReceipt(method: string): DealPaymentMethod {
+  return method === "tempo" ? "mpp-crypto" : "mpp-fiat";
+}
 
 export async function registerRoutes(
   app: FastifyInstance,
@@ -316,6 +322,94 @@ export async function registerRoutes(
 
     const status = await getMilestoneStatus(q.milestoneId);
     return { mode: "on-chain", ...status };
+  });
+
+  app.get("/api/deals/:id/payment-methods", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const [deal] = await sql`SELECT id FROM deals WHERE id = ${id}`;
+    if (!deal) return reply.code(404).send({ error: "Deal not found" });
+
+    return {
+      dealId: id,
+      methods: getAvailableDealPaymentMethods({ includeLegacyUsdc: isOnChainMode() }),
+    };
+  });
+
+  app.post("/api/deals/:id/pay-mpp", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ actorAgentId: z.string().uuid() }).parse(request.body);
+    const requesterAgentId = getRequesterAgentId(request, reply);
+    if (!requesterAgentId) return;
+    if (body.actorAgentId !== requesterAgentId) {
+      return reply.code(403).send({ error: "Not authorized to act as this agent" });
+    }
+
+    const [deal] = await sql`
+      SELECT id, status, buyer_agent_id, seller_agent_id, negotiated_total, currency, mpp_receipt
+      FROM deals
+      WHERE id = ${id}
+    `;
+    if (!deal) return reply.code(404).send({ error: "Deal not found" });
+    if (body.actorAgentId !== deal.buyer_agent_id) {
+      return reply.code(403).send({ error: "Only the buyer can fund a deal" });
+    }
+    if (isZeroPrice(deal.negotiated_total)) {
+      return reply.code(400).send({ error: "Free-tier deals do not require MPP funding" });
+    }
+    if (deal.status === "funded") {
+      return { ok: true, alreadyFunded: true, dealId: id };
+    }
+
+    const mppConfigError = getMppConfigurationError();
+    if (mppConfigError) {
+      return reply.code(503).send({ error: mppConfigError });
+    }
+
+    const mppRequest = MppRequest.fromNodeListener(request.raw, reply.raw);
+    const paymentResult = await chargeDeal(Number(deal.negotiated_total), String(deal.currency ?? "USDC"), mppRequest);
+
+    if (paymentResult.status === 402) {
+      return sendFetchResponse(reply, paymentResult.challenge);
+    }
+
+    const paymentMethod = getDealPaymentMethodFromReceipt(paymentResult.receipt.method);
+
+    await sql.begin(async (txn) => {
+      await txn.unsafe(
+        `
+          UPDATE deals
+          SET
+            status = 'funded',
+            payment_method = $1,
+            mpp_receipt = $2::jsonb,
+            updated_at = NOW()
+          WHERE id = $3
+        `,
+        [paymentMethod, JSON.stringify(paymentResult.receipt), id],
+      );
+      await txn.unsafe(
+        `
+          UPDATE milestones
+          SET status = 'funded'
+          WHERE deal_id = $1 AND status IN ('pending', 'in_progress')
+        `,
+        [id],
+      );
+    });
+
+    notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "payment.funded", {
+      dealId: id,
+      method: paymentMethod,
+      receipt: paymentResult.receipt,
+    });
+
+    const [updatedDeal] = await sql`SELECT * FROM deals WHERE id = ${id}`;
+    return {
+      ok: true,
+      deal: updatedDeal,
+      receipt: paymentResult.receipt,
+      paymentMethod,
+    };
   });
 
   app.post("/api/payments/release", async (request, reply) => {

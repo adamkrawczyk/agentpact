@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
-import { createOfferSchema, autopilotSettingsSchema } from "./schemas.js";
+import { createOfferSchema, updateOfferSchema, autopilotSettingsSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, enrichOfferRow, parseBooleanish } from "./utils.js";
 
 /** Maximum active offers an agent may have at one time (anti-spam). */
@@ -10,6 +10,23 @@ const MAX_ACTIVE_OFFERS_PER_AGENT = 15;
 
 /** Auto-archive offers with zero deals older than this many days. */
 const STALE_OFFER_DAYS = 30;
+
+export async function archiveStaleOffersWithoutDeals(sql: Sql<Record<string, unknown>>): Promise<number> {
+  const archivedOffers = await sql`
+    UPDATE offers o
+    SET status = 'archived', updated_at = NOW()
+    WHERE o.status = 'active'
+      AND o.created_at < NOW() - (${STALE_OFFER_DAYS} * INTERVAL '1 day')
+      AND NOT EXISTS (
+        SELECT 1
+        FROM deals d
+        WHERE d.offer_id = o.id
+      )
+    RETURNING o.id
+  `;
+
+  return archivedOffers.length;
+}
 
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
   await sql`
@@ -58,40 +75,99 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       return reply.code(403).send({ error: "Not authorized to act as this agent" });
     }
 
-    // ── Rate limit: cap active offers per agent ─────────────────────────────
-    const [{ active_count }] = await sql`
-      SELECT COUNT(*)::int AS active_count
-      FROM offers
-      WHERE agent_id = ${body.agentId} AND status = 'active'
-    `;
-    if (Number(active_count) >= MAX_ACTIVE_OFFERS_PER_AGENT) {
-      return reply.code(429).send({
-        error: `Agent already has ${active_count} active offers (max ${MAX_ACTIVE_OFFERS_PER_AGENT}). Archive some before creating new ones.`,
-        activeCount: Number(active_count),
-        limit: MAX_ACTIVE_OFFERS_PER_AGENT,
+    const location = body.location ?? null;
+    const maxRespondents = body.fulfillmentType === "consultation" ? body.maxRespondents ?? null : null;
+    const timeLimitMinutes = body.fulfillmentType === "consultation" ? body.timeLimitMinutes ?? null : null;
+    let offer: Record<string, unknown> | undefined;
+
+    try {
+      offer = await sql.begin(async (txn) => {
+        await txn.unsafe("SELECT pg_advisory_xact_lock(hashtext($1))", [body.agentId]);
+
+        const [duplicateOffer] = await txn.unsafe(
+          `
+            SELECT id
+            FROM offers
+            WHERE agent_id = $1
+              AND status = 'active'
+              AND lower(btrim(category)) = lower(btrim($2))
+              AND lower(btrim(title)) = lower(btrim($3))
+            LIMIT 1
+          `,
+          [body.agentId, body.category, body.title],
+        );
+
+        if (duplicateOffer) {
+          reply.code(409);
+          return { error: "Agent already has an active offer with this category and title" };
+        }
+
+        const [activeOfferCountRow] = await txn.unsafe(
+          `
+            SELECT COUNT(*)::int AS active_offer_count
+            FROM offers
+            WHERE agent_id = $1
+              AND status = 'active'
+          `,
+          [body.agentId],
+        );
+
+        if (Number(activeOfferCountRow.active_offer_count) >= MAX_ACTIVE_OFFERS_PER_AGENT) {
+          reply.code(429);
+          return { error: `Active offer limit reached (${MAX_ACTIVE_OFFERS_PER_AGENT})` };
+        }
+
+        const [createdOffer] = await txn.unsafe(
+          `
+            INSERT INTO offers (
+              agent_id, title, description_md, category, tags, base_price, currency,
+              max_price_delta_pct, sla_days, proofs_json, fulfillment_type,
+              max_respondents, time_limit_minutes, location
+            ) VALUES (
+              $1, $2, $3, $4, $5, $6, $7,
+              $8, $9, $10::jsonb, $11, $12, $13, $14::jsonb
+            )
+            RETURNING *
+          `,
+          [
+            body.agentId,
+            body.title,
+            body.descriptionMd,
+            body.category,
+            body.tags,
+            body.basePrice,
+            body.currency,
+            body.maxPriceDeltaPct,
+            body.slaDays,
+            JSON.stringify(body.proofs),
+            body.fulfillmentType,
+            maxRespondents,
+            timeLimitMinutes,
+            location ? JSON.stringify(location) : null,
+          ],
+        );
+
+        return createdOffer as Record<string, unknown>;
       });
+    } catch (error: any) {
+      if (error?.code === "23505" && error?.constraint_name === "offers_active_agent_category_title_unique") {
+        return reply.code(409).send({ error: "Agent already has an active offer with this category and title" });
+      }
+      throw error;
     }
 
-    const location = body.location ?? null;
+    if (reply.statusCode >= 400) {
+      return reply.send(offer);
+    }
 
-    const [offer] = await sql`
-      INSERT INTO offers (
-        agent_id, title, description_md, category, tags, base_price, currency, max_price_delta_pct, sla_days, proofs_json, fulfillment_type, location
-      ) VALUES (
-        ${body.agentId}, ${body.title}, ${body.descriptionMd}, ${body.category}, ${body.tags}, ${body.basePrice},
-        ${body.currency}, ${body.maxPriceDeltaPct}, ${body.slaDays}, ${JSON.stringify(body.proofs)}::jsonb, ${body.fulfillmentType}, ${location as any}::jsonb
-      )
-      RETURNING *
-    `;
-
-    await audit(sql, body.agentId, "offer.create", "offer", offer.id, idem, body);
+    await audit(sql, body.agentId, "offer.create", "offer", String(offer.id), idem, body);
     recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after offer.create"));
     return reply.code(201).send(offer);
   });
 
   app.patch("/api/offers/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = createOfferSchema.partial().parse(request.body);
+    const body = updateOfferSchema.parse(request.body);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
     const [existingOffer] = await sql`SELECT agent_id FROM offers WHERE id = ${id}`;
@@ -107,6 +183,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const slaDays = body.slaDays ?? null;
     const proofsJson = body.proofs ? JSON.stringify(body.proofs) : null;
     const fulfillmentType = body.fulfillmentType ?? null;
+    const maxRespondents = body.maxRespondents ?? null;
+    const timeLimitMinutes = body.timeLimitMinutes ?? null;
     const location = body.location ?? null;
     const [offer] = await sql`
       UPDATE offers SET
@@ -119,6 +197,16 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         sla_days = COALESCE(${slaDays}, sla_days),
         proofs_json = COALESCE(${proofsJson}::jsonb, proofs_json),
         fulfillment_type = COALESCE(${fulfillmentType}, fulfillment_type),
+        max_respondents = CASE
+          WHEN ${body.fulfillmentType ?? null} = 'consultation' OR ${body.maxRespondents !== undefined}
+            THEN ${maxRespondents}
+          ELSE max_respondents
+        END,
+        time_limit_minutes = CASE
+          WHEN ${body.fulfillmentType ?? null} = 'consultation' OR ${body.timeLimitMinutes !== undefined}
+            THEN ${timeLimitMinutes}
+          ELSE time_limit_minutes
+        END,
         location = COALESCE(${location as any}::jsonb, location),
         updated_at = NOW()
       WHERE id = ${id}
@@ -169,6 +257,69 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       LIMIT 200
     `;
     return rows.map((row) => enrichOfferRow(row as Record<string, unknown>));
+  });
+
+  app.get("/api/categories", async () => {
+    const rows = await sql`
+      WITH active_offers AS (
+        SELECT id, agent_id, category, base_price, currency
+        FROM offers
+        WHERE status = 'active'
+      ),
+      provider_stats AS (
+        SELECT
+          o.category,
+          o.agent_id,
+          COUNT(d.id)::int AS completed_deals
+        FROM active_offers o
+        LEFT JOIN deals d
+          ON d.offer_id = o.id
+         AND d.status = 'completed'
+        GROUP BY o.category, o.agent_id
+      ),
+      top_provider AS (
+        SELECT DISTINCT ON (category)
+          category,
+          agent_id,
+          completed_deals
+        FROM provider_stats
+        ORDER BY category, completed_deals DESC, agent_id
+      )
+      SELECT
+        o.category AS name,
+        COUNT(*)::int AS offer_count,
+        ARRAY_AGG(DISTINCT o.agent_id) AS agent_ids,
+        MIN(o.base_price) AS min_price,
+        MAX(o.base_price) AS max_price,
+        CASE
+          WHEN COUNT(DISTINCT o.currency) = 1 THEN MIN(o.currency)
+          ELSE NULL
+        END AS currency,
+        tp.agent_id AS top_provider_agent_id,
+        COALESCE(tp.completed_deals, 0)::int AS top_provider_completed_deals
+      FROM active_offers o
+      LEFT JOIN top_provider tp
+        ON tp.category = o.category
+      GROUP BY o.category, tp.agent_id, tp.completed_deals
+      ORDER BY COUNT(*) DESC, o.category ASC
+    `;
+
+    return rows.map((row) => ({
+      name: row.name,
+      offerCount: Number(row.offer_count),
+      agentIds: Array.isArray(row.agent_ids) ? row.agent_ids : [],
+      priceRange: {
+        min: row.min_price,
+        max: row.max_price,
+        currency: row.currency ?? null,
+      },
+      topProvider: row.top_provider_agent_id
+        ? {
+            agentId: row.top_provider_agent_id,
+            completedDeals: Number(row.top_provider_completed_deals),
+          }
+        : null,
+    }));
   });
 
   /**
@@ -272,14 +423,21 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
     // Archive active offers older than STALE_OFFER_DAYS with no deals
     const archived = await sql`
-      UPDATE offers
-      SET status = 'archived', updated_at = NOW()
-      WHERE status = 'active'
-        AND created_at < NOW() - (${STALE_OFFER_DAYS} || ' days')::interval
-        AND id NOT IN (
-          SELECT DISTINCT offer_id FROM deals WHERE offer_id IS NOT NULL
+      WITH archived AS (
+        UPDATE offers
+        SET status = 'archived', updated_at = NOW()
+        WHERE id IN (
+          SELECT o.id
+          FROM offers o
+          WHERE o.status = 'active'
+            AND o.created_at < NOW() - (${STALE_OFFER_DAYS} * INTERVAL '1 day')
+            AND NOT EXISTS (
+              SELECT 1 FROM deals d WHERE d.offer_id = o.id
+            )
         )
-      RETURNING id, agent_id, title, category, created_at
+        RETURNING id, agent_id, title, category, created_at
+      )
+      SELECT * FROM archived
     `;
 
     app.log.info({ count: archived.length }, "auto-archive-stale: archived offers");

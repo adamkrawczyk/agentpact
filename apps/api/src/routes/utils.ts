@@ -138,6 +138,19 @@ export const FULFILLMENT_TYPES = {
     }),
     autoVerify: null,
   },
+  consultation: {
+    label: "Consultation",
+    description: "Collect time-boxed written responses from multiple respondents",
+    fields: {
+      summary: { type: "string", required: false },
+      instructions: { type: "string", required: false },
+    },
+    schema: z.object({
+      summary: z.string().optional(),
+      instructions: z.string().optional(),
+    }).passthrough(),
+    autoVerify: null,
+  },
   "physical-service": {
     label: "Physical Service",
     description: "On-site service requiring physical presence (repair, installation, delivery, inspection)",
@@ -258,6 +271,25 @@ export function asRecord(value: unknown): Record<string, unknown> {
   return {};
 }
 
+export async function sendFetchResponse(reply: any, response: Response) {
+  const headers: Record<string, string> = {};
+  response.headers.forEach((value, key) => {
+    headers[key] = value;
+  });
+
+  const bodyText = await response.text();
+  reply.code(response.status).headers(headers);
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (bodyText.length === 0) {
+    return reply.code(response.status).headers(headers).send();
+  }
+  if (contentType.includes("application/json") || contentType.includes("application/problem+json")) {
+    return reply.code(response.status).headers(headers).send(JSON.parse(bodyText));
+  }
+  return reply.code(response.status).headers(headers).send(bodyText);
+}
+
 export function getRequesterAgentId(request: { agentId?: string }, reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } }): string | null {
   const requesterAgentId = request.agentId;
   if (!requesterAgentId) {
@@ -357,6 +389,7 @@ export async function completeDealMilestones(
   `;
 
   if (milestones.length === 0) {
+    await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
     return { mode, action: "released" };
   }
 

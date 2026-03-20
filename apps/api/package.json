@@ -18,6 +18,7 @@
     "bcryptjs": "^3.0.3",
     "fastify": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
+    "mppx": "^0.4.7",
     "postgres": "^3.4.5",
     "viem": "^2.45.3",
     "zod": "^3.24.2"

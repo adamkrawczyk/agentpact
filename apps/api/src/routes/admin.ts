@@ -30,7 +30,7 @@ export default async function adminRoutes(app: FastifyInstance) {
     const expiredDeals = await sql`
       SELECT id, acceptance_timeout_days, updated_at, buyer_agent_id, seller_agent_id
       FROM deals
-      WHERE status IN ('delivered', 'active')
+      WHERE status IN ('delivered', 'active', 'funded')
         AND updated_at < NOW() - (COALESCE(acceptance_timeout_days, 7) || ' days')::interval
     `;
 

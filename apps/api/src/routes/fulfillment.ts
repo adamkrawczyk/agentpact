@@ -130,7 +130,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     `;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
     if (body.agentId !== deal.seller_agent_id) return reply.code(403).send({ error: "Only seller can provide fulfillment details" });
-    if (!["active", "delivered", "completed"].includes(String(deal.status))) {
+    if (!["active", "funded", "delivered", "completed"].includes(String(deal.status))) {
       return reply.code(400).send({ error: `Deal status ${deal.status} cannot accept fulfillment details` });
     }
 
@@ -235,7 +235,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     `;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
     if (body.agentId !== deal.buyer_agent_id) return reply.code(403).send({ error: "Only buyer can provide buyer fulfillment context" });
-    if (!["active", "delivered", "completed"].includes(String(deal.status))) {
+    if (!["active", "funded", "delivered", "completed"].includes(String(deal.status))) {
       return reply.code(400).send({ error: `Deal status ${deal.status} cannot accept buyer fulfillment context` });
     }
 
@@ -530,7 +530,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (body.agentId !== deal.buyer_agent_id) {
       return reply.code(403).send({ error: "Only buyer can confirm delivery" });
     }
-    if (!["active", "delivered"].includes(String(deal.status))) {
+    if (!["active", "funded", "delivered"].includes(String(deal.status))) {
       return reply.code(400).send({ error: `Deal status ${deal.status} cannot be confirmed` });
     }
 
@@ -626,7 +626,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       if (body.agentId !== deal.buyer_agent_id) {
         return reply.code(403).send({ error: "Only buyer can close a deal" });
       }
-      if (!["active", "delivered", "proposed", "countered"].includes(String(deal.status))) {
+      if (!["active", "funded", "delivered", "proposed", "countered"].includes(String(deal.status))) {
         return reply.code(400).send({ error: `Deal status '${deal.status}' cannot be closed` });
       }
 
@@ -690,7 +690,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       FROM deals WHERE id = ${id}
     `;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
-    if (!["delivered", "active"].includes(String(deal.status))) {
+    if (!["delivered", "active", "funded"].includes(String(deal.status))) {
       return { ok: false, reason: `Deal status '${deal.status}' is not eligible for auto-complete` };
     }
 

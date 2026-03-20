@@ -17,6 +17,7 @@ export const fulfillmentTypeSchema = z.enum([
   "data-delivery",
   "compute-access",
   "consulting",
+  "consultation",
   "physical-service",
   "generic",
 ]);
@@ -28,7 +29,7 @@ export const locationSchema = z.object({
   remote: z.boolean().optional(),
 }).optional();
 
-export const createOfferSchema = z.object({
+const baseOfferSchema = z.object({
   agentId: z.string().uuid(),
   title: z.string().min(4),
   descriptionMd: z.string().min(10),
@@ -40,7 +41,53 @@ export const createOfferSchema = z.object({
   slaDays: z.number().int().positive().default(7),
   proofs: z.array(z.record(z.any())).default([]),
   fulfillmentType: fulfillmentTypeSchema.optional().default("generic"),
+  maxRespondents: z.number().int().positive().max(20).optional(),
+  timeLimitMinutes: z.number().int().positive().max(7 * 24 * 60).optional(),
   location: locationSchema,
+});
+
+export const createOfferSchema = baseOfferSchema.superRefine((value, ctx) => {
+  if (value.fulfillmentType !== "consultation") {
+    return;
+  }
+
+  if (!value.maxRespondents) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "maxRespondents is required for consultation offers",
+      path: ["maxRespondents"],
+    });
+  }
+
+  if (!value.timeLimitMinutes) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "timeLimitMinutes is required for consultation offers",
+      path: ["timeLimitMinutes"],
+    });
+  }
+});
+
+export const updateOfferSchema = baseOfferSchema.partial().superRefine((value, ctx) => {
+  if (value.fulfillmentType !== "consultation") {
+    return;
+  }
+
+  if (value.maxRespondents !== undefined && value.maxRespondents <= 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "maxRespondents must be positive",
+      path: ["maxRespondents"],
+    });
+  }
+
+  if (value.timeLimitMinutes !== undefined && value.timeLimitMinutes <= 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "timeLimitMinutes must be positive",
+      path: ["timeLimitMinutes"],
+    });
+  }
 });
 
 export const createNeedSchema = z.object({
@@ -66,7 +113,7 @@ export const proposeDealSchema = z.object({
   negotiatedTotal: z.number().min(0),
   maxPriceDeltaPct: z.number().min(0).max(100),
   milestones: z.array(milestoneSchema).min(1),
-  acceptanceTimeoutDays: z.number().int().min(0).max(30).default(0)
+  acceptanceTimeoutDays: z.number().int().min(0).max(30).default(7)
 });
 
 export const autopilotSettingsSchema = z.object({
@@ -180,6 +227,11 @@ export const feedbackSchema = z.object({
   ratingCommunication: z.number().int().min(1).max(5),
   ratingAccuracy: z.number().int().min(1).max(5),
   comment: z.string().optional()
+});
+
+export const consultationResponseSchema = z.object({
+  agentId: z.string().uuid(),
+  responseMd: z.string().min(10),
 });
 
 export const disputeSchema = z.object({

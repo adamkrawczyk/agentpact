@@ -1,0 +1,350 @@
+════════════════════════════════════════════════════════════
+AUTORESEARCH: AgentPact MCP Tool Descriptions
+Eval model: gpt-4o-mini | Mutator: gpt-4o
+Runs/scenario: 3 | Max experiments: 40
+Target: 90%
+════════════════════════════════════════════════════════════
+
+Extracted 42 tool descriptions
+
+▶ Running baseline...
+Baseline: 37/54 (68.5%)
+
+
+────────────────────────────────────────────────────────────
+Experiment 1/40
+Analyzing failures and generating mutation...
+Change: Clarified the sequence of operations for using the tools, emphasizing that registration and profile creation are prerequisites to using other tools such as creating offers or proposing deals. This addresses the top failing evals related to "Register and list a service" and "Find and hire a code review service."
+Running evals...
+Score: 42/54 (77.8%) → KEEP
+
+────────────────────────────────────────────────────────────
+Experiment 2/40
+Analyzing failures and generating mutation...
+Change: Updated the "agentpact_create_offer" description to specify that an API key is required as an argument, obtained from the "agentpact_register" operation, which addresses the failing eval related to "Register and list a service: Created offer."
+Running evals...
+Score: 39/54 (72.2%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 3/40
+Analyzing failures and generating mutation...
+Change: Updated the "agentpact_create_offer" description to clarify that an API key (obtained from "agentpact_register") is required as an argument and provided an example of a typical API key format. This addresses the failing eval related to "Register and list a service: Created offer."
+Running evals...
+Score: 41/54 (75.9%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 4/40
+Analyzing failures and generating mutation...
+Change: Updated the "agentpact_create_offer" description to explicitly state that a valid API key is a required argument for the operation and provided an example of an API key format. This addresses the failing eval related to "Register and list a service: Created offer."
+Running evals...
+Score: 41/54 (75.9%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 5/40
+Analyzing failures and generating mutation...
+Change: Updated the "agentpact_create_offer" description to specify that a valid API key and a completed agent profile are required arguments for creating an offer, with an example of a typical API key format. This aims to address the failing evals related to "Register and list a service: Created offer" by clarifying the necessary prerequisites.
+Running evals...
+Score: 39/54 (72.2%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 6/40
+Analyzing failures and generating mutation...
+Change: Updated the "agentpact_create_offer" description to explicitly state that an API key and a completed agent profile are required, and provided an example of a valid API key format. This change aims to address the failing evals related to "Register and list a service: Created offer" by clarifying the necessary prerequisites and providing a concrete example.
+Running evals...
+Score: 41/54 (75.9%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 7/40
+Analyzing failures and generating mutation...
+Change: Updated the "agentpact_create_offer" description to explicitly state that an API key (obtained from "agentpact_register") is a required argument and provided an example of a typical API key format. This aims to clarify the necessary prerequisites for creating an offer, addressing the failing evals related to "Register and list a service: Created offer."
+Running evals...
+Score: 41/54 (75.9%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 8/40
+Analyzing failures and generating mutation...
+Change: Updated the "agentpact_create_offer" description to specify that an API key obtained from "agentpact_register" and a completed profile from "agentpact_create_agent" are necessary prerequisites, and provided an example format for an API key. This addresses the failing evals related to "Register and list a service: Created offer" by clarifying the necessary prerequisites and providing a concrete example.
+Running evals...
+Score: 33/54 (61.1%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 9/40
+Analyzing failures and generating mutation...
+Change: Updated the "agentpact_create_offer" description to specify the required sequence of operations and necessary prerequisites, including that a valid API key (obtained from "agentpact_register") and a completed profile (from "agentpact_create_agent") are required. This aims to address the failing evals related to "Register and list a service" by clarifying the necessary steps and prerequisites.
+Running evals...
+Score: 42/54 (77.8%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 10/40
+Analyzing failures and generating mutation...
+Change: Updated the "agentpact_create_offer" description to explicitly specify that an API key and a completed agent profile are required arguments, and to provide an example of how to structure the API key and handle prerequisites. This aims to address confusion in the "Register and list a service: Created offer" eval by clarifying the prerequisites and providing a concrete example.
+Running evals...
+Score: 40/54 (74.1%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 11/40
+Analyzing failures and generating mutation...
+FATAL: BadRequestError: 400 We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, please contact us through our help center at help.openai.com.)
+    at APIError.generate (/home/adam/repos/agentpact/node_modules/openai/src/core/error.ts:72:14)
+    at OpenAI.makeStatusError (/home/adam/repos/agentpact/node_modules/openai/src/client.ts:494:28)
+    at OpenAI.makeRequest (/home/adam/repos/agentpact/node_modules/openai/src/client.ts:745:24)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async suggestMutation (/home/adam/repos/agentpact/autoresearch-mcp-tools/overnight-runner.ts:205:16)
+    at async main (/home/adam/repos/agentpact/autoresearch-mcp-tools/overnight-runner.ts:288:41) {
+  status: 400,
+  headers: Headers {
+    date: 'Thu, 19 Mar 2026 22:04:48 GMT',
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': '443',
+    connection: 'keep-alive',
+    'cf-ray': '9defc6340d7260a4-WAW',
+    'cf-cache-status': 'DYNAMIC',
+    server: 'cloudflare',
+    'strict-transport-security': 'max-age=31536000; includeSubDomains; preload',
+    vary: 'Origin',
+    'x-request-id': 'req_066161fef5cd44119e7a5f9d989af3d0',
+    'x-openai-proxy-wasm': 'v0.1',
+    'x-content-type-options': 'nosniff',
+    'set-cookie': '__cf_bm=kGZWH9Zryo9ICdXa5.kDYFmZAx1b4xy59yVSZA5of60-1773957880.9682565-1.0.1.1-QU9sVMAEKgc41xUmJRb63PPD30ZDq0ZmQyWo3cXcry2ZsghjzU3DdmwlO88FsZPu0ZxYiW1mhAcYbwSJ_LRrzjZ1V_knLYp9VsQgycGffu1vmZh7rEe1yaJERR6cMESn; HttpOnly; Secure; Path=/; Domain=api.openai.com; Expires=Thu, 19 Mar 2026 22:34:48 GMT',
+    'alt-svc': 'h3=":443"; ma=86400'
+  },
+  requestID: 'req_066161fef5cd44119e7a5f9d989af3d0',
+  error: {
+    message: "We could not parse the JSON body of your request. (HINT: This likely means you aren't using your HTTP library correctly. The OpenAI API expects a JSON payload, but what was sent was not valid JSON. If you have trouble figuring out how to fix this, please contact us through our help center at help.openai.com.)",
+    type: 'invalid_request_error',
+    param: null,
+    code: null
+  },
+  code: null,
+  param: null,
+  type: 'invalid_request_error'
+}
+════════════════════════════════════════════════════════════
+AUTORESEARCH: AgentPact MCP Tool Descriptions
+Eval model: gpt-4o-mini | Mutator: gpt-4o
+Runs/scenario: 3 | Max experiments: 40
+Target: 90%
+════════════════════════════════════════════════════════════
+
+Extracted 42 tool descriptions
+
+
+⏩ Resuming from experiment 11 (best so far: 77.8%)
+
+
+────────────────────────────────────────────────────────────
+Experiment 11/40
+Analyzing failures and generating mutation...
+Change: Simplified the description of the "agentpact_propose_deal" tool to focus on the essential requirements for usage, clarifying the necessary arguments and providing a format example for the price argument.
+Running evals...
+Score: 38/54 (70.4%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 12/40
+Analyzing failures and generating mutation...
+Change: Added a warning about common mistakes in the "agentpact_propose_deal" description, specifying the correct format for the required arguments and emphasizing the need to use valid offer and buyer agent IDs obtained from prior steps.
+Running evals...
+Score: 41/54 (75.9%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 13/40
+Analyzing failures and generating mutation...
+Change: Added a warning about common mistakes in the "agentpact_create_offer" tool description, specifying the importance of using a valid agent ID and ensuring that the profile is complete. This aims to prevent errors related to incomplete profiles when agents attempt to create offers.
+Running evals...
+Score: 42/54 (77.8%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 14/40
+Analyzing failures and generating mutation...
+Change: Added a WORKFLOW SUMMARY at the top to clarify the sequence of operations required for using the tools effectively.
+Running evals...
+Score: 38/54 (70.4%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 15/40
+Analyzing failures and generating mutation...
+Change: Updated the "agentpact_propose_deal" tool description to clearly specify the required arguments (buyerAgentId, offerId, price) and their formats, including an example for the price argument. This aims to improve understanding of how to properly use this tool for deal creation.
+Running evals...
+Score: 40/54 (74.1%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 16/40
+Analyzing failures and generating mutation...
+Change: Added a WORKFLOW SUMMARY at the top of all tool descriptions to clarify the sequence of operations required for using the tools effectively.
+Running evals...
+Score: 35/54 (64.8%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 17/40
+Analyzing failures and generating mutation...
+Change: Added a WORKFLOW SUMMARY at the top of each tool description to clarify the sequence of operations: 'Step 1: register → Step 2: create_agent → Step 3: create_offer/search_offers'. This aims to provide clear guidance on the initial steps needed before using other tools.
+Running evals...
+Score: 41/54 (75.9%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 18/40
+Analyzing failures and generating mutation...
+Change: Simplified the description of the "agentpact_register" tool to focus on the essential process of obtaining the API key, specifying that the agent ID must be a UUID, and clarifying that wallet_address is optional and can be added later.
+Running evals...
+Score: 34/54 (63.0%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 19/40
+Analyzing failures and generating mutation...
+Change: Updated the "agentpact_create_offer" tool description to specify the required arguments with their types and format, including examples for each argument where applicable. This aims to minimize errors when creating an offer by making the argument requirements explicit and clear.
+Running evals...
+Score: 40/54 (74.1%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 20/40
+Analyzing failures and generating mutation...
+Change: Completely restructured the descriptions to emphasize the workflow sequence and provide clear guidance on required arguments and formats. Added examples where applicable to enhance understanding, especially for complex tools.
+Running evals...
+Score: 34/54 (63.0%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 21/40
+Analyzing failures and generating mutation...
+Change: Added a WORKFLOW SUMMARY at the top of the tool descriptions to clarify the sequence of operations: 'Step 1: Register → Step 2: Create Agent Profile → Step 3: Create Offer/Search Offers'. This aims to help AI agents understand the initial steps required before using other tools.
+Running evals...
+Score: 37/54 (68.5%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 22/40
+Analyzing failures and generating mutation...
+Change: Reorganized the tool descriptions with a new approach focusing on a structured, step-by-step process for using the tools. Each section highlights the purpose, prerequisites, and necessary inputs with example values where applicable.
+Running evals...
+Score: 35/54 (64.8%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 23/40
+Analyzing failures and generating mutation...
+Change: Added a warning about the common mistake of not using a string format for the price argument in the `agentpact_propose_deal` tool description to prevent errors related to incorrect data types.
+Running evals...
+Score: 41/54 (75.9%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 24/40
+Analyzing failures and generating mutation...
+Change: Reimagined and reformatted the tool descriptions to clarify the sequence and context of operations and provide detailed guidance on required arguments, their types, and possible values, using a clear and consistent format throughout.
+Running evals...
+Score: 37/54 (68.5%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 25/40
+Analyzing failures and generating mutation...
+Change: Simplified the description for the `agentpact_register` tool by focusing solely on the essential process of registration and obtaining the API key, while retaining the necessary information about the agent ID and optional wallet address.
+Running evals...
+Score: 35/54 (64.8%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 26/40
+Analyzing failures and generating mutation...
+Change: Clarified the sequential order of operations that must be followed, emphasizing that registration and creating an agent profile are mandatory prerequisites for many other tools. This should help AI agents understand the necessary steps before using other functionalities.
+Running evals...
+Score: 40/54 (74.1%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 27/40
+Analyzing failures and generating mutation...
+Change: Added a "WORKFLOW SUMMARY" at the top of the descriptions to clearly outline the initial steps required before using other tools: 'Step 1: register → Step 2: create_agent → Step 3: create_offer/search_offers'. This aims to guide AI agents through the necessary initial steps.
+Running evals...
+Score: 38/54 (70.4%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 28/40
+Analyzing failures and generating mutation...
+Change: Added a warning about the common mistake of omitting required arguments or misformatting them in the `agentpact_create_offer` tool description, along with examples of correct argument formats. This aims to prevent frequent errors.
+Running evals...
+Score: 40/54 (74.1%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 29/40
+Analyzing failures and generating mutation...
+Change: Updated the description for the `agentpact_create_offer` tool to include explicit argument names, types, and example values. This aims to reduce errors by ensuring AI agents understand how to correctly format each input.
+Running evals...
+Score: 41/54 (75.9%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 30/40
+Analyzing failures and generating mutation...
+Change: Reformatted the tool descriptions to include a "REQUIRED INPUTS" section that clearly specifies the arguments needed, their types, and examples. This approach aims to help AI agents understand exactly what input is required for each tool. For this iteration, applied this change to only the `agentpact_register` and `agentpact_create_agent` tools as a test case.
+Running evals...
+Score: 36/54 (66.7%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 31/40
+Analyzing failures and generating mutation...
+Change: Added a "WORKFLOW SUMMARY" at the top of the descriptions to clearly outline the initial steps required before using other tools: 'Step 1: register → Step 2: create_agent → Step 3: create_offer/search_offers'. This aims to guide AI agents through the necessary initial steps.
+Running evals...
+Score: 40/54 (74.1%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 32/40
+Analyzing failures and generating mutation...
+Change: Updated the description for the `agentpact_propose_deal` tool to include explicit argument names, types, and example values. This aims to reduce errors by ensuring AI agents understand how to correctly format each input.
+Running evals...
+Score: 40/54 (74.1%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 33/40
+Analyzing failures and generating mutation...
+Change: Added a warning about common mistakes in the `agentpact_create_offer` tool description, specifically the requirement for properly formatted arguments and their sequence, with a reminder that the agent's profile must be completed first.
+Running evals...
+Score: 42/54 (77.8%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 34/40
+Analyzing failures and generating mutation...
+Change: Updated the description for the `agentpact_propose_deal` tool to clearly specify the required arguments (buyerAgentId, offerId, price), their formats, and provide example values. This aims to improve understanding of how to correctly use this tool for deal creation.
+Running evals...
+Score: 40/54 (74.1%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 35/40
+Analyzing failures and generating mutation...
+Change: Added a brief example JSON illustrating the correct argument formats for the `agentpact_create_offer` tool, as this tool had multiple evaluations indicating errors in its usage.
+Running evals...
+Score: 39/54 (72.2%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 36/40
+Analyzing failures and generating mutation...
+Change: Added an example JSON to the `agentpact_create_offer` tool description, illustrating the correct argument formats to reduce errors related to offer creation.
+Running evals...
+Score: 42/54 (77.8%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 37/40
+Analyzing failures and generating mutation...
+Change: Added a "WORKFLOW SUMMARY" at the top of the descriptions to clearly outline the initial steps required before using other tools: 'Step 1: register → Step 2: create_agent → Step 3: create_offer/search_offers'. This aims to guide AI agents through the necessary initial steps.
+Running evals...
+Score: 34/54 (63.0%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 38/40
+Analyzing failures and generating mutation...
+Change: Updated the `agentpact_propose_deal` description to explicitly list the required arguments (buyerAgentId, offerId, price), their formats, and provide clear examples of these values. This aims to ensure agents understand the correct inputs needed to propose a deal.
+Running evals...
+Score: 41/54 (75.9%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 39/40
+Analyzing failures and generating mutation...
+Change: Added a clear sequence guideline at the beginning of the tool descriptions to outline the required initial steps before using other tools. This helps ensure AI agents understand the correct order for registration, profile creation, and subsequent actions.
+Running evals...
+Score: 42/54 (77.8%) → DISCARD
+
+────────────────────────────────────────────────────────────
+Experiment 40/40
+Analyzing failures and generating mutation...
+Change: Adjusted the description of the `agentpact_propose_deal` tool to clarify that `buyerAgentId`, `offerId`, and `price` are mandatory arguments. Included example values for each argument to enhance understanding.
+Running evals...
+Score: 41/54 (75.9%) → DISCARD
+
+════════════════════════════════════════════════════════════
+AUTORESEARCH COMPLETE
+Baseline: 68.5% → Final: 77.8%
+Experiments: 40 | Kept: 1 | Discarded: 39
+Best descriptions saved to: best-descriptions.md
+════════════════════════════════════════════════════════════
