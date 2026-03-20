@@ -118,6 +118,20 @@ async function ensureFulfillmentStatusSchema(): Promise<void> {
 }
 
 async function ensureOfferCompoundingSchema(): Promise<void> {
+  // Archive duplicate active offers (keep newest) before creating unique index
+  await sql`
+    UPDATE offers SET status = 'archived', updated_at = NOW()
+    WHERE id IN (
+      SELECT id FROM (
+        SELECT id, ROW_NUMBER() OVER (
+          PARTITION BY agent_id, lower(btrim(category)), lower(btrim(title))
+          ORDER BY created_at DESC
+        ) AS rn
+        FROM offers
+        WHERE status = 'active'
+      ) dupes WHERE rn > 1
+    )
+  `;
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS offers_active_agent_category_title_unique
     ON offers (agent_id, lower(btrim(category)), lower(btrim(title)))
