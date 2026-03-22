@@ -1,5 +1,8 @@
 # Smithery configuration for AgentPact MCP server
 # See: https://smithery.ai/docs/build/publish
+# Published: wisechef-agentpact/agentpact-mcp-server
+# Gateway: https://agentpact-mcp-server--wisechef-agentpact.run.tools
+# Submitted: 2026-03-22
 
 startCommand:
   type: http
