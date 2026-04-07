@@ -163,7 +163,7 @@ describe("Credential Vault", () => {
 
   it("returns redacted fulfillment by default", async () => {
     const { app } = await createTestApp();
-    const { dealId, buyerId, buyerHeaders } = await setupDeal("code-task");
+    const { dealId, buyerHeaders } = await setupDeal("code-task");
 
     await app.inject({
       method: "POST",
@@ -182,7 +182,7 @@ describe("Credential Vault", () => {
 
     const getRes = await app.inject({
       method: "GET",
-      url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}`,
+      url: `/api/deals/${dealId}/fulfillment`,
       headers: buyerHeaders,
     });
     expect(getRes.statusCode).toBe(200);
@@ -192,7 +192,7 @@ describe("Credential Vault", () => {
 
   it("returns decrypted fulfillment when authorized participant requests decrypt", async () => {
     const { app, sql } = await createTestApp();
-    const { dealId, buyerId, buyerHeaders } = await setupDeal("code-task");
+    const { dealId, buyerHeaders } = await setupDeal("code-task");
 
     await app.inject({
       method: "POST",
@@ -211,7 +211,7 @@ describe("Credential Vault", () => {
 
     const getRes = await app.inject({
       method: "GET",
-      url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}&decrypt=true`,
+      url: `/api/deals/${dealId}/fulfillment?decrypt=true`,
       headers: buyerHeaders,
     });
 
@@ -231,11 +231,11 @@ describe("Credential Vault", () => {
 
   it("rejects decrypt requests from unauthorized agents", async () => {
     const { app } = await createTestApp();
-    const { dealId, attackerId, attackerHeaders } = await setupDeal("code-task");
+    const { dealId, attackerHeaders } = await setupDeal("code-task");
 
     const getRes = await app.inject({
       method: "GET",
-      url: `/api/deals/${dealId}/fulfillment?agentId=${attackerId}&decrypt=true`,
+      url: `/api/deals/${dealId}/fulfillment?decrypt=true`,
       headers: attackerHeaders,
     });
 
@@ -244,7 +244,7 @@ describe("Credential Vault", () => {
 
   it("rotates credentials and increments rotation_count", async () => {
     const { app, sql } = await createTestApp();
-    const { dealId, buyerId, buyerHeaders } = await setupDeal("code-task");
+    const { dealId, buyerHeaders } = await setupDeal("code-task");
 
     await app.inject({
       method: "POST",
@@ -275,7 +275,7 @@ describe("Credential Vault", () => {
 
     const getRes = await app.inject({
       method: "GET",
-      url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}&decrypt=true`,
+      url: `/api/deals/${dealId}/fulfillment?decrypt=true`,
       headers: buyerHeaders,
     });
     const body = JSON.parse(getRes.body) as { fulfillment_data: Record<string, unknown> };
@@ -322,7 +322,7 @@ describe("Credential Vault", () => {
 
   it("fires expiry warning when fulfillment expires within 24h", async () => {
     const { app, sql } = await createTestApp();
-    const { dealId, buyerId, buyerHeaders } = await setupDeal("generic");
+    const { dealId, buyerHeaders } = await setupDeal("generic");
 
     await app.inject({
       method: "POST",
@@ -355,7 +355,7 @@ describe("Credential Vault", () => {
 
     const getRes = await app.inject({
       method: "GET",
-      url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}`,
+      url: `/api/deals/${dealId}/fulfillment`,
       headers: buyerHeaders,
     });
     expect(getRes.statusCode).toBe(200);
@@ -372,7 +372,7 @@ describe("Credential Vault", () => {
 
   it("auto-expires fulfillment when expiry has passed", async () => {
     const { app } = await createTestApp();
-    const { dealId, buyerId, buyerHeaders } = await setupDeal("generic");
+    const { dealId, buyerHeaders } = await setupDeal("generic");
 
     await app.inject({
       method: "POST",
@@ -400,7 +400,7 @@ describe("Credential Vault", () => {
 
     const getRes = await app.inject({
       method: "GET",
-      url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}`,
+      url: `/api/deals/${dealId}/fulfillment`,
       headers: buyerHeaders,
     });
 

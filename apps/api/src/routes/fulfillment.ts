@@ -275,9 +275,12 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields });
   });
 
-  app.get("/api/deals/:id/fulfillment", async (request, reply) => {
+  app.get("/api/deals/:id/fulfillment", { preHandler: app.authenticate }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const query = getFulfillmentSchema.parse(request.query ?? {});
+    const requesterAgentId = getRequesterAgentId(request, reply);
+    if (!requesterAgentId) return;
+    const actorId = requesterAgentId;
 
     const [deal] = await sql`
       SELECT id, buyer_agent_id, seller_agent_id
@@ -285,7 +288,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       WHERE id = ${id}
     `;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
-    if (query.agentId !== deal.buyer_agent_id && query.agentId !== deal.seller_agent_id) {
+    if (actorId !== deal.buyer_agent_id && actorId !== deal.seller_agent_id) {
       return reply.code(403).send({ error: "Not authorized for this deal" });
     }
 
@@ -303,7 +306,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       },
     );
 
-    const isBuyer = query.agentId === deal.buyer_agent_id;
+    const isBuyer = actorId === deal.buyer_agent_id;
     const canDecryptBuyerData = isBuyer || query.decrypt;
 
     const rawBuyerData = checked.buyer_data;
@@ -326,7 +329,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     }
 
     if (query.decrypt) {
-      await logCredentialAccess(String(checked.id), query.agentId, "decrypt", request.ip);
+      await logCredentialAccess(String(checked.id), actorId, "decrypt", request.ip);
     }
 
     return { ...checked, fulfillment_data: fulfillmentData, buyer_data: buyerData };

@@ -95,7 +95,7 @@ describe("Fulfillment API", () => {
 
     const getRes = await app.inject({
       method: "GET",
-      url: `/api/deals/${dealId}/fulfillment?agentId=${buyerId}`,
+      url: `/api/deals/${dealId}/fulfillment`,
       headers: buyerHeaders,
     });
     expect(getRes.statusCode).toBe(200);
@@ -158,10 +158,21 @@ describe("Fulfillment API", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: `/api/deals/${dealId}/fulfillment?agentId=${attackerId}`,
+      url: `/api/deals/${dealId}/fulfillment`,
       headers: attackerHeaders,
     });
 
     expect(response.statusCode).toBe(403);
+  });
+
+  it("requires API key auth to read fulfillment", async () => {
+    const { app } = await createTestApp();
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/deals/${dealId}/fulfillment`,
+    });
+
+    expect(response.statusCode).toBe(401);
   });
 });
