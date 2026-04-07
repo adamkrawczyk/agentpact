@@ -124,15 +124,18 @@ export async function initAuth(
           ON CONFLICT (id) DO NOTHING
         `;
 
-        await db`
+        const insertedCredentials = await db`
           INSERT INTO agent_credentials (agent_id, wallet_address, api_key_hash)
           VALUES (${body.agentId}, ${walletAddress}, ${apiKeyHash})
-          ON CONFLICT (agent_id) DO UPDATE
-            SET api_key_hash = EXCLUDED.api_key_hash,
-                wallet_address = EXCLUDED.wallet_address,
-                revoked_at = NULL,
-                created_at = NOW()
+          ON CONFLICT (agent_id) DO NOTHING
+          RETURNING agent_id
         `;
+
+        if (insertedCredentials.length === 0) {
+          return reply.code(409).send({
+            error: "Agent already registered. Use /api/auth/rotate-key to update credentials."
+          });
+        }
       } catch {
         return reply.code(500).send({ error: "Registration failed" });
       }

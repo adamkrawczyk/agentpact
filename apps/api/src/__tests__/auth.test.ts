@@ -6,24 +6,30 @@ const agentId = "550e8400-e29b-41d4-a716-446655440000";
 const walletAddress = "0x1234567890123456789012345678901234567890";
 
 function createMockSql() {
-  const credentials = new Map<string, { agentId: string; walletAddress: string | null; revoked: boolean }>();
+  const credentialsByHash = new Map<string, { agentId: string; walletAddress: string | null; revoked: boolean }>();
+  const credentialHashesByAgentId = new Map<string, string>();
 
   const mockSql = async (template: TemplateStringsArray, ...parameters: readonly unknown[]) => {
     const statement = template.join(" ");
 
     if (statement.includes("INSERT INTO agent_credentials")) {
       const [registeredAgentId, registeredWalletAddress, apiKeyHash] = parameters as [string, string | null, string];
-      credentials.set(apiKeyHash, {
+      if (credentialHashesByAgentId.has(registeredAgentId)) {
+        return [];
+      }
+
+      credentialHashesByAgentId.set(registeredAgentId, apiKeyHash);
+      credentialsByHash.set(apiKeyHash, {
         agentId: registeredAgentId,
         walletAddress: registeredWalletAddress,
         revoked: false
       });
-      return [];
+      return [{ agent_id: registeredAgentId }];
     }
 
     if (statement.includes("SELECT agent_id, wallet_address")) {
       const [apiKeyHash] = parameters as [string];
-      const found = credentials.get(apiKeyHash);
+      const found = credentialsByHash.get(apiKeyHash);
       if (!found || found.revoked) {
         return [];
       }
@@ -32,7 +38,7 @@ function createMockSql() {
 
     if (statement.includes("UPDATE agent_credentials")) {
       const [apiKeyHash] = parameters as [string];
-      const found = credentials.get(apiKeyHash);
+      const found = credentialsByHash.get(apiKeyHash);
       if (found) {
         found.revoked = true;
       }
@@ -82,6 +88,36 @@ describe("Auth", () => {
     const body = JSON.parse(response.body) as { apiKey: string; agentId: string };
     expect(body.apiKey).toBeTruthy();
     expect(body.agentId).toBe(agentId);
+    await app.close();
+  });
+
+  it("rejects duplicate registration for an existing agent", async () => {
+    const app = Fastify();
+    await initAuth(app, createMockSql());
+
+    const firstResponse = await app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: {
+        agentId,
+        walletAddress
+      }
+    });
+
+    const secondResponse = await app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: {
+        agentId,
+        walletAddress: "0x9999999999999999999999999999999999999999"
+      }
+    });
+
+    expect(firstResponse.statusCode).toBe(201);
+    expect(secondResponse.statusCode).toBe(409);
+    expect(JSON.parse(secondResponse.body)).toEqual({
+      error: "Agent already registered. Use /api/auth/rotate-key to update credentials."
+    });
     await app.close();
   });
 
