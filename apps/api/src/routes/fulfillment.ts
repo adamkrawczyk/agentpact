@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
@@ -42,6 +42,24 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       INSERT INTO credential_access_log (fulfillment_id, agent_id, action, ip_address)
       VALUES (${fulfillmentId}, ${agentId}, ${action}, ${ipAddress ?? null})
     `;
+  }
+
+  function sendValidationError(reply: FastifyReply, error: z.ZodError, message = "Validation error") {
+    return reply.code(400).send({ error: message, details: error.issues });
+  }
+
+  function parseOrReply<TSchema extends z.ZodTypeAny>(
+    reply: FastifyReply,
+    schema: TSchema,
+    value: unknown,
+    message = "Validation error",
+  ): z.infer<TSchema> | null {
+    const parsed = schema.safeParse(value);
+    if (!parsed.success) {
+      sendValidationError(reply, parsed.error, message);
+      return null;
+    }
+    return parsed.data;
   }
 
   async function applyFulfillmentExpiryChecks(
@@ -115,7 +133,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
   app.post("/api/deals/:id/fulfillment", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = provideFulfillmentSchema.parse(request.body);
+    const body = parseOrReply(reply, provideFulfillmentSchema, request.body);
+    if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
     if (body.agentId !== requesterAgentId) {
@@ -136,7 +155,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
     const typeKey = String(deal.fulfillment_type) as keyof typeof FULFILLMENT_TYPES;
     const typeConfig = FULFILLMENT_TYPES[typeKey] ?? FULFILLMENT_TYPES.generic;
-    const parsedData = typeConfig.schema.parse(body.fulfillmentData);
+    const parsedData = parseOrReply(reply, typeConfig.schema, body.fulfillmentData, "Invalid fulfillment data");
+    if (!parsedData) return;
     const parsedRecord = asRecord(parsedData);
 
     const expiresAt =
@@ -220,7 +240,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
   app.post("/api/deals/:id/fulfillment/buyer", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = provideBuyerFulfillmentSchema.parse(request.body);
+    const body = parseOrReply(reply, provideBuyerFulfillmentSchema, request.body);
+    if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
     if (body.agentId !== requesterAgentId) {
@@ -277,7 +298,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
   app.get("/api/deals/:id/fulfillment", { preHandler: app.authenticate }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const query = getFulfillmentSchema.parse(request.query ?? {});
+    const query = parseOrReply(reply, getFulfillmentSchema, request.query ?? {});
+    if (!query) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
     const actorId = requesterAgentId;
@@ -337,7 +359,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
   app.post("/api/deals/:id/fulfillment/rotate", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = rotateCredentialSchema.parse(request.body);
+    const body = parseOrReply(reply, rotateCredentialSchema, request.body);
+    if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
     if (body.agentId !== requesterAgentId) {
@@ -390,7 +413,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
   app.get("/api/deals/:id/fulfillment/audit", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const query = z.object({ agentId: z.string().uuid() }).parse(request.query ?? {});
+    const query = parseOrReply(reply, z.object({ agentId: z.string().uuid() }), request.query ?? {});
+    if (!query) return;
     await ensureCredentialVaultSchema(vaultSql);
 
     const [deal] = await sql`
@@ -418,7 +442,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
   app.post("/api/deals/:id/fulfillment/request-rotation", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = requestRotationSchema.parse(request.body);
+    const body = parseOrReply(reply, requestRotationSchema, request.body);
+    if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
     if (body.agentId !== requesterAgentId) {
@@ -459,7 +484,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
   app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = verifyFulfillmentSchema.parse(request.body);
+    const body = parseOrReply(reply, verifyFulfillmentSchema, request.body);
+    if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
     if (body.agentId !== requesterAgentId) {
@@ -513,10 +539,12 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
+    const body = parseOrReply(reply, confirmDeliverySchema, request.body);
+    if (!body) return;
+
     try {
     const { id } = request.params as { id: string };
     const idem = idempotencyKey(request.headers as Record<string, unknown>);
-    const body = confirmDeliverySchema.parse(request.body);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
     if (body.agentId !== requesterAgentId) {
@@ -598,22 +626,28 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       release: releaseResult,
     };
     } catch (err: any) {
-      console.error("[confirm-delivery] Error:", err.message, err.stack);
-      return reply.code(500).send({ error: "Internal server error", detail: err.message });
+      request.log.error(err, "confirm-delivery failed");
+      return reply.code(500).send({ error: "Internal server error" });
     }
   });
 
   // ── Simplified deal close (one-call completion for buyers) ──────────
   app.post("/api/deals/:id/close", async (request, reply) => {
-    try {
-      const { id } = request.params as { id: string };
-      const idem = idempotencyKey(request.headers as Record<string, unknown>);
-      const body = z.object({
+    const body = parseOrReply(
+      reply,
+      z.object({
         agentId: z.string().uuid(),
         rating: z.number().min(1).max(5).optional(),
         notes: z.string().optional(),
         skipOnChainRelease: z.boolean().optional().default(false),
-      }).parse(request.body);
+      }),
+      request.body,
+    );
+    if (!body) return;
+
+    try {
+      const { id } = request.params as { id: string };
+      const idem = idempotencyKey(request.headers as Record<string, unknown>);
       const requesterAgentId = getRequesterAgentId(request, reply);
       if (!requesterAgentId) return;
       if (body.agentId !== requesterAgentId) {
@@ -680,8 +714,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       const milestones = await sql`SELECT * FROM milestones WHERE deal_id = ${id} ORDER BY idx`;
       return { ...updatedDeal, milestones, release: releaseResult };
     } catch (err: any) {
-      console.error("[deal/close] Error:", err.message, err.stack);
-      return reply.code(500).send({ error: "Internal server error", detail: err.message });
+      request.log.error(err, "deal close failed");
+      return reply.code(500).send({ error: "Internal server error" });
     }
   });
 
@@ -724,7 +758,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
   app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = revokeFulfillmentSchema.parse(request.body);
+    const body = parseOrReply(reply, revokeFulfillmentSchema, request.body);
+    if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
     if (body.agentId !== requesterAgentId) {

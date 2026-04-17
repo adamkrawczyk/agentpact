@@ -270,19 +270,42 @@ function renderTable(headers, rows) {
     const fmt = (row) => row.map((col, i) => (col ?? "").padEnd(widths[i], " ")).join(" | ");
     return [fmt(headers), sep, ...rows.map((row) => fmt(row))].join("\n");
 }
-async function getJson(path) {
-    const response = await fetch(`${API_BASE}${path}`);
+function upstreamWarning(path, error) {
+    const message = error instanceof Error ? error.message : String(error ?? "Unknown error");
+    const normalized = message.toLowerCase();
+    if (normalized.includes("timed out") || normalized.includes("timeout") || normalized.includes("aborted")) {
+        return `Live marketplace data from ${path} timed out. Showing limited fallback content.`;
+    }
+    return `Live marketplace data from ${path} is temporarily unavailable. Showing limited fallback content.`;
+}
+async function getJson(path, options = {}) {
+    const response = await fetch(`${API_BASE}${path}`, {
+        signal: AbortSignal.timeout(options.timeoutMs ?? 8000),
+    });
     if (!response.ok) {
-        throw new Error(`API ${path} failed with ${response.status}`);
+        const error = new Error(`API ${path} failed with ${response.status}`);
+        error.statusCode = response.status;
+        throw error;
     }
     return response.json();
+}
+async function getJsonWithFallback(path, fallback, options = {}) {
+    try {
+        return { data: (await getJson(path, options)), warning: null };
+    }
+    catch (error) {
+        return { data: fallback, warning: upstreamWarning(path, error) };
+    }
+}
+function warningSection(message) {
+    return `<section class="row"><pre>! ${escapeHtml(message)}</pre></section>`;
 }
 function wantsJson(url, accept) {
     return url.endsWith(".json") || (accept?.includes("application/json") ?? false);
 }
 app.get("/", async () => {
     const fallbackStats = { active_offers: 0, open_needs: 0, live_deals: 0, total_agents: 0 };
-    const stats = (await getJson("/api/public/overview").catch(() => fallbackStats));
+    const { data: stats, warning } = await getJsonWithFallback("/api/public/overview", fallbackStats);
     const externalAgents = stats.external_agents ?? stats.total_agents;
     const landingStyles = `
     .hero { text-align: center; padding: 56px 16px 40px; border-bottom: 1px solid var(--line); }
@@ -334,6 +357,7 @@ app.get("/", async () => {
   `;
     const body = `
 <style>${landingStyles}</style>
+${warning ? warningSection(warning) : ""}
 
 <!-- HERO -->
 <section class="hero">
@@ -541,20 +565,42 @@ function mdToPlainHtml(md) {
         .replace(/\n/g, "<br>");
 }
 const offersHandler = async (request, reply) => {
-    const data = (await getJson("/api/offers"));
-    if (wantsJson(request.url, request.headers.accept))
-        return reply.send(data);
+    if (wantsJson(request.url, request.headers.accept)) {
+        return reply.send((await getJson("/api/offers")));
+    }
+    const { data, warning } = await getJsonWithFallback("/api/offers", []);
     const cards = data.map(renderOfferCard).join("\n");
-    return page("Offers", `<section class="row"><pre>$ list offers (${data.length})</pre></section>\n<div class="cards">${cards}</div>`);
+    const sections = [`<section class="row"><pre>$ list offers (${data.length})</pre></section>`];
+    if (warning)
+        sections.push(warningSection(warning));
+    sections.push(data.length > 0
+        ? `<div class="cards">${cards}</div>`
+        : `<section class="row"><pre>No offers available right now. Try again shortly.</pre></section>`);
+    return page("Offers", sections.join("\n"));
 };
 app.get("/offers", offersHandler);
 app.get("/offers.json", offersHandler);
 // Offer detail page
 app.get("/offers/:id", async (request, reply) => {
     const { id } = request.params;
-    const offer = (await getJson(`/api/offers/${id}`));
-    if (wantsJson(request.url, request.headers.accept))
-        return reply.send(offer);
+    if (wantsJson(request.url, request.headers.accept)) {
+        return reply.send((await getJson(`/api/offers/${id}`)));
+    }
+    let offer;
+    try {
+        offer = (await getJson(`/api/offers/${id}`));
+    }
+    catch (error) {
+        const statusCode = typeof error.statusCode === "number"
+            ? Number(error.statusCode)
+            : 503;
+        const title = statusCode === 404 ? "Offer not found" : "Offer temporarily unavailable";
+        const message = statusCode === 404
+            ? "This offer could not be found."
+            : upstreamWarning(`/api/offers/${id}`, error);
+        const body = `<a href="/offers" class="back-link">← back to offers</a>${warningSection(message)}`;
+        return reply.code(statusCode === 404 ? 404 : 503).send(page(title, body));
+    }
     const tags = (offer.tags ?? []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
     const location = offer.location ? `${escapeHtml(offer.location.city ?? "")}${offer.location.country ? ", " + escapeHtml(offer.location.country) : ""}` : "-";
     const description = offer.description_md ?? "";
@@ -580,9 +626,10 @@ app.get("/offers/:id", async (request, reply) => {
     return page(offer.title, body);
 });
 const needsHandler = async (request, reply) => {
-    const data = (await getJson("/api/needs"));
-    if (wantsJson(request.url, request.headers.accept))
-        return reply.send(data);
+    if (wantsJson(request.url, request.headers.accept)) {
+        return reply.send((await getJson("/api/needs")));
+    }
+    const { data, warning } = await getJsonWithFallback("/api/needs", []);
     const cards = data.map(need => {
         const tags = (need.tags ?? []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
         const budget = need.budget_min || need.budget_max
@@ -594,14 +641,21 @@ const needsHandler = async (request, reply) => {
   ${tags ? `<div class="card-tags">${tags}</div>` : ""}
 </div>`;
     }).join("\n");
-    return page("Needs", `<section class="row"><pre>$ list needs (${data.length})</pre></section>\n<div class="cards">${cards}</div>`);
+    const sections = [`<section class="row"><pre>$ list needs (${data.length})</pre></section>`];
+    if (warning)
+        sections.push(warningSection(warning));
+    sections.push(data.length > 0
+        ? `<div class="cards">${cards}</div>`
+        : `<section class="row"><pre>No needs available right now. Try again shortly.</pre></section>`);
+    return page("Needs", sections.join("\n"));
 };
 app.get("/needs", needsHandler);
 app.get("/needs.json", needsHandler);
 const dealsHandler = async (request, reply) => {
-    const data = (await getJson("/api/deals"));
-    if (wantsJson(request.url, request.headers.accept))
-        return reply.send(data);
+    if (wantsJson(request.url, request.headers.accept)) {
+        return reply.send((await getJson("/api/deals")));
+    }
+    const { data, warning } = await getJsonWithFallback("/api/deals", []);
     const cards = data.map(deal => {
         const statusColor = deal.status === "accepted" ? "#00ff41" : deal.status === "disputed" ? "#ff4141" : "#FFD700";
         return `<div class="card">
@@ -612,7 +666,13 @@ const dealsHandler = async (request, reply) => {
   <div class="card-row"><span class="card-label">seller</span><span class="card-value">${escapeHtml(safe(deal.seller_agent_id).slice(0, 8))}…</span></div>
 </div>`;
     }).join("\n");
-    return page("Deals", `<section class="row"><pre>$ list deals (${data.length})</pre></section>\n<div class="cards">${cards}</div>`);
+    const sections = [`<section class="row"><pre>$ list deals (${data.length})</pre></section>`];
+    if (warning)
+        sections.push(warningSection(warning));
+    sections.push(data.length > 0
+        ? `<div class="cards">${cards}</div>`
+        : `<section class="row"><pre>No deals available right now. Try again shortly.</pre></section>`);
+    return page("Deals", sections.join("\n"));
 };
 app.get("/deals", dealsHandler);
 app.get("/deals.json", dealsHandler);
@@ -626,9 +686,10 @@ function tierBadge(tier) {
 const leaderboardHandler = async (request, reply) => {
     const q = (request.query ?? {});
     const sortBy = q.sortBy ?? "reputation";
-    const data = (await getJson(`/api/leaderboard?sortBy=${sortBy}&limit=50`));
-    if (wantsJson(request.url, request.headers.accept))
-        return reply.send(data);
+    if (wantsJson(request.url, request.headers.accept)) {
+        return reply.send((await getJson(`/api/leaderboard?sortBy=${sortBy}&limit=50`)));
+    }
+    const { data, warning } = await getJsonWithFallback(`/api/leaderboard?sortBy=${sortBy}&limit=50`, []);
     const sortButtons = `<span class="muted">sort:</span> ${["reputation", "deals", "volume"]
         .map((s) => s === sortBy ? `<b>[${s}]</b>` : `<a href="/leaderboard?sortBy=${s}">[${s}]</a>`)
         .join(" ")}`;
@@ -657,10 +718,15 @@ const leaderboardHandler = async (request, reply) => {
       <td>${escapeHtml(entry.memberSince ? new Date(entry.memberSince).toISOString().slice(0, 10) : "-")}</td>
     </tr>
   `).join("");
-    const body = `
-<section class="row"><div class="nav-links"><span class="nav-chip">$ leaderboard ${escapeHtml(sortBy)}</span><span>${sortButtons}</span></div></section>
-<div class="leaderboard-cards mobile-only">${mobileCards}</div>
-<section class="row desktop-only"><div class="table-scroll"><table class="api-table">
+    const sections = [`<section class="row"><div class="nav-links"><span class="nav-chip">$ leaderboard ${escapeHtml(sortBy)}</span><span>${sortButtons}</span></div></section>`];
+    if (warning)
+        sections.push(warningSection(warning));
+    if (data.length === 0) {
+        sections.push(`<section class="row"><pre>No leaderboard data available right now. Try again shortly.</pre></section>`);
+    }
+    else {
+        sections.push(`<div class="leaderboard-cards mobile-only">${mobileCards}</div>`);
+        sections.push(`<section class="row desktop-only"><div class="table-scroll"><table class="api-table">
   <thead>
     <tr>
       <th>#</th>
@@ -675,8 +741,9 @@ const leaderboardHandler = async (request, reply) => {
     </tr>
   </thead>
   <tbody>${tableRows}</tbody>
-</table></div></section>`;
-    return page("Leaderboard", body);
+</table></div></section>`);
+    }
+    return page("Leaderboard", sections.join("\n"));
 };
 app.get("/leaderboard", leaderboardHandler);
 app.get("/leaderboard.json", leaderboardHandler);

@@ -17,6 +17,17 @@ export async function registerRoutes(app, sql, deps) {
       VALUES (${fulfillmentId}, ${agentId}, ${action}, ${ipAddress ?? null})
     `;
     }
+    function sendValidationError(reply, error, message = "Validation error") {
+        return reply.code(400).send({ error: message, details: error.issues });
+    }
+    function parseOrReply(reply, schema, value, message = "Validation error") {
+        const parsed = schema.safeParse(value);
+        if (!parsed.success) {
+            sendValidationError(reply, parsed.error, message);
+            return null;
+        }
+        return parsed.data;
+    }
     async function applyFulfillmentExpiryChecks(deal, fulfillment) {
         await ensureCredentialVaultSchema(vaultSql);
         if (!fulfillment.expires_at)
@@ -75,7 +86,9 @@ export async function registerRoutes(app, sql, deps) {
     });
     app.post("/api/deals/:id/fulfillment", async (request, reply) => {
         const { id } = request.params;
-        const body = provideFulfillmentSchema.parse(request.body);
+        const body = parseOrReply(reply, provideFulfillmentSchema, request.body);
+        if (!body)
+            return;
         const requesterAgentId = getRequesterAgentId(request, reply);
         if (!requesterAgentId)
             return;
@@ -97,7 +110,9 @@ export async function registerRoutes(app, sql, deps) {
         }
         const typeKey = String(deal.fulfillment_type);
         const typeConfig = FULFILLMENT_TYPES[typeKey] ?? FULFILLMENT_TYPES.generic;
-        const parsedData = typeConfig.schema.parse(body.fulfillmentData);
+        const parsedData = parseOrReply(reply, typeConfig.schema, body.fulfillmentData, "Invalid fulfillment data");
+        if (!parsedData)
+            return;
         const parsedRecord = asRecord(parsedData);
         const expiresAt = typeof parsedData === "object" && parsedData !== null && "expires_at" in parsedData
             ? parsedData.expires_at ?? null
@@ -166,7 +181,9 @@ export async function registerRoutes(app, sql, deps) {
     });
     app.post("/api/deals/:id/fulfillment/buyer", async (request, reply) => {
         const { id } = request.params;
-        const body = provideBuyerFulfillmentSchema.parse(request.body);
+        const body = parseOrReply(reply, provideBuyerFulfillmentSchema, request.body);
+        if (!body)
+            return;
         const requesterAgentId = getRequesterAgentId(request, reply);
         if (!requesterAgentId)
             return;
@@ -217,9 +234,15 @@ export async function registerRoutes(app, sql, deps) {
         });
         return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields });
     });
-    app.get("/api/deals/:id/fulfillment", async (request, reply) => {
+    app.get("/api/deals/:id/fulfillment", { preHandler: app.authenticate }, async (request, reply) => {
         const { id } = request.params;
-        const query = getFulfillmentSchema.parse(request.query ?? {});
+        const query = parseOrReply(reply, getFulfillmentSchema, request.query ?? {});
+        if (!query)
+            return;
+        const requesterAgentId = getRequesterAgentId(request, reply);
+        if (!requesterAgentId)
+            return;
+        const actorId = requesterAgentId;
         const [deal] = await sql `
       SELECT id, buyer_agent_id, seller_agent_id
       FROM deals
@@ -227,7 +250,7 @@ export async function registerRoutes(app, sql, deps) {
     `;
         if (!deal)
             return reply.code(404).send({ error: "Deal not found" });
-        if (query.agentId !== deal.buyer_agent_id && query.agentId !== deal.seller_agent_id) {
+        if (actorId !== deal.buyer_agent_id && actorId !== deal.seller_agent_id) {
             return reply.code(403).send({ error: "Not authorized for this deal" });
         }
         const [fulfillment] = await sql `SELECT * FROM deal_fulfillment WHERE deal_id = ${id}`;
@@ -240,7 +263,7 @@ export async function registerRoutes(app, sql, deps) {
             expires_at: fulfillment.expires_at ?? null,
             last_expiry_warning_at: fulfillment.last_expiry_warning_at ?? null,
         });
-        const isBuyer = query.agentId === deal.buyer_agent_id;
+        const isBuyer = actorId === deal.buyer_agent_id;
         const canDecryptBuyerData = isBuyer || query.decrypt;
         const rawBuyerData = checked.buyer_data;
         const buyerDataRecord = asRecord(rawBuyerData);
@@ -254,13 +277,15 @@ export async function registerRoutes(app, sql, deps) {
             buyerData = await retrieveBuyerContext(String(checked.id), buyerDataRecord);
         }
         if (query.decrypt) {
-            await logCredentialAccess(String(checked.id), query.agentId, "decrypt", request.ip);
+            await logCredentialAccess(String(checked.id), actorId, "decrypt", request.ip);
         }
         return { ...checked, fulfillment_data: fulfillmentData, buyer_data: buyerData };
     });
     app.post("/api/deals/:id/fulfillment/rotate", async (request, reply) => {
         const { id } = request.params;
-        const body = rotateCredentialSchema.parse(request.body);
+        const body = parseOrReply(reply, rotateCredentialSchema, request.body);
+        if (!body)
+            return;
         const requesterAgentId = getRequesterAgentId(request, reply);
         if (!requesterAgentId)
             return;
@@ -309,7 +334,9 @@ export async function registerRoutes(app, sql, deps) {
     });
     app.get("/api/deals/:id/fulfillment/audit", async (request, reply) => {
         const { id } = request.params;
-        const query = z.object({ agentId: z.string().uuid() }).parse(request.query ?? {});
+        const query = parseOrReply(reply, z.object({ agentId: z.string().uuid() }), request.query ?? {});
+        if (!query)
+            return;
         await ensureCredentialVaultSchema(vaultSql);
         const [deal] = await sql `
       SELECT id, seller_agent_id
@@ -334,7 +361,9 @@ export async function registerRoutes(app, sql, deps) {
     });
     app.post("/api/deals/:id/fulfillment/request-rotation", async (request, reply) => {
         const { id } = request.params;
-        const body = requestRotationSchema.parse(request.body);
+        const body = parseOrReply(reply, requestRotationSchema, request.body);
+        if (!body)
+            return;
         const requesterAgentId = getRequesterAgentId(request, reply);
         if (!requesterAgentId)
             return;
@@ -372,7 +401,9 @@ export async function registerRoutes(app, sql, deps) {
     });
     app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
         const { id } = request.params;
-        const body = verifyFulfillmentSchema.parse(request.body);
+        const body = parseOrReply(reply, verifyFulfillmentSchema, request.body);
+        if (!body)
+            return;
         const requesterAgentId = getRequesterAgentId(request, reply);
         if (!requesterAgentId)
             return;
@@ -422,10 +453,12 @@ export async function registerRoutes(app, sql, deps) {
         return updated;
     });
     app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
+        const body = parseOrReply(reply, confirmDeliverySchema, request.body);
+        if (!body)
+            return;
         try {
             const { id } = request.params;
             const idem = idempotencyKey(request.headers);
-            const body = confirmDeliverySchema.parse(request.body);
             const requesterAgentId = getRequesterAgentId(request, reply);
             if (!requesterAgentId)
                 return;
@@ -500,21 +533,23 @@ export async function registerRoutes(app, sql, deps) {
             };
         }
         catch (err) {
-            console.error("[confirm-delivery] Error:", err.message, err.stack);
-            return reply.code(500).send({ error: "Internal server error", detail: err.message });
+            request.log.error(err, "confirm-delivery failed");
+            return reply.code(500).send({ error: "Internal server error" });
         }
     });
     // ── Simplified deal close (one-call completion for buyers) ──────────
     app.post("/api/deals/:id/close", async (request, reply) => {
+        const body = parseOrReply(reply, z.object({
+            agentId: z.string().uuid(),
+            rating: z.number().min(1).max(5).optional(),
+            notes: z.string().optional(),
+            skipOnChainRelease: z.boolean().optional().default(false),
+        }), request.body);
+        if (!body)
+            return;
         try {
             const { id } = request.params;
             const idem = idempotencyKey(request.headers);
-            const body = z.object({
-                agentId: z.string().uuid(),
-                rating: z.number().min(1).max(5).optional(),
-                notes: z.string().optional(),
-                skipOnChainRelease: z.boolean().optional().default(false),
-            }).parse(request.body);
             const requesterAgentId = getRequesterAgentId(request, reply);
             if (!requesterAgentId)
                 return;
@@ -575,8 +610,8 @@ export async function registerRoutes(app, sql, deps) {
             return { ...updatedDeal, milestones, release: releaseResult };
         }
         catch (err) {
-            console.error("[deal/close] Error:", err.message, err.stack);
-            return reply.code(500).send({ error: "Internal server error", detail: err.message });
+            request.log.error(err, "deal close failed");
+            return reply.code(500).send({ error: "Internal server error" });
         }
     });
     // ── Auto-complete timed-out delivered deals (cron-friendly) ─────────
@@ -613,7 +648,9 @@ export async function registerRoutes(app, sql, deps) {
     // NOTE: admin routes (auto-complete-timeouts, force-close) live in routes/admin.ts
     app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {
         const { id } = request.params;
-        const body = revokeFulfillmentSchema.parse(request.body);
+        const body = parseOrReply(reply, revokeFulfillmentSchema, request.body);
+        if (!body)
+            return;
         const requesterAgentId = getRequesterAgentId(request, reply);
         if (!requesterAgentId)
             return;

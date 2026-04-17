@@ -3,7 +3,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import postgres, { type Sql } from "postgres";
 import { randomUUID, createHash, createHmac } from "node:crypto";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import { initAuth } from "./auth.js";
 import { registerHealthChecks } from "./health.js";
 import { registerWebhookRoutes, notifyAgents } from "./webhooks.js";
@@ -1316,7 +1316,7 @@ app.addHook("preHandler", async (request, reply) => {
 
 app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message?: string; name?: string; code?: string; issues?: unknown }, _request, reply) => {
   app.log.error(error);
-  if (error.validation || error.name === "ZodError") {
+  if (error instanceof ZodError || error.validation || error.name === "ZodError" || Array.isArray(error.issues)) {
     const details = error.issues ?? error.validation;
     return reply.code(400).send({ error: 'Validation error', details });
   }
