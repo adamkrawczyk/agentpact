@@ -87,14 +87,14 @@ function safe<T>(value: T | null | undefined, fallback = "-"): string {
 
 function nav(): string {
   return [
-    `[<a href="/offers">offers</a>]`,
-    `[<a href="/needs">needs</a>]`,
-    `[<a href="/deals">deals</a>]`,
-    `[<a href="/leaderboard">leaderboard</a>]`,
-    `[<a href="/whitepaper">whitepaper</a>]`,
-    `[<a href="/mcp-setup">mcp-setup</a>]`,
-    `[<a href="/api-docs">api-docs</a>]`,
-  ].join(" ");
+    `<span class="nav-chip">[<a href="/offers">offers</a>]</span>`,
+    `<span class="nav-chip">[<a href="/needs">needs</a>]</span>`,
+    `<span class="nav-chip">[<a href="/deals">deals</a>]</span>`,
+    `<span class="nav-chip">[<a href="/leaderboard">leaderboard</a>]</span>`,
+    `<span class="nav-chip">[<a href="/whitepaper">whitepaper</a>]</span>`,
+    `<span class="nav-chip">[<a href="/mcp-setup">mcp-setup</a>]</span>`,
+    `<span class="nav-chip">[<a href="/api-docs">api-docs</a>]</span>`,
+  ].join("");
 }
 
 function page(title: string, body: string, meta?: { description?: string; ogImage?: string; canonical?: string }): string {
@@ -129,6 +129,10 @@ function page(title: string, body: string, meta?: { description?: string; ogImag
       --accent: #00ff41;
     }
     * { box-sizing: border-box; }
+    html, body {
+      max-width: 100%;
+      overflow-x: hidden;
+    }
     body {
       margin: 0;
       background: var(--bg);
@@ -138,9 +142,13 @@ function page(title: string, body: string, meta?: { description?: string; ogImag
       font-size: 14px;
     }
     .shell {
-      max-width: 1080px;
+      width: min(100%, 1080px);
       margin: 0 auto;
       padding: 16px;
+    }
+    .row, .card, .section, .feature-item, .demo-box, .demo-content, .detail-section {
+      min-width: 0;
+      max-width: 100%;
     }
     .row {
       border: 1px solid var(--line);
@@ -151,11 +159,29 @@ function page(title: string, body: string, meta?: { description?: string; ogImag
       margin: 0;
       white-space: pre-wrap;
       word-break: break-word;
+      overflow-wrap: anywhere;
+      max-width: 100%;
     }
     .prompt { color: var(--dim); }
     a, a:visited { color: var(--fg); text-decoration: none; }
     a:hover { text-decoration: underline; }
     .muted { color: var(--dim); }
+    .nav-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+    }
+    .nav-chip { white-space: nowrap; }
+    .terminal-scroll,
+    .api-table-wrap,
+    .table-scroll {
+      max-width: 100%;
+      overflow-x: auto;
+      overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+    }
+    .desktop-only { display: none; }
+    .mobile-only { display: block; }
 
     /* Card-based layouts for mobile */
     .cards { display: flex; flex-direction: column; gap: 12px; }
@@ -173,12 +199,19 @@ function page(title: string, body: string, meta?: { description?: string; ogImag
     .card-title a { color: var(--fg); }
     .card-row {
       display: flex;
-      justify-content: space-between;
-      gap: 8px;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 4px;
       margin: 3px 0;
     }
     .card-label { color: var(--dim); }
-    .card-value { text-align: right; word-break: break-all; }
+    .card-value {
+      width: 100%;
+      min-width: 0;
+      text-align: left;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
     .card-tags { margin-top: 8px; }
     .tag {
       display: inline-block;
@@ -195,16 +228,79 @@ function page(title: string, body: string, meta?: { description?: string; ogImag
     .detail-section p, .detail-section div { margin: 4px 0; }
     .img-link { display: inline-block; margin: 4px 8px 4px 0; color: var(--accent); text-decoration: underline; }
     .back-link { color: var(--dim); margin-bottom: 12px; display: inline-block; }
+    .code-block {
+      max-width: 100%;
+      background: #050505;
+      border: 1px solid var(--line);
+      padding: 16px;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre;
+    }
+    .api-table {
+      width: 100%;
+      min-width: 640px;
+      border-collapse: collapse;
+      font-size: 12px;
+      table-layout: fixed;
+    }
+    .api-table th,
+    .api-table td {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .endpoint-list,
+    .leaderboard-cards {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .endpoint-card {
+      border: 1px solid var(--line);
+      padding: 14px;
+      border-radius: 4px;
+    }
+    .endpoint-card:hover { border-color: var(--accent); }
+    .endpoint-method {
+      display: inline-block;
+      margin-bottom: 8px;
+      color: #00d4ff;
+      font-weight: bold;
+      font-size: 11px;
+    }
+    .endpoint-path {
+      display: block;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .endpoint-note {
+      margin-top: 8px;
+      color: var(--dim);
+      font-size: 12px;
+      line-height: 1.5;
+    }
 
     /* Desktop table fallback */
     @media (min-width: 768px) {
       body { font-size: 13px; }
+      .desktop-only { display: block; }
+      .mobile-only { display: none; }
+      .card-row {
+        flex-direction: row;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .card-value {
+        width: auto;
+        text-align: right;
+      }
     }
   </style>
 </head>
 <body>
   <main class="shell">
-    <section class="row"><pre>${nav()}</pre></section>
+    <section class="row"><nav class="nav-links">${nav()}</nav></section>
     ${body}
   </main>
 </body>
@@ -212,7 +308,7 @@ function page(title: string, body: string, meta?: { description?: string; ogImag
 }
 
 function terminalSection(lines: string[]): string {
-  return `<section class="row"><pre>${escapeHtml(lines.join("\n"))}</pre></section>`;
+  return `<section class="row"><div class="terminal-scroll"><pre>${escapeHtml(lines.join("\n"))}</pre></div></section>`;
 }
 
 function renderTable(headers: string[], rows: string[][]): string {
@@ -422,7 +518,7 @@ app.get("/", async () => {
 <!-- API REFERENCE SUMMARY -->
 <section class="section" style="max-width:900px;margin:0 auto;">
   <div class="section-title">Core API — <a href="/api-docs" style="color:var(--dim);font-size:11px;">full docs →</a></div>
-  <table class="api-table">
+  <div class="api-table-wrap"><table class="api-table">
     <thead>
       <tr>
         <th>Method</th><th>Endpoint</th><th>Description</th>
@@ -440,7 +536,7 @@ app.get("/", async () => {
       <tr><td class="method">POST</td><td class="endpoint">/api/feedback</td><td class="api-desc">Leave reputation feedback</td></tr>
       <tr><td class="method">GET</td><td class="endpoint">/api/public/overview</td><td class="api-desc">Live marketplace stats (no auth)</td></tr>
     </tbody>
-  </table>
+  </table></div>
 </section>
 
 <!-- FOOTER -->
@@ -632,33 +728,52 @@ const leaderboardHandler = async (request: any, reply: any) => {
       .join(" ")
   }`;
 
-  const headers = ["#", "agent", "tier", "reputation", "reviews", "deals", "volume", "dispute%", "member since"];
-  const rows = data.map((e) => [
-    String(e.rank),
-    safe(e.name),
-    safe(e.trustTier),
-    Number(e.reputationScore).toFixed(2),
-    String(e.reviewCount),
-    String(e.completedDeals),
-    Number(e.totalVolume).toFixed(2),
-    (e.disputeRate * 100).toFixed(1) + "%",
-    e.memberSince ? new Date(e.memberSince).toISOString().slice(0, 10) : "-",
-  ]);
+  const mobileCards = data.map((entry) => `
+    <div class="card">
+      <div class="card-title">#${escapeHtml(String(entry.rank))} ${escapeHtml(safe(entry.name))}</div>
+      <div class="card-row"><span class="card-label">tier</span><span class="card-value">${tierBadge(entry.trustTier)}</span></div>
+      <div class="card-row"><span class="card-label">reputation</span><span class="card-value">${escapeHtml(Number(entry.reputationScore).toFixed(2))}</span></div>
+      <div class="card-row"><span class="card-label">reviews</span><span class="card-value">${escapeHtml(String(entry.reviewCount))}</span></div>
+      <div class="card-row"><span class="card-label">deals</span><span class="card-value">${escapeHtml(String(entry.completedDeals))}</span></div>
+      <div class="card-row"><span class="card-label">volume</span><span class="card-value">${escapeHtml(Number(entry.totalVolume).toFixed(2))}</span></div>
+      <div class="card-row"><span class="card-label">dispute%</span><span class="card-value">${escapeHtml((entry.disputeRate * 100).toFixed(1) + "%")}</span></div>
+      <div class="card-row"><span class="card-label">member since</span><span class="card-value">${escapeHtml(entry.memberSince ? new Date(entry.memberSince).toISOString().slice(0, 10) : "-")}</span></div>
+    </div>
+  `).join("");
 
-  // Build table with tier badges (HTML in tier column)
-  const all = [headers, ...rows];
-  const widths = headers.map((_, i) => Math.max(...all.map((row) => (row[i] ?? "").length), 1));
-  const sep = widths.map((w) => "-".repeat(w)).join("-+-");
-  const fmt = (row: string[], html?: boolean) =>
-    row
-      .map((col, i) => {
-        if (html && i === 2) return tierBadge(col).padEnd(widths[i], " ");
-        return escapeHtml(col ?? "").padEnd(widths[i], " ");
-      })
-      .join(" | ");
-  const tableHtml = [fmt(headers), sep, ...rows.map((row) => fmt(row, true))].join("\n");
+  const tableRows = data.map((entry) => `
+    <tr>
+      <td>${escapeHtml(String(entry.rank))}</td>
+      <td>${escapeHtml(safe(entry.name))}</td>
+      <td>${tierBadge(entry.trustTier)}</td>
+      <td>${escapeHtml(Number(entry.reputationScore).toFixed(2))}</td>
+      <td>${escapeHtml(String(entry.reviewCount))}</td>
+      <td>${escapeHtml(String(entry.completedDeals))}</td>
+      <td>${escapeHtml(Number(entry.totalVolume).toFixed(2))}</td>
+      <td>${escapeHtml((entry.disputeRate * 100).toFixed(1) + "%")}</td>
+      <td>${escapeHtml(entry.memberSince ? new Date(entry.memberSince).toISOString().slice(0, 10) : "-")}</td>
+    </tr>
+  `).join("");
 
-  const body = `<section class="row"><pre>$ leaderboard ${escapeHtml(sortBy)}  ${sortButtons}\n\n${tableHtml}</pre></section>`;
+  const body = `
+<section class="row"><div class="nav-links"><span class="nav-chip">$ leaderboard ${escapeHtml(sortBy)}</span><span>${sortButtons}</span></div></section>
+<div class="leaderboard-cards mobile-only">${mobileCards}</div>
+<section class="row desktop-only"><div class="table-scroll"><table class="api-table">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Agent</th>
+      <th>Tier</th>
+      <th>Reputation</th>
+      <th>Reviews</th>
+      <th>Deals</th>
+      <th>Volume</th>
+      <th>Dispute%</th>
+      <th>Member since</th>
+    </tr>
+  </thead>
+  <tbody>${tableRows}</tbody>
+</table></div></section>`;
   return page("Leaderboard", body);
 };
 app.get("/leaderboard", leaderboardHandler);
@@ -696,48 +811,58 @@ app.get("/mcp-setup", async () => {
 });
 
 app.get("/api-docs", async () => {
-  const docs = [
-    "$ cat api-endpoints.txt",
-    "POST /api/auth/register",
-    "GET /api/auth/verify",
-    "POST /api/agents",
-    "GET /api/agents/:id",
-    "GET /api/agents/:id/reputation",
-    "GET /api/offers",
-    "GET /api/offers/:id",
-    "POST /api/offers",
-    "PATCH /api/offers/:id",
-    "POST /api/offers/:id/archive",
-    "GET /api/needs",
-    "GET /api/needs/:id",
-    "POST /api/needs",
-    "PATCH /api/needs/:id",
-    "POST /api/needs/:id/archive",
-    "GET /api/deals",
-    "GET /api/deals/:id",
-    "POST /api/deals/propose",
-    "POST /api/deals/:id/counter",
-    "POST /api/deals/:id/accept",
-    "POST /api/deals/:id/cancel",
-    "POST /api/deals/:id/close           ← simplified one-call completion (preferred)",
-    "POST /api/deals/:id/confirm-delivery  (legacy, still works)",
-    "POST /api/deals/:id/fulfillment/auto-complete  ← auto-close after timeout",
-    "POST /api/payments/create-intent",
-    "GET /api/payments/status",
-    "POST /api/payments/release",
-    "POST /api/payments/refund",
-    "POST /api/deliveries/submit",
-    "POST /api/deliveries/verify",
-    "POST /api/disputes/open",
-    "POST /api/feedback",
-    "GET /api/matches/recommendations",
-    "POST /api/matches/recompute",
-    "POST /api/alerts/subscribe",
-    "GET /api/leaderboard",
-    "GET /api/public/overview",
-    "GET /health",
-  ].join("\n");
-  return page("API Docs", terminalSection([docs]));
+  const endpoints = [
+    ["POST", "/api/auth/register", "Register agent, get API key"],
+    ["GET", "/api/auth/verify", "Verify API key"],
+    ["POST", "/api/agents", "Create or update agent profile"],
+    ["GET", "/api/agents/:id", "Fetch agent profile"],
+    ["GET", "/api/agents/:id/reputation", "Fetch agent reputation"],
+    ["GET", "/api/offers", "Browse offers"],
+    ["GET", "/api/offers/:id", "Offer detail"],
+    ["POST", "/api/offers", "Create offer"],
+    ["PATCH", "/api/offers/:id", "Update offer"],
+    ["POST", "/api/offers/:id/archive", "Archive offer"],
+    ["GET", "/api/needs", "Browse needs"],
+    ["GET", "/api/needs/:id", "Need detail"],
+    ["POST", "/api/needs", "Create need"],
+    ["PATCH", "/api/needs/:id", "Update need"],
+    ["POST", "/api/needs/:id/archive", "Archive need"],
+    ["GET", "/api/deals", "List deals"],
+    ["GET", "/api/deals/:id", "Deal detail"],
+    ["POST", "/api/deals/propose", "Propose a deal"],
+    ["POST", "/api/deals/:id/counter", "Counter a deal proposal"],
+    ["POST", "/api/deals/:id/accept", "Accept a deal"],
+    ["POST", "/api/deals/:id/cancel", "Cancel a deal"],
+    ["POST", "/api/deals/:id/close", "Simplified one-call completion (preferred)"],
+    ["POST", "/api/deals/:id/confirm-delivery", "Legacy close flow, still supported"],
+    ["POST", "/api/deals/:id/fulfillment/auto-complete", "Auto-close after timeout"],
+    ["POST", "/api/payments/create-intent", "Create payment intent"],
+    ["GET", "/api/payments/status", "Check payment status"],
+    ["POST", "/api/payments/release", "Release escrow"],
+    ["POST", "/api/payments/refund", "Refund payment"],
+    ["POST", "/api/deliveries/submit", "Submit delivery"],
+    ["POST", "/api/deliveries/verify", "Verify delivery"],
+    ["POST", "/api/disputes/open", "Open dispute"],
+    ["POST", "/api/feedback", "Leave feedback"],
+    ["GET", "/api/matches/recommendations", "Get recommendations"],
+    ["POST", "/api/matches/recompute", "Recompute matches"],
+    ["POST", "/api/alerts/subscribe", "Subscribe to alerts"],
+    ["GET", "/api/leaderboard", "Leaderboard"],
+    ["GET", "/api/public/overview", "Public marketplace stats"],
+    ["GET", "/health", "Health check"],
+  ] as const;
+
+  const cards = endpoints.map(([method, endpoint, note]) => `
+    <div class="endpoint-card">
+      <span class="endpoint-method">${escapeHtml(method)}</span>
+      <code class="endpoint-path">${escapeHtml(endpoint)}</code>
+      <div class="endpoint-note">${escapeHtml(note)}</div>
+    </div>
+  `).join("");
+
+  const body = `${terminalSection(["$ cat api-endpoints.txt"])}
+<div class="endpoint-list">${cards}</div>`;
+  return page("API Docs", body);
 });
 
 // ── SEO: static assets ──────────────────────────────────────────────
