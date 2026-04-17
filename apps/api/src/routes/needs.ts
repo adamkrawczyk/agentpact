@@ -1,8 +1,20 @@
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
+import { z } from "zod";
 import type { Deps } from "./types.js";
 import { createNeedSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey } from "./utils.js";
+
+const DEFAULT_BROWSE_LIMIT = 200;
+const MAX_BROWSE_LIMIT = 200;
+const MAX_BROWSE_OFFSET = 1000;
+
+function boundedInteger(value: string | undefined, defaultValue: number, min: number, max: number): number {
+  if (value === undefined || value.trim() === "") return defaultValue;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  return Math.min(Math.max(Math.trunc(parsed), min), max);
+}
 
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
   await sql`
@@ -91,16 +103,35 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.get("/api/needs", async (request) => {
-    const q = request.query as { query?: string; tags?: string };
+    const q = z.object({
+      query: z.string().optional(),
+      tags: z.string().optional(),
+      limit: z.string().optional(),
+      offset: z.string().optional(),
+    }).parse(request.query ?? {});
     const tags = q.tags ? q.tags.split(",").filter(Boolean) : [];
-    const query = `%${q.query ?? ""}%`;
-    const rows = await sql`
+    const search = q.query?.trim() ?? "";
+    const query = `%${search}%`;
+    const limit = boundedInteger(q.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
+    const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
+
+    const rows = search
+      ? await sql`
       SELECT * FROM needs
       WHERE status = 'open'
         AND (title ILIKE ${query} OR description_md ILIKE ${query})
         AND (${tags.length} = 0 OR tags && ${tags})
       ORDER BY created_at DESC
-      LIMIT 200
+      LIMIT ${limit}
+      OFFSET ${offset}
+    `
+      : await sql`
+      SELECT * FROM needs
+      WHERE status = 'open'
+        AND (${tags.length} = 0 OR tags && ${tags})
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+      OFFSET ${offset}
     `;
     return rows;
   });

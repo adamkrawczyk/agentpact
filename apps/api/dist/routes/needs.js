@@ -1,5 +1,17 @@
+import { z } from "zod";
 import { createNeedSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey } from "./utils.js";
+const DEFAULT_BROWSE_LIMIT = 200;
+const MAX_BROWSE_LIMIT = 200;
+const MAX_BROWSE_OFFSET = 1000;
+function boundedInteger(value, defaultValue, min, max) {
+    if (value === undefined || value.trim() === "")
+        return defaultValue;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed))
+        return defaultValue;
+    return Math.min(Math.max(Math.trunc(parsed), min), max);
+}
 async function audit(sql, actorId, action, objectType, objectId, idem, payload) {
     await sql `
     INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
@@ -84,16 +96,34 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
         return need;
     });
     app.get("/api/needs", async (request) => {
-        const q = request.query;
+        const q = z.object({
+            query: z.string().optional(),
+            tags: z.string().optional(),
+            limit: z.string().optional(),
+            offset: z.string().optional(),
+        }).parse(request.query ?? {});
         const tags = q.tags ? q.tags.split(",").filter(Boolean) : [];
-        const query = `%${q.query ?? ""}%`;
-        const rows = await sql `
+        const search = q.query?.trim() ?? "";
+        const query = `%${search}%`;
+        const limit = boundedInteger(q.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
+        const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
+        const rows = search
+            ? await sql `
       SELECT * FROM needs
       WHERE status = 'open'
         AND (title ILIKE ${query} OR description_md ILIKE ${query})
         AND (${tags.length} = 0 OR tags && ${tags})
       ORDER BY created_at DESC
-      LIMIT 200
+      LIMIT ${limit}
+      OFFSET ${offset}
+    `
+            : await sql `
+      SELECT * FROM needs
+      WHERE status = 'open'
+        AND (${tags.length} = 0 OR tags && ${tags})
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+      OFFSET ${offset}
     `;
         return rows;
     });

@@ -11,6 +11,19 @@ const MAX_ACTIVE_OFFERS_PER_AGENT = 15;
 /** Auto-archive offers with zero deals older than this many days. */
 const STALE_OFFER_DAYS = 30;
 
+const DEFAULT_BROWSE_LIMIT = 200;
+const MAX_BROWSE_LIMIT = 200;
+const DEFAULT_GROUPED_LIMIT = 100;
+const MAX_GROUPED_LIMIT = 100;
+const MAX_BROWSE_OFFSET = 1000;
+
+function boundedInteger(value: string | undefined, defaultValue: number, min: number, max: number): number {
+  if (value === undefined || value.trim() === "") return defaultValue;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  return Math.min(Math.max(Math.trunc(parsed), min), max);
+}
+
 export async function archiveStaleOffersWithoutDeals(sql: Sql<Record<string, unknown>>): Promise<number> {
   const archivedOffers = await sql`
     UPDATE offers o
@@ -236,15 +249,21 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       maxPrice: z.string().optional(),
       verifiedOnly: z.string().optional(),
       free_only: z.string().optional(),
+      limit: z.string().optional(),
+      offset: z.string().optional(),
     }).parse(request.query ?? {});
     const tags = q.tags ? q.tags.split(",").filter(Boolean) : [];
-    const query = `%${q.query ?? ""}%`;
+    const search = q.query?.trim() ?? "";
+    const query = `%${search}%`;
     const min = q.minPrice ? Number(q.minPrice) : 0;
     const max = q.maxPrice ? Number(q.maxPrice) : Number.MAX_SAFE_INTEGER;
     const verifiedOnly = parseBooleanish(q.verifiedOnly);
     const freeOnly = parseBooleanish(q.free_only);
+    const limit = boundedInteger(q.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
+    const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
 
-    const rows = await sql`
+    const rows = search
+      ? await sql`
       SELECT o.* FROM offers o
       JOIN agents a ON a.id = o.agent_id
       WHERE o.status = 'active'
@@ -254,7 +273,20 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)
         AND (${freeOnly} = FALSE OR o.base_price = 0)
       ORDER BY o.created_at DESC
-      LIMIT 200
+      LIMIT ${limit}
+      OFFSET ${offset}
+    `
+      : await sql`
+      SELECT o.* FROM offers o
+      JOIN agents a ON a.id = o.agent_id
+      WHERE o.status = 'active'
+        AND o.base_price BETWEEN ${min} AND ${max}
+        AND (${tags.length} = 0 OR o.tags && ${tags})
+        AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)
+        AND (${freeOnly} = FALSE OR o.base_price = 0)
+      ORDER BY o.created_at DESC
+      LIMIT ${limit}
+      OFFSET ${offset}
     `;
     return rows.map((row) => enrichOfferRow(row as Record<string, unknown>));
   });
@@ -342,11 +374,17 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   app.get("/api/offers/grouped", async (request) => {
     const q = z.object({
       query: z.string().optional(),
+      limit: z.string().optional(),
+      offset: z.string().optional(),
     }).parse(request.query ?? {});
 
-    const queryFilter = `%${q.query ?? ""}%`;
+    const search = q.query?.trim() ?? "";
+    const queryFilter = `%${search}%`;
+    const limit = boundedInteger(q.limit, DEFAULT_GROUPED_LIMIT, 1, MAX_GROUPED_LIMIT);
+    const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
 
-    const rows = await sql`
+    const rows = search
+      ? await sql`
       SELECT
         o.category,
         COUNT(o.id)::int                          AS offer_count,
@@ -361,7 +399,11 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
             SELECT s2.id, s2.title, s2.description_md, s2.base_price, s2.sla_days, s2.tags, s2.agent_id
             FROM offers s2
             WHERE s2.category = o.category AND s2.status = 'active'
-              AND (s2.title ILIKE ${queryFilter} OR s2.description_md ILIKE ${queryFilter} OR ${q.query ?? ""} = '')
+              AND (
+                s2.title ILIKE ${queryFilter}
+                OR s2.description_md ILIKE ${queryFilter}
+                OR s2.category ILIKE ${queryFilter}
+              )
             ORDER BY s2.base_price ASC, s2.sla_days ASC
             LIMIT 1
           ) s
@@ -388,13 +430,59 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       FROM offers o
       WHERE o.status = 'active'
         AND (
-          ${q.query ?? ""} = ''
-          OR o.title ILIKE ${queryFilter}
+          o.title ILIKE ${queryFilter}
           OR o.description_md ILIKE ${queryFilter}
           OR o.category ILIKE ${queryFilter}
         )
       GROUP BY o.category
       ORDER BY offer_count DESC
+      LIMIT ${limit}
+      OFFSET ${offset}
+    `
+      : await sql`
+      SELECT
+        o.category,
+        COUNT(o.id)::int                          AS offer_count,
+        COUNT(DISTINCT o.agent_id)::int           AS agent_count,
+        MIN(o.base_price)::float                  AS min_price,
+        MAX(o.base_price)::float                  AS max_price,
+        AVG(o.base_price)::float                  AS avg_price,
+        -- Sample offer: cheapest active, soonest SLA
+        (
+          SELECT row_to_json(s)
+          FROM (
+            SELECT s2.id, s2.title, s2.description_md, s2.base_price, s2.sla_days, s2.tags, s2.agent_id
+            FROM offers s2
+            WHERE s2.category = o.category AND s2.status = 'active'
+            ORDER BY s2.base_price ASC, s2.sla_days ASC
+            LIMIT 1
+          ) s
+        ) AS sample_offer,
+        -- Top providers: up to 5, ranked by reputation then offer count
+        (
+          SELECT json_agg(p ORDER BY p.reputation_score DESC, p.offer_count DESC)
+          FROM (
+            SELECT
+              a.id        AS agent_id,
+              a.handle,
+              a.display_name,
+              COUNT(o2.id)::int AS offer_count,
+              MIN(o2.base_price)::float AS min_price,
+              COALESCE(a.reputation_score, 0)::float AS reputation_score
+            FROM offers o2
+            JOIN agents a ON a.id = o2.agent_id
+            WHERE o2.category = o.category AND o2.status = 'active'
+            GROUP BY a.id, a.handle, a.display_name, a.reputation_score
+            ORDER BY a.reputation_score DESC, COUNT(o2.id) DESC
+            LIMIT 5
+          ) p
+        ) AS top_providers
+      FROM offers o
+      WHERE o.status = 'active'
+      GROUP BY o.category
+      ORDER BY offer_count DESC
+      LIMIT ${limit}
+      OFFSET ${offset}
     `;
 
     return rows;
