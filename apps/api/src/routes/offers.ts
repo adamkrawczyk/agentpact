@@ -24,6 +24,25 @@ function boundedInteger(value: string | undefined, defaultValue: number, min: nu
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
 
+/**
+ * Count (but do NOT mutate) active offers older than STALE_OFFER_DAYS with zero deals.
+ * Used at startup for diagnostic logging — safe to run on every boot.
+ */
+export async function countStaleOffersWithoutDeals(sql: Sql<Record<string, unknown>>): Promise<number> {
+  const [row] = await sql`
+    SELECT COUNT(*)::int AS cnt
+    FROM offers o
+    WHERE o.status = 'active'
+      AND o.created_at < NOW() - (${STALE_OFFER_DAYS} * INTERVAL '1 day')
+      AND NOT EXISTS (
+        SELECT 1
+        FROM deals d
+        WHERE d.offer_id = o.id
+      )
+  `;
+  return row.cnt;
+}
+
 export async function archiveStaleOffersWithoutDeals(sql: Sql<Record<string, unknown>>): Promise<number> {
   const archivedOffers = await sql`
     UPDATE offers o

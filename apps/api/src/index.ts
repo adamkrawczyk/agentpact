@@ -45,7 +45,7 @@ import { registerRoutes as registerFulfillmentRoutes } from './routes/fulfillmen
 import { registerRoutes as registerDisputesRoutes } from './routes/disputes.js';
 import { registerRoutes as registerPaymentsRoutes } from './routes/payments.js';
 import { registerRoutes as registerReputationRoutes } from './routes/reputation.js';
-import { archiveStaleOffersWithoutDeals } from './routes/offers.js';
+import { countStaleOffersWithoutDeals } from './routes/offers.js';
 import adminRoutes from './routes/admin.js';
 import feedbackRoutes from './routes/feedback.js';
 import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/deal-helpers.js';
@@ -182,7 +182,13 @@ await ensureFulfillmentStatusSchema();
 await ensureOfferCompoundingSchema();
 await ensureConsultationSchema();
 await ensureMppSchema();
-await archiveStaleOffersWithoutDeals(sql);
+// WIS-247: Diagnostic-only stale offer count at startup.
+// Actual archival is now gated behind POST /api/admin/offers/auto-archive-stale
+// so that every mass-archive event is intentional, authenticated, and logged.
+const staleCount = await countStaleOffersWithoutDeals(sql);
+if (staleCount > 0) {
+  console.warn(`[startup] ${staleCount} stale offers (>${30} days, 0 deals) detected. Use POST /api/admin/offers/auto-archive-stale to archive.`);
+}
 
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
 
