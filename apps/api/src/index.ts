@@ -46,7 +46,7 @@ import { registerRoutes as registerFulfillmentRoutes } from './routes/fulfillmen
 import { registerRoutes as registerDisputesRoutes } from './routes/disputes.js';
 import { registerRoutes as registerPaymentsRoutes } from './routes/payments.js';
 import { registerRoutes as registerReputationRoutes } from './routes/reputation.js';
-import { archiveStaleOffersWithoutDeals } from './routes/offers.js';
+import { countStaleOffersWithoutDeals } from './routes/offers.js';
 import adminRoutes from './routes/admin.js';
 import feedbackRoutes from './routes/feedback.js';
 import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/deal-helpers.js';
@@ -120,7 +120,8 @@ async function ensureFulfillmentStatusSchema(): Promise<void> {
 
 async function ensureOfferCompoundingSchema(): Promise<void> {
   // Archive duplicate active offers (keep newest) before creating unique index
-  await sql`
+  // WIS-247: Added logging for visibility into how many duplicates are archived.
+  const dupeResult = await sql`
     UPDATE offers SET status = 'archived', updated_at = NOW()
     WHERE id IN (
       SELECT id FROM (
@@ -132,7 +133,11 @@ async function ensureOfferCompoundingSchema(): Promise<void> {
         WHERE status = 'active'
       ) dupes WHERE rn > 1
     )
+    RETURNING id
   `;
+  if (dupeResult.length > 0) {
+    console.log(`[startup] ensureOfferCompoundingSchema: archived ${dupeResult.length} duplicate offers.`);
+  }
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS offers_active_agent_category_title_unique
     ON offers (agent_id, lower(btrim(category)), lower(btrim(title)))
@@ -183,7 +188,10 @@ await ensureFulfillmentStatusSchema();
 await ensureOfferCompoundingSchema();
 await ensureConsultationSchema();
 await ensureMppSchema();
-await archiveStaleOffersWithoutDeals(sql);
+// WIS-247: Replaced silent auto-archive with dry-run count on startup.
+// Archival is now admin-only via POST /api/admin/offers/auto-archive-stale.
+const staleCount = await countStaleOffersWithoutDeals(sql);
+console.log(`[startup] ${staleCount} stale offers (>30d, 0 deals) eligible for archival. Use POST /api/admin/offers/auto-archive-stale to archive.`);
 
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
 

@@ -11,7 +11,23 @@ const MAX_ACTIVE_OFFERS_PER_AGENT = 15;
 /** Auto-archive offers with zero deals older than this many days. */
 const STALE_OFFER_DAYS = 30;
 
-export async function archiveStaleOffersWithoutDeals(sql: Sql<Record<string, unknown>>): Promise<number> {
+/** Dry-run: count stale offers that WOULD be archived (no mutation). WIS-247. */
+export async function countStaleOffersWithoutDeals(sql: Sql<Record<string, unknown>>): Promise<number> {
+  const rows = await sql`
+    SELECT COUNT(*)::int AS cnt
+    FROM offers o
+    WHERE o.status = 'active'
+      AND o.created_at < NOW() - (${STALE_OFFER_DAYS} * INTERVAL '1 day')
+      AND NOT EXISTS (
+        SELECT 1
+        FROM deals d
+        WHERE d.offer_id = o.id
+      )
+  `;
+  return rows[0]?.cnt ?? 0;
+}
+
+export async function archiveStaleOffersWithoutDeals(sql: Sql<Record<string, unknown>>): Promise<{ count: number; ids: string[] }> {
   const archivedOffers = await sql`
     UPDATE offers o
     SET status = 'archived', updated_at = NOW()
@@ -25,7 +41,20 @@ export async function archiveStaleOffersWithoutDeals(sql: Sql<Record<string, unk
     RETURNING o.id
   `;
 
-  return archivedOffers.length;
+  // Audit log the bulk archival (WIS-247)
+  if (archivedOffers.length > 0) {
+    await sql`
+      INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
+      VALUES (NULL, ${'auto-archive-stale-offers'}, ${'offer'}, NULL, ${`auto-archive-${Date.now()}`}, ${JSON.stringify({
+        count: archivedOffers.length,
+        offerIds: archivedOffers.map((r: { id: string }) => r.id),
+        staleDays: STALE_OFFER_DAYS,
+        triggeredAt: new Date().toISOString(),
+      })}::jsonb)
+    `;
+  }
+
+  return { count: archivedOffers.length, ids: archivedOffers.map((r: { id: string }) => r.id) };
 }
 
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
@@ -408,6 +437,24 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   /**
+   * GET /api/admin/offers/stale-count
+   * Dry-run: returns count of offers that would be archived. No mutation. WIS-247.
+   * Admin-key protected.
+   */
+  app.get("/api/admin/offers/stale-count", async (request, reply) => {
+    const adminKey = process.env.ADMIN_API_KEY;
+    const authHeader =
+      (request.headers["x-admin-key"] as string | undefined) ||
+      String(request.headers["authorization"] ?? "").replace("Bearer ", "");
+    if (adminKey && authHeader !== adminKey) {
+      return reply.code(403).send({ error: "Invalid admin key" });
+    }
+
+    const count = await countStaleOffersWithoutDeals(sql);
+    return { staleCount: count, staleDays: STALE_OFFER_DAYS };
+  });
+
+  /**
    * POST /api/admin/offers/auto-archive-stale
    * Archives offers that have zero associated deals and are older than STALE_OFFER_DAYS.
    * Admin-key protected.
@@ -441,6 +488,20 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     `;
 
     app.log.info({ count: archived.length }, "auto-archive-stale: archived offers");
+
+    // Audit log the bulk archival (WIS-247)
+    if (archived.length > 0) {
+      await sql`
+        INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
+        VALUES (NULL, ${'admin-auto-archive-stale'}, ${'offer'}, NULL, ${`admin-archive-${Date.now()}`}, ${JSON.stringify({
+          count: archived.length,
+          offerIds: archived.map((o: { id: string }) => o.id),
+          staleDays: STALE_OFFER_DAYS,
+          triggeredAt: new Date().toISOString(),
+          trigger: 'admin-endpoint',
+        })}::jsonb)
+      `;
+    }
 
     return {
       archivedCount: archived.length,
