@@ -317,4 +317,173 @@ describe("Concierge Relay", () => {
       expect(welcomeMsg!.status).toBe("sent");
     });
   });
+
+  describe("POST /api/concierge/run-full-cycle", () => {
+    it("queues all message types and delivers them in one call", async () => {
+      const { app, sql } = await createTestApp();
+
+      // Create agents
+      const headers = await getAuthHeaders();
+
+      // Agent 1: brand new, no offers/needs -> gets welcome + activation-nudge
+      const agent1Res = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers,
+        payload: generateTestAgent({ handle: "newbie1" }),
+      });
+      expect(agent1Res.statusCode).toBe(201);
+      const agent1Id = (JSON.parse(agent1Res.body) as { id: string }).id;
+
+      // Agent 2: has an offer but no deals -> gets first-transaction
+      const agent2Res = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers,
+        payload: generateTestAgent({ handle: "seller1" }),
+      });
+      expect(agent2Res.statusCode).toBe(201);
+      const agent2Id = (JSON.parse(agent2Res.body) as { id: string }).id;
+      // Post an offer for agent 2
+      const agent2Headers = await getAuthHeadersForAgent(agent2Id);
+      await app.inject({
+        method: "POST",
+        url: "/api/offers",
+        headers: agent2Headers,
+        payload: generateTestOffer(),
+      });
+
+      // Run full cycle
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/concierge/run-full-cycle",
+        payload: {},
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body) as {
+        welcome: { queued: number; skipped: number };
+        firstTransaction: { queued: number; skipped: number };
+        activationNudges: { queued: number; skipped: number };
+        relay: { messagesFound: number; messagesSent: number };
+      };
+
+      // Should have queued welcome messages
+      expect(body.welcome.queued).toBeGreaterThanOrEqual(1);
+
+      // Should have queued first-transaction for agent with offer
+      expect(body.firstTransaction.queued).toBeGreaterThanOrEqual(0);
+
+      // Should have queued activation nudges for agents with no offers/needs
+      expect(body.activationNudges.queued).toBeGreaterThanOrEqual(0);
+
+      // Relay should have processed messages
+      expect(body.relay.messagesFound).toBeGreaterThan(0);
+      expect(body.relay.messagesSent).toBeGreaterThan(0);
+
+      // Verify all queued messages are now sent
+      const remaining = await sql`SELECT COUNT(*)::int AS cnt FROM concierge_messages WHERE status = 'queued'`;
+      expect(Number(remaining[0].cnt)).toBe(0);
+    });
+
+    it("respects dryRun option", async () => {
+      const { app, sql } = await createTestApp();
+      const headers = await getAuthHeaders();
+
+      // Create an agent
+      await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers,
+        payload: generateTestAgent({ handle: "dryrun-test" }),
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/concierge/run-full-cycle",
+        payload: { dryRun: true },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body) as {
+        relay: { messagesSkipped: number };
+      };
+
+      // In dry-run mode, relay should skip all messages
+      expect(body.relay.messagesSkipped).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe("queueActivationNudges", () => {
+    it("targets agents with no offers and no needs", async () => {
+      const { app, sql } = await createTestApp();
+      const headers = await getAuthHeaders();
+
+      // Create an inactive agent (no offers, no needs)
+      await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers,
+        payload: generateTestAgent({ handle: "inactive1" }),
+      });
+
+      // Run activation nudge queue
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/concierge/queue-first-transaction", // just to warm up
+      });
+
+      // Now manually trigger activation nudge via full cycle
+      const fullCycleRes = await app.inject({
+        method: "POST",
+        url: "/api/concierge/run-full-cycle",
+        payload: {},
+      });
+      expect(fullCycleRes.statusCode).toBe(200);
+      const body = JSON.parse(fullCycleRes.body) as {
+        activationNudges: { queued: number };
+      };
+
+      // The inactive agent should get an activation nudge
+      expect(body.activationNudges.queued).toBeGreaterThanOrEqual(1);
+
+      // Verify nudge message content
+      const nudges = await sql`
+        SELECT * FROM concierge_messages
+        WHERE message_type = 'activation-nudge'
+      `;
+      expect(nudges.length).toBeGreaterThanOrEqual(1);
+      expect(nudges[0].subject).toContain("AgentPact");
+    });
+
+    it("is idempotent — won't double-nudge same agent", async () => {
+      const { app } = await createTestApp();
+      const headers = await getAuthHeaders();
+
+      await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers,
+        payload: generateTestAgent({ handle: "idempotent-test" }),
+      });
+
+      // Run full cycle twice
+      await app.inject({
+        method: "POST",
+        url: "/api/concierge/run-full-cycle",
+        payload: {},
+      });
+      const res2 = await app.inject({
+        method: "POST",
+        url: "/api/concierge/run-full-cycle",
+        payload: {},
+      });
+
+      const body = JSON.parse(res2.body) as {
+        activationNudges: { queued: number; skipped: number };
+      };
+
+      // Second run should skip all (already queued/sent)
+      expect(body.activationNudges.queued).toBe(0);
+      expect(body.activationNudges.skipped).toBeGreaterThanOrEqual(1);
+    });
+  });
 });

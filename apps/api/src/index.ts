@@ -1279,6 +1279,9 @@ app.addHook("preHandler", async (request, reply) => {
   if (routePath === "/api/concierge/stats" && request.method === "GET") {
     return;
   }
+  if (routePath === "/api/concierge/run-full-cycle" && request.method === "POST") {
+    return;
+  }
 
   // Auto-complete timeout endpoint — cron-friendly, no agent auth required
   if (routePath.match(/^\/api\/deals\/[^/]+\/fulfillment\/auto-complete$/) && request.method === "POST") {

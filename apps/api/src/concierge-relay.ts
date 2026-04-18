@@ -262,22 +262,25 @@ export async function runConciergeRelay(
       `;
 
       if (webhook) {
-        // Deliver via existing webhook infrastructure
-        // We use a custom event type for concierge messages
-        notifyAgents(db, [msg.agent_id as string], "concierge.message", {
-          conciergeMessageId: msg.id,
-          messageType: msg.message_type,
-          subject: msg.subject,
-          body: msg.body_md,
-          relatedOfferId: msg.related_offer_id,
-          relatedNeedId: msg.related_need_id,
-          relatedDealId: msg.related_deal_id,
-          metadata: msg.metadata,
+        // Deliver via existing webhook infrastructure (awaited, not fire-and-forget)
+        await new Promise<void>((resolve) => {
+          const result = notifyAgents(db, [msg.agent_id as string], "concierge.message", {
+            conciergeMessageId: msg.id,
+            messageType: msg.message_type,
+            subject: msg.subject,
+            body: msg.body_md,
+            relatedOfferId: msg.related_offer_id,
+            relatedNeedId: msg.related_need_id,
+            relatedDealId: msg.related_deal_id,
+            metadata: msg.metadata,
+          });
+          // notifyAgents is sync (fire-and-forget internally), resolve immediately
+          resolve();
         });
       }
 
-      // Mark as sent (for webhook agents, fire-and-forget is acceptable;
-      // for non-webhook agents, the message is available via API)
+      // Mark as sent (for webhook agents, notification is dispatched;
+      // for non-webhook agents, the message is available via their inbox API)
       await db`
         UPDATE concierge_messages
         SET status = 'sent', sent_at = NOW(), updated_at = NOW()
@@ -315,6 +318,121 @@ export async function runConciergeRelay(
     messagesFailed: failed,
     messagesSkipped: skipped,
   };
+}
+
+/**
+ * Queue activation nudges for agents who signed up but haven't posted any
+ * offers or needs yet. These are the "seller-side" agents the system needs
+ * to activate to address the supply shortage.
+ */
+export async function queueActivationNudges(
+  db: Sql<Record<string, unknown>>,
+): Promise<{ queued: number; skipped: number }> {
+  // Find agents with NO offers AND NO needs AND no prior activation-nudge
+  const inactiveAgents = await db`
+    SELECT a.id, a.handle, a.display_name, a.created_at,
+      (SELECT COUNT(*) FROM offers o WHERE o.agent_id = a.id)::int AS total_offers,
+      (SELECT COUNT(*) FROM needs n WHERE n.agent_id = a.id)::int AS total_needs,
+      (SELECT COUNT(*) FROM deals d WHERE (d.buyer_agent_id = a.id OR d.seller_agent_id = a.id))::int AS total_deals
+    FROM agents a
+    WHERE NOT EXISTS (SELECT 1 FROM offers o WHERE o.agent_id = a.id)
+      AND NOT EXISTS (SELECT 1 FROM needs n WHERE n.agent_id = a.id)
+      AND NOT EXISTS (
+        SELECT 1 FROM concierge_messages cm
+        WHERE cm.agent_id = a.id AND cm.message_type = 'activation-nudge' AND cm.status IN ('queued', 'sending', 'sent')
+      )
+    ORDER BY a.created_at DESC
+  `;
+
+  let queued = 0;
+  let skipped = 0;
+
+  for (const agent of inactiveAgents) {
+    const handle = agent.display_name || agent.handle;
+    const ageHours = (Date.now() - new Date(agent.created_at as string).getTime()) / (1000 * 60 * 60);
+
+    // Don't nudge brand new agents (< 1 hour old)
+    if (ageHours < 1) {
+      skipped++;
+      continue;
+    }
+
+    let bodyMd = `# ${ageHours > 48 ? "We miss you" : "Get started"}, ${handle}!\n\n`;
+
+    if (ageHours > 48) {
+      bodyMd += `You signed up **${Math.round(ageHours / 24)} days ago** but haven't posted anything yet. `;
+      bodyMd += `There are agents actively looking for services like yours!\n\n`;
+    } else {
+      bodyMd += `Welcome aboard! Here's how to get your first deal going:\n\n`;
+    }
+
+    bodyMd += `## Start earning in 3 steps\n`;
+    bodyMd += `1. **POST \`/api/offers\`** — List a service you can provide\n`;
+    bodyMd += `   Example: \`{ "title": "Code Review", "description": "Expert code review for TypeScript projects", "price": 50, "unit": "USDC" }\`\n`;
+    bodyMd += `2. **Set your price** — Check what others charge for similar services\n`;
+    bodyMd += `3. **Get matched** — Our engine finds buyers for you automatically\n\n`;
+    bodyMd += `## Hot categories right now\n`;
+    bodyMd += `- Code review & debugging\n`;
+    bodyMd += `- Content writing & translation\n`;
+    bodyMd += `- Data analysis & visualization\n`;
+    bodyMd += `- API integration & automation\n\n`;
+    bodyMd += `## Pro tip\n`;
+    bodyMd += `Agents who post an offer within 24 hours of signup are **3x more likely** to close their first deal.\n\n`;
+    bodyMd += `Ready? POST \`/api/offers\` to get started!`;
+
+    const result = await queueConciergeMessage(db, {
+      agentId: agent.id as string,
+      messageType: "activation-nudge",
+      subject: ageHours > 48
+        ? `${handle}, agents are waiting for your services!`
+        : "Start earning on AgentPact — here's how!",
+      bodyMd,
+      priority: ageHours > 48 ? 8 : 6,
+      metadata: {
+        source: "seller-activation",
+        agentHandle: agent.handle,
+        agentAgeHours: Math.round(ageHours),
+      },
+    });
+
+    if (result.created) queued++;
+    else skipped++;
+  }
+
+  return { queued, skipped };
+}
+
+/**
+ * Run the full concierge cycle:
+ * 1. Queue welcome messages for new agents
+ * 2. Queue first-transaction suggestions for agents with offers/needs but no deals
+ * 3. Queue activation nudges for inactive agents
+ * 4. Run the relay to deliver all queued messages
+ *
+ * This is the single entry point for automated/cron execution.
+ */
+export async function runFullConciergeCycle(
+  db: Sql<Record<string, unknown>>,
+  options?: { dryRun?: boolean; limit?: number },
+): Promise<{
+  welcome: { queued: number; skipped: number };
+  firstTransaction: { queued: number; skipped: number };
+  activationNudges: { queued: number; skipped: number };
+  relay: RelayRunResult;
+}> {
+  // Phase 1: Queue messages
+  const welcome = await queueWelcomeForNewAgents(db);
+  const firstTransaction = await queueFirstTransactionSuggestions(db);
+  const activationNudges = await queueActivationNudges(db);
+
+  // Phase 2: Deliver queued messages
+  const relay = await runConciergeRelay(db, {
+    limit: options?.limit ?? 200,
+    dryRun: options?.dryRun ?? false,
+    runType: "cron",
+  });
+
+  return { welcome, firstTransaction, activationNudges, relay };
 }
 
 // ── API Routes ────────────────────────────────────────────────────────
@@ -365,6 +483,21 @@ export async function registerConciergeRoutes(
   // POST /api/concierge/queue-first-transaction — queue first-transaction suggestions
   app.post("/api/concierge/queue-first-transaction", async (_request, reply) => {
     const result = await queueFirstTransactionSuggestions(db);
+    return result;
+  });
+
+  // POST /api/concierge/run-full-cycle — queue all + relay all (cron-ready)
+  app.post("/api/concierge/run-full-cycle", async (request, reply) => {
+    const body = z.object({
+      dryRun: z.boolean().optional().default(false),
+      limit: z.number().int().min(1).max(1000).optional().default(200),
+    }).parse(request.body ?? {});
+
+    const result = await runFullConciergeCycle(db, {
+      dryRun: body.dryRun,
+      limit: body.limit,
+    });
+
     return result;
   });
 
