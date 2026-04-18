@@ -39,6 +39,17 @@ async function audit(sql, actorId, action, objectType, objectId, idem, payload) 
     VALUES (${actorId}, ${action}, ${objectType}, ${objectId}, ${idem}, ${JSON.stringify(payload)}::jsonb)
   `;
 }
+async function auditBestEffort(app, sql, action, objectType, objectId, payload) {
+    try {
+        await audit(sql, null, action, objectType, objectId, `metrics:${action}:${Date.now()}`, payload);
+    }
+    catch (err) {
+        app.log.warn({ err, action, objectType, objectId }, "metrics audit insert failed");
+    }
+}
+function elapsedMs(startedAt) {
+    return Number((process.hrtime.bigint() - startedAt) / 1000000n);
+}
 export async function registerRoutes(app, sql, _deps, recomputeMatches) {
     app.post("/api/autopilot/settings", async (request, reply) => {
         const idem = idempotencyKey(request.headers);
@@ -214,6 +225,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
         return offer;
     });
     app.get("/api/offers", async (request) => {
+        const startedAt = process.hrtime.bigint();
         const q = z.object({
             query: z.string().optional(),
             tags: z.string().optional(),
@@ -259,9 +271,21 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       LIMIT ${limit}
       OFFSET ${offset}
     `;
-        return rows.map((row) => enrichOfferRow(row));
+        const enrichedRows = rows.map((row) => enrichOfferRow(row));
+        await auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+            endpoint: "/api/offers",
+            method: "GET",
+            durationMs: elapsedMs(startedAt),
+            resultCount: enrichedRows.length,
+            hasQuery: search.length > 0,
+            hasTags: tags.length > 0,
+            limit,
+            offset,
+        });
+        return enrichedRows;
     });
     app.get("/api/categories", async () => {
+        const startedAt = process.hrtime.bigint();
         const rows = await sql `
       WITH active_offers AS (
         SELECT id, agent_id, category, base_price, currency
@@ -305,7 +329,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       GROUP BY o.category, tp.agent_id, tp.completed_deals
       ORDER BY COUNT(*) DESC, o.category ASC
     `;
-        return rows.map((row) => ({
+        const categories = rows.map((row) => ({
             name: row.name,
             offerCount: Number(row.offer_count),
             agentIds: Array.isArray(row.agent_ids) ? row.agent_ids : [],
@@ -321,6 +345,13 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
                 }
                 : null,
         }));
+        await auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+            endpoint: "/api/categories",
+            method: "GET",
+            durationMs: elapsedMs(startedAt),
+            resultCount: categories.length,
+        });
+        return categories;
     });
     /**
      * GET /api/offers/grouped
@@ -340,6 +371,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
      * }
      */
     app.get("/api/offers/grouped", async (request) => {
+        const startedAt = process.hrtime.bigint();
         const q = z.object({
             query: z.string().optional(),
             limit: z.string().optional(),
@@ -450,6 +482,15 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       LIMIT ${limit}
       OFFSET ${offset}
     `;
+        await auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+            endpoint: "/api/offers/grouped",
+            method: "GET",
+            durationMs: elapsedMs(startedAt),
+            resultCount: rows.length,
+            hasQuery: search.length > 0,
+            limit,
+            offset,
+        });
         return rows;
     });
     app.get("/api/offers/:id", async (request, reply) => {
@@ -457,6 +498,11 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
         const [offer] = await sql `SELECT * FROM offers WHERE id = ${id}`;
         if (!offer)
             return reply.code(404).send({ error: "Offer not found" });
+        await auditBestEffort(app, sql, "offer.view", "offer", id, {
+            endpoint: "/api/offers/:id",
+            method: "GET",
+            offerId: id,
+        });
         return enrichOfferRow(offer);
     });
     /**

@@ -18,6 +18,17 @@ async function audit(sql, actorId, action, objectType, objectId, idem, payload) 
     VALUES (${actorId}, ${action}, ${objectType}, ${objectId}, ${idem}, ${JSON.stringify(payload)}::jsonb)
   `;
 }
+async function auditBestEffort(app, sql, action, objectType, objectId, payload) {
+    try {
+        await audit(sql, null, action, objectType, objectId, `metrics:${action}:${Date.now()}`, payload);
+    }
+    catch (err) {
+        app.log.warn({ err, action, objectType, objectId }, "metrics audit insert failed");
+    }
+}
+function elapsedMs(startedAt) {
+    return Number((process.hrtime.bigint() - startedAt) / 1000000n);
+}
 export async function registerRoutes(app, sql, _deps, recomputeMatches) {
     app.post("/api/needs", async (request, reply) => {
         const idem = idempotencyKey(request.headers);
@@ -96,6 +107,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
         return need;
     });
     app.get("/api/needs", async (request) => {
+        const startedAt = process.hrtime.bigint();
         const q = z.object({
             query: z.string().optional(),
             tags: z.string().optional(),
@@ -125,6 +137,16 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       LIMIT ${limit}
       OFFSET ${offset}
     `;
+        await auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+            endpoint: "/api/needs",
+            method: "GET",
+            durationMs: elapsedMs(startedAt),
+            resultCount: rows.length,
+            hasQuery: search.length > 0,
+            hasTags: tags.length > 0,
+            limit,
+            offset,
+        });
         return rows;
     });
     app.get("/api/needs/:id", async (request, reply) => {

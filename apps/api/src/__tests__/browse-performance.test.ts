@@ -39,6 +39,16 @@ function createDeps(): Deps {
   } as unknown as Deps;
 }
 
+function lastSelect(capture: CapturedSql): { statement: string; values: unknown[] } {
+  for (let index = capture.statements.length - 1; index >= 0; index -= 1) {
+    const statement = capture.statements[index] ?? "";
+    if (statement.includes("SELECT")) {
+      return { statement, values: capture.values[index] ?? [] };
+    }
+  }
+  throw new Error("No SELECT statement captured");
+}
+
 describe("public browse SQL performance", () => {
   it("omits offer text search when query is blank", async () => {
     const app = Fastify();
@@ -48,7 +58,7 @@ describe("public browse SQL performance", () => {
     const response = await app.inject({ method: "GET", url: "/api/offers" });
 
     expect(response.statusCode).toBe(200);
-    expect(capture.statements.at(-1)).not.toMatch(/\bILIKE\b/);
+    expect(lastSelect(capture).statement).not.toMatch(/\bILIKE\b/);
   });
 
   it("omits offer text search when query is whitespace", async () => {
@@ -59,7 +69,7 @@ describe("public browse SQL performance", () => {
     const response = await app.inject({ method: "GET", url: "/api/offers?query=%20%20%20" });
 
     expect(response.statusCode).toBe(200);
-    expect(capture.statements.at(-1)).not.toMatch(/\bILIKE\b/);
+    expect(lastSelect(capture).statement).not.toMatch(/\bILIKE\b/);
   });
 
   it("keeps offer text search when query is non-empty", async () => {
@@ -70,7 +80,7 @@ describe("public browse SQL performance", () => {
     const response = await app.inject({ method: "GET", url: "/api/offers?query=alpha" });
 
     expect(response.statusCode).toBe(200);
-    expect(capture.statements.at(-1)).toMatch(/\bILIKE\b/);
+    expect(lastSelect(capture).statement).toMatch(/\bILIKE\b/);
   });
 
   it("caps offer browse limits and preserves offsets", async () => {
@@ -81,8 +91,50 @@ describe("public browse SQL performance", () => {
     const response = await app.inject({ method: "GET", url: "/api/offers?limit=500&offset=25" });
 
     expect(response.statusCode).toBe(200);
-    expect(capture.values.at(-1)).toContain(200);
-    expect(capture.values.at(-1)).toContain(25);
+    expect(lastSelect(capture).values).toContain(200);
+    expect(lastSelect(capture).values).toContain(25);
+  });
+
+  it("records offer browse latency after returning results", async () => {
+    const app = Fastify();
+    const capture = createSqlCapture();
+    await registerOfferRoutes(app, capture.sql, createDeps(), async () => 0);
+
+    const response = await app.inject({ method: "GET", url: "/api/offers?limit=25&offset=5" });
+
+    expect(response.statusCode).toBe(200);
+    const auditIndex = capture.statements.findIndex((statement) => statement.includes("INSERT INTO audit_log"));
+    expect(auditIndex).toBeGreaterThan(-1);
+    expect(capture.values[auditIndex]).toContain("browse.latency");
+    expect(JSON.parse(capture.values[auditIndex]?.at(-1) as string)).toMatchObject({
+      endpoint: "/api/offers",
+      resultCount: 0,
+      limit: 25,
+      offset: 5,
+    });
+  });
+
+  it("records offer detail page views", async () => {
+    const app = Fastify();
+    const capture = createSqlCapture();
+    const offerId = "550e8400-e29b-41d4-a716-446655440000";
+    capture.sql = ((strings: TemplateStringsArray, ...params: unknown[]) => {
+      capture.statements.push(strings.join("?"));
+      capture.values.push(params);
+      if (strings.join("?").includes("SELECT * FROM offers WHERE id")) {
+        return [{ id: offerId, base_price: 100, tags: [] }];
+      }
+      return [];
+    }) as any;
+    await registerOfferRoutes(app, capture.sql, createDeps(), async () => 0);
+
+    const response = await app.inject({ method: "GET", url: `/api/offers/${offerId}` });
+
+    expect(response.statusCode).toBe(200);
+    const auditIndex = capture.statements.findIndex((statement) => statement.includes("INSERT INTO audit_log"));
+    expect(auditIndex).toBeGreaterThan(-1);
+    expect(capture.values[auditIndex]).toContain("offer.view");
+    expect(capture.values[auditIndex]).toContain(offerId);
   });
 
   it("caps offer browse offsets", async () => {
@@ -93,7 +145,7 @@ describe("public browse SQL performance", () => {
     const response = await app.inject({ method: "GET", url: "/api/offers?offset=999999" });
 
     expect(response.statusCode).toBe(200);
-    expect(capture.values.at(-1)).toContain(1000);
+    expect(lastSelect(capture).values).toContain(1000);
   });
 
   it("omits grouped offer text search when query is blank", async () => {
@@ -104,7 +156,7 @@ describe("public browse SQL performance", () => {
     const response = await app.inject({ method: "GET", url: "/api/offers/grouped" });
 
     expect(response.statusCode).toBe(200);
-    expect(capture.statements.at(-1)).not.toMatch(/\bILIKE\b/);
+    expect(lastSelect(capture).statement).not.toMatch(/\bILIKE\b/);
   });
 
   it("omits need text search when query is blank", async () => {
@@ -115,6 +167,6 @@ describe("public browse SQL performance", () => {
     const response = await app.inject({ method: "GET", url: "/api/needs" });
 
     expect(response.statusCode).toBe(200);
-    expect(capture.statements.at(-1)).not.toMatch(/\bILIKE\b/);
+    expect(lastSelect(capture).statement).not.toMatch(/\bILIKE\b/);
   });
 });

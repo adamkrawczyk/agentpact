@@ -23,6 +23,25 @@ async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, 
   `;
 }
 
+async function auditBestEffort(
+  app: FastifyInstance,
+  sql: Sql<Record<string, unknown>>,
+  action: string,
+  objectType: string,
+  objectId: string | null,
+  payload: unknown,
+): Promise<void> {
+  try {
+    await audit(sql, null, action, objectType, objectId, `metrics:${action}:${Date.now()}`, payload);
+  } catch (err) {
+    app.log.warn({ err, action, objectType, objectId }, "metrics audit insert failed");
+  }
+}
+
+function elapsedMs(startedAt: bigint): number {
+  return Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+}
+
 export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, _deps: Deps, recomputeMatches: () => Promise<number>): Promise<void> {
   app.post("/api/needs", async (request, reply) => {
     const idem = idempotencyKey(request.headers as Record<string, unknown>);
@@ -103,6 +122,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.get("/api/needs", async (request) => {
+    const startedAt = process.hrtime.bigint();
     const q = z.object({
       query: z.string().optional(),
       tags: z.string().optional(),
@@ -133,6 +153,16 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       LIMIT ${limit}
       OFFSET ${offset}
     `;
+    await auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+      endpoint: "/api/needs",
+      method: "GET",
+      durationMs: elapsedMs(startedAt),
+      resultCount: rows.length,
+      hasQuery: search.length > 0,
+      hasTags: tags.length > 0,
+      limit,
+      offset,
+    });
     return rows;
   });
 
