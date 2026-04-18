@@ -22,6 +22,7 @@ const VALID_EVENTS = [
   "payment.released",
   "milestone.completed",
   "feedback.received",
+  "concierge.message",
   "webhook.test",
 ] as const;
 

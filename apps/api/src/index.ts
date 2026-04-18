@@ -7,6 +7,7 @@ import { z } from "zod";
 import { initAuth } from "./auth.js";
 import { registerHealthChecks } from "./health.js";
 import { registerWebhookRoutes, notifyAgents } from "./webhooks.js";
+import { registerConciergeRoutes } from "./concierge-relay.js";
 import { autoVerify } from "./auto-verify.js";
 import {
   decrypt,
@@ -1238,6 +1239,7 @@ app.get('/health/pool', async () => {
 await initAuth(app);
 registerHealthChecks(app, sql);
 registerWebhookRoutes(app, sql);
+registerConciergeRoutes(app, sql as unknown as Sql<Record<string, unknown>>);
 
 app.addHook("preHandler", async (request, reply) => {
   const routePath = (request.url.split("?")[0] ?? request.url);
@@ -1264,6 +1266,17 @@ app.addHook("preHandler", async (request, reply) => {
 
   // Cron/admin endpoints use their own auth (X-Admin-Key) or are intentionally public
   if (routePath.startsWith("/api/admin/")) {
+    return;
+  }
+
+  // Concierge relay endpoints — admin/cron accessible (uses queue/relay triggers)
+  if (routePath.startsWith("/api/concierge/relay") && request.method === "POST") {
+    return;
+  }
+  if (routePath.startsWith("/api/concierge/queue-") && request.method === "POST") {
+    return;
+  }
+  if (routePath === "/api/concierge/stats" && request.method === "GET") {
     return;
   }
 
