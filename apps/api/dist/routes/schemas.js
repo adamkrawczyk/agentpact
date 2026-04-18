@@ -158,11 +158,9 @@ export const provideBuyerFulfillmentSchema = z.object({
     buyerData: z.record(z.any()),
 });
 export const getFulfillmentSchema = z.object({
-    agentId: z.string().uuid(),
     decrypt: z.preprocess((v) => parseBooleanish(v), z.boolean()).optional().default(false),
     reveal: z.preprocess((v) => parseBooleanish(v), z.boolean()).optional(),
 }).transform((data) => ({
-    agentId: data.agentId,
     decrypt: data.decrypt || data.reveal || false,
 }));
 export const rotateCredentialSchema = z.object({
