@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import Fastify from "fastify";
 import { initAuth } from "../auth.js";
@@ -8,9 +9,18 @@ const walletAddress = "0x1234567890123456789012345678901234567890";
 function createMockSql() {
   const credentialsByHash = new Map<string, { agentId: string; walletAddress: string | null; revoked: boolean }>();
   const credentialHashesByAgentId = new Map<string, string>();
+  const webhooksByAgentId = new Map<string, { id: string; url: string; secret: string; events: string[] }>();
 
   const mockSql = async (template: TemplateStringsArray, ...parameters: readonly unknown[]) => {
     const statement = template.join(" ");
+
+    if (statement.includes("INSERT INTO agent_webhooks")) {
+      // parameters: agent_id, url, secret, events
+      const [whAgentId, whUrl, whSecret, whEvents] = parameters as [string, string, string, string[]];
+      const whId = randomUUID();
+      webhooksByAgentId.set(whAgentId, { id: whId, url: whUrl, secret: whSecret, events: whEvents });
+      return [{ id: whId, url: whUrl, events: whEvents, active: true, created_at: new Date().toISOString() }];
+    }
 
     if (statement.includes("INSERT INTO agent_credentials")) {
       const [registeredAgentId, registeredWalletAddress, apiKeyHash] = parameters as [string, string | null, string];
@@ -48,13 +58,14 @@ function createMockSql() {
     return [];
   };
 
-  return mockSql;
+  return { mockSql, webhooksByAgentId };
 }
 
 describe("Auth", () => {
   it("Register agent API key", async () => {
     const app = Fastify();
-    await initAuth(app, createMockSql());
+    const { mockSql } = createMockSql();
+    await initAuth(app, mockSql);
 
     const response = await app.inject({
       method: "POST",
@@ -74,7 +85,8 @@ describe("Auth", () => {
 
   it("registers an agent API key without a wallet address", async () => {
     const app = Fastify();
-    await initAuth(app, createMockSql());
+    const { mockSql } = createMockSql();
+    await initAuth(app, mockSql);
 
     const response = await app.inject({
       method: "POST",
@@ -93,7 +105,8 @@ describe("Auth", () => {
 
   it("rejects duplicate registration for an existing agent", async () => {
     const app = Fastify();
-    await initAuth(app, createMockSql());
+    const { mockSql } = createMockSql();
+    await initAuth(app, mockSql);
 
     const firstResponse = await app.inject({
       method: "POST",
@@ -123,7 +136,8 @@ describe("Auth", () => {
 
   it("Verify valid API key", async () => {
     const app = Fastify();
-    await initAuth(app, createMockSql());
+    const { mockSql } = createMockSql();
+    await initAuth(app, mockSql);
 
     const registerRes = await app.inject({
       method: "POST",
@@ -151,7 +165,8 @@ describe("Auth", () => {
 
   it("Reject invalid API key", async () => {
     const app = Fastify();
-    await initAuth(app, createMockSql());
+    const { mockSql } = createMockSql();
+    await initAuth(app, mockSql);
 
     const response = await app.inject({
       method: "GET",
@@ -167,7 +182,8 @@ describe("Auth", () => {
 
   it("Protected route requires API key", async () => {
     const app = Fastify();
-    await initAuth(app, createMockSql());
+    const { mockSql } = createMockSql();
+    await initAuth(app, mockSql);
 
     app.get(
       "/api/protected",
@@ -206,7 +222,8 @@ describe("Auth", () => {
 
   it("/api/auth/verify does not apply rate limiting", async () => {
     const app = Fastify();
-    await initAuth(app, createMockSql());
+    const { mockSql } = createMockSql();
+    await initAuth(app, mockSql);
 
     const registerRes = await app.inject({
       method: "POST",
@@ -229,6 +246,180 @@ describe("Auth", () => {
       expect(response.statusCode).toBe(200);
     }
 
+    await app.close();
+  });
+});
+
+describe("Auth — Webhook at Registration (WIS-245)", () => {
+  it("auto-creates webhook when webhookUrl is provided", async () => {
+    const app = Fastify();
+    const { mockSql, webhooksByAgentId } = createMockSql();
+    await initAuth(app, mockSql);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: {
+        agentId,
+        walletAddress,
+        webhookUrl: "https://example.com/webhook"
+      }
+    });
+
+    expect(response.statusCode).toBe(201);
+    const body = JSON.parse(response.body) as {
+      agentId: string;
+      apiKey: string;
+      webhook: { id: string; url: string; secret: string; events: string[]; active: boolean };
+    };
+    expect(body.apiKey).toBeTruthy();
+    expect(body.agentId).toBe(agentId);
+    expect(body.webhook).toBeDefined();
+    expect(body.webhook.url).toBe("https://example.com/webhook");
+    expect(body.webhook.secret).toBeTruthy();
+    expect(body.webhook.secret.length).toBe(64); // 32 bytes hex
+    expect(body.webhook.active).toBe(true);
+    // Should have default events
+    expect(body.webhook.events.length).toBeGreaterThan(0);
+
+    // Verify it was stored in our mock
+    expect(webhooksByAgentId.has(agentId)).toBe(true);
+    await app.close();
+  });
+
+  it("auto-creates webhook with custom events", async () => {
+    const app = Fastify();
+    const { mockSql, webhooksByAgentId } = createMockSql();
+    await initAuth(app, mockSql);
+
+    const customEvents = ["deal.proposed", "concierge.message"];
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: {
+        agentId,
+        walletAddress,
+        webhookUrl: "https://myapp.com/hook",
+        webhookEvents: customEvents
+      }
+    });
+
+    expect(response.statusCode).toBe(201);
+    const body = JSON.parse(response.body) as {
+      webhook: { events: string[] };
+    };
+    expect(body.webhook).toBeDefined();
+    expect(body.webhook.events).toEqual(customEvents);
+
+    const stored = webhooksByAgentId.get(agentId);
+    expect(stored?.events).toEqual(customEvents);
+    await app.close();
+  });
+
+  it("does not create webhook when webhookUrl is omitted", async () => {
+    const app = Fastify();
+    const { mockSql, webhooksByAgentId } = createMockSql();
+    await initAuth(app, mockSql);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: {
+        agentId,
+        walletAddress
+      }
+    });
+
+    expect(response.statusCode).toBe(201);
+    const body = JSON.parse(response.body) as {
+      agentId: string;
+      apiKey: string;
+      webhook?: unknown;
+    };
+    expect(body.webhook).toBeUndefined();
+    expect(webhooksByAgentId.has(agentId)).toBe(false);
+    await app.close();
+  });
+
+  it("rejects invalid webhookUrl", async () => {
+    const app = Fastify();
+    const { mockSql } = createMockSql();
+    await initAuth(app, mockSql);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: {
+        agentId,
+        walletAddress,
+        webhookUrl: "not-a-valid-url"
+      }
+    });
+
+    // Zod validation rejects the invalid URL — in unit tests without the full
+    // app error handler this surfaces as 500; in production the custom error
+    // handler maps ZodError to 400.
+    expect([400, 500]).toContain(response.statusCode);
+    const body = JSON.parse(response.body) as { error?: string };
+    // No webhook should be created, and no apiKey returned on error
+    expect(body).not.toHaveProperty("apiKey");
+    await app.close();
+  });
+
+  it("registration still succeeds if webhook creation fails", async () => {
+    // Create a mock that fails on webhook insert
+    const credentialsByHash = new Map<string, { agentId: string; walletAddress: string | null; revoked: boolean }>();
+    const credentialHashesByAgentId = new Map<string, string>();
+
+    const failingMockSql = async (template: TemplateStringsArray, ...parameters: readonly unknown[]) => {
+      const statement = template.join(" ");
+
+      if (statement.includes("INSERT INTO agent_webhooks")) {
+        throw new Error("Webhook table does not exist");
+      }
+
+      if (statement.includes("INSERT INTO agent_credentials")) {
+        const [registeredAgentId, registeredWalletAddress, apiKeyHash] = parameters as [string, string | null, string];
+        if (credentialHashesByAgentId.has(registeredAgentId)) {
+          return [];
+        }
+        credentialHashesByAgentId.set(registeredAgentId, apiKeyHash);
+        credentialsByHash.set(apiKeyHash, {
+          agentId: registeredAgentId,
+          walletAddress: registeredWalletAddress,
+          revoked: false
+        });
+        return [{ agent_id: registeredAgentId }];
+      }
+
+      if (statement.includes("SELECT agent_id, wallet_address")) {
+        const [apiKeyHash] = parameters as [string];
+        const found = credentialsByHash.get(apiKeyHash);
+        if (!found || found.revoked) return [];
+        return [{ agent_id: found.agentId, wallet_address: found.walletAddress }];
+      }
+
+      return [];
+    };
+
+    const app = Fastify();
+    await initAuth(app, failingMockSql);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: {
+        agentId,
+        walletAddress,
+        webhookUrl: "https://example.com/webhook"
+      }
+    });
+
+    // Registration should succeed even though webhook creation failed
+    expect(response.statusCode).toBe(201);
+    const body = JSON.parse(response.body) as { apiKey: string; webhook?: unknown };
+    expect(body.apiKey).toBeTruthy();
+    expect(body.webhook).toBeUndefined();
     await app.close();
   });
 });
