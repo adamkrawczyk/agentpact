@@ -18,6 +18,7 @@ const VALID_EVENTS = [
     "payment.released",
     "milestone.completed",
     "feedback.received",
+    "concierge.message",
     "webhook.test",
 ];
 const createWebhookSchema = z.object({

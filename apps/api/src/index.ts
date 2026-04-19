@@ -850,7 +850,8 @@ function extractEmbedding(value: unknown): number[] | null {
 
 async function recomputeMatches(): Promise<number> {
   const offers = await sql`
-    SELECT o.*, COALESCE(a.skill_verification_count, 0)::int AS seller_skill_verification_count
+    SELECT o.*, COALESCE(a.skill_verification_count, 0)::int AS seller_skill_verification_count,
+           COALESCE(o.completed_deal_count, 0)::int AS offer_completed_deal_count
     FROM offers o
     JOIN agents a ON a.id = o.agent_id
     WHERE o.status = 'active'
@@ -898,12 +899,13 @@ async function recomputeMatches(): Promise<number> {
           : Math.max(0, 1 - Math.abs(toNumber(offer.base_price) - toNumber(need.budget_max)) / Math.max(toNumber(need.budget_max), 1));
       const tagScore = Math.min(1, overlap.length / Math.max(offer.tags.length, 1));
       const skillBoost = Number(offer.seller_skill_verification_count) > 0 ? 0.2 : 0;
+      const repScore = Math.min(0.3, 0.1 * (Number(offer.offer_completed_deal_count) ?? 0) / 10);
       let semanticScore: number | null = null;
       let score: number;
 
       if (!semanticEnabled) {
         if (overlap.length === 0) continue;
-        score = Number((0.7 * tagScore + 0.3 * budgetFit + skillBoost).toFixed(3));
+        score = Number((0.6 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost + 0.1 * repScore).toFixed(3));
       } else {
         try {
           const offerText = offerTexts.get(String(offer.id)) ?? buildSemanticText(offer);
@@ -913,10 +915,10 @@ async function recomputeMatches(): Promise<number> {
           app.log.warn({ err: error }, "Semantic score failed, reverting to tag-only matching");
           semanticEnabled = false;
           if (overlap.length === 0) continue;
-          score = Number((0.7 * tagScore + 0.3 * budgetFit + skillBoost).toFixed(3));
+          score = Number((0.6 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost + 0.1 * repScore).toFixed(3));
           await sql`
             INSERT INTO matches (offer_id, need_id, score, reason_json)
-            VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, semanticScore })}::jsonb)
+            VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, repScore, semanticScore })}::jsonb)
             ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
           `;
           writes += 1;
@@ -924,12 +926,12 @@ async function recomputeMatches(): Promise<number> {
         }
 
         if (overlap.length === 0 && semanticScore <= 0.75) continue;
-        score = Number((0.5 * semanticScore + 0.2 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost).toFixed(3));
+        score = Number((0.5 * semanticScore + 0.2 * tagScore + 0.15 * budgetFit + 0.05 * skillBoost + 0.1 * repScore).toFixed(3));
       }
 
       await sql`
         INSERT INTO matches (offer_id, need_id, score, reason_json)
-        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, semanticScore })}::jsonb)
+        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, repScore, semanticScore })}::jsonb)
         ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
       `;
       writes += 1;

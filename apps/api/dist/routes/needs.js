@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createNeedSchema } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, withBrowseStatementTimeout } from "./utils.js";
 const DEFAULT_BROWSE_LIMIT = 200;
 const MAX_BROWSE_LIMIT = 200;
 const MAX_BROWSE_OFFSET = 1000;
@@ -29,7 +29,7 @@ async function auditBestEffort(app, sql, action, objectType, objectId, payload) 
 function elapsedMs(startedAt) {
     return Number((process.hrtime.bigint() - startedAt) / 1000000n);
 }
-export async function registerRoutes(app, sql, _deps, recomputeMatches) {
+export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
     app.post("/api/needs", async (request, reply) => {
         const idem = idempotencyKey(request.headers);
         const body = createNeedSchema.parse(request.body);
@@ -52,7 +52,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       ) RETURNING *
     `;
         await audit(sql, body.agentId, "need.create", "need", need.id, idem, body);
-        recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after need.create"));
+        scheduleRecompute();
         return reply.code(201).send(need);
     });
     app.patch("/api/needs/:id", async (request, reply) => {
@@ -91,7 +91,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       WHERE id = ${id}
       RETURNING *
     `;
-        recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after need.update"));
+        scheduleRecompute();
         return need;
     });
     app.post("/api/needs/:id/archive", async (request, reply) => {
@@ -119,8 +119,8 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
         const query = `%${search}%`;
         const limit = boundedInteger(q.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
         const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
-        const rows = search
-            ? await sql `
+        const rows = await withBrowseStatementTimeout(sql, async (querySql) => search
+            ? await querySql `
       SELECT * FROM needs
       WHERE status = 'open'
         AND (title ILIKE ${query} OR description_md ILIKE ${query})
@@ -129,14 +129,14 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       LIMIT ${limit}
       OFFSET ${offset}
     `
-            : await sql `
+            : await querySql `
       SELECT * FROM needs
       WHERE status = 'open'
         AND (${tags.length} = 0 OR tags && ${tags})
       ORDER BY created_at DESC
       LIMIT ${limit}
       OFFSET ${offset}
-    `;
+    `);
         void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
             endpoint: "/api/needs",
             method: "GET",

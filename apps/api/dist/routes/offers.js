@@ -1,10 +1,25 @@
 import { z } from "zod";
 import { createOfferSchema, updateOfferSchema, autopilotSettingsSchema } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey, enrichOfferRow, parseBooleanish } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, enrichOfferRow, parseBooleanish, withBrowseStatementTimeout } from "./utils.js";
 /** Maximum active offers an agent may have at one time (anti-spam). */
 const MAX_ACTIVE_OFFERS_PER_AGENT = 15;
 /** Auto-archive offers with zero deals older than this many days. */
 const STALE_OFFER_DAYS = 30;
+/** Dry-run: count stale offers that WOULD be archived (no mutation). WIS-247. */
+export async function countStaleOffersWithoutDeals(sql) {
+    const rows = await sql `
+    SELECT COUNT(*)::int AS cnt
+    FROM offers o
+    WHERE o.status = 'active'
+      AND o.created_at < NOW() - (${STALE_OFFER_DAYS} * INTERVAL '1 day')
+      AND NOT EXISTS (
+        SELECT 1
+        FROM deals d
+        WHERE d.offer_id = o.id
+      )
+  `;
+    return rows[0]?.cnt ?? 0;
+}
 const DEFAULT_BROWSE_LIMIT = 200;
 const MAX_BROWSE_LIMIT = 200;
 const DEFAULT_GROUPED_LIMIT = 100;
@@ -31,7 +46,19 @@ export async function archiveStaleOffersWithoutDeals(sql) {
       )
     RETURNING o.id
   `;
-    return archivedOffers.length;
+    // Audit log the bulk archival (WIS-247)
+    if (archivedOffers.length > 0) {
+        await sql `
+      INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
+      VALUES (NULL, ${'auto-archive-stale-offers'}, ${'offer'}, NULL, ${`auto-archive-${Date.now()}`}, ${JSON.stringify({
+            count: archivedOffers.length,
+            offerIds: archivedOffers.map((r) => String(r.id)),
+            staleDays: STALE_OFFER_DAYS,
+            triggeredAt: new Date().toISOString(),
+        })}::jsonb)
+    `;
+    }
+    return { count: archivedOffers.length, ids: archivedOffers.map((r) => String(r.id)) };
 }
 async function audit(sql, actorId, action, objectType, objectId, idem, payload) {
     await sql `
@@ -50,7 +77,7 @@ async function auditBestEffort(app, sql, action, objectType, objectId, payload) 
 function elapsedMs(startedAt) {
     return Number((process.hrtime.bigint() - startedAt) / 1000000n);
 }
-export async function registerRoutes(app, sql, _deps, recomputeMatches) {
+export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
     app.post("/api/autopilot/settings", async (request, reply) => {
         const idem = idempotencyKey(request.headers);
         const body = autopilotSettingsSchema.parse(request.body);
@@ -158,7 +185,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
             return reply.send(offer);
         }
         await audit(sql, body.agentId, "offer.create", "offer", String(offer.id), idem, body);
-        recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after offer.create"));
+        scheduleRecompute();
         return reply.code(201).send(offer);
     });
     app.patch("/api/offers/:id", async (request, reply) => {
@@ -209,7 +236,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       WHERE id = ${id}
       RETURNING *
     `;
-        recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after offer.update"));
+        scheduleRecompute();
         return offer;
     });
     app.post("/api/offers/:id/archive", async (request, reply) => {
@@ -245,8 +272,8 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
         const freeOnly = parseBooleanish(q.free_only);
         const limit = boundedInteger(q.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
         const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
-        const rows = search
-            ? await sql `
+        const rows = await withBrowseStatementTimeout(sql, async (querySql) => search
+            ? await querySql `
       SELECT o.* FROM offers o
       JOIN agents a ON a.id = o.agent_id
       WHERE o.status = 'active'
@@ -259,7 +286,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       LIMIT ${limit}
       OFFSET ${offset}
     `
-            : await sql `
+            : await querySql `
       SELECT o.* FROM offers o
       JOIN agents a ON a.id = o.agent_id
       WHERE o.status = 'active'
@@ -270,7 +297,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       ORDER BY o.created_at DESC
       LIMIT ${limit}
       OFFSET ${offset}
-    `;
+    `);
         const enrichedRows = rows.map((row) => enrichOfferRow(row));
         void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
             endpoint: "/api/offers",
@@ -381,8 +408,8 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
         const queryFilter = `%${search}%`;
         const limit = boundedInteger(q.limit, DEFAULT_GROUPED_LIMIT, 1, MAX_GROUPED_LIMIT);
         const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
-        const rows = search
-            ? await sql `
+        const rows = await withBrowseStatementTimeout(sql, async (querySql) => search
+            ? await querySql `
       SELECT
         o.category,
         COUNT(o.id)::int                          AS offer_count,
@@ -437,7 +464,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       LIMIT ${limit}
       OFFSET ${offset}
     `
-            : await sql `
+            : await querySql `
       SELECT
         o.category,
         COUNT(o.id)::int                          AS offer_count,
@@ -481,7 +508,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       ORDER BY offer_count DESC
       LIMIT ${limit}
       OFFSET ${offset}
-    `;
+    `);
         void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
             endpoint: "/api/offers/grouped",
             method: "GET",
@@ -504,6 +531,21 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
             offerId: id,
         }).catch((err) => app.log.warn({ err }, "audit insert failed"));
         return enrichOfferRow(offer);
+    });
+    /**
+     * GET /api/admin/offers/stale-count
+     * Dry-run: returns count of offers that would be archived. No mutation. WIS-247.
+     * Admin-key protected.
+     */
+    app.get("/api/admin/offers/stale-count", async (request, reply) => {
+        const adminKey = process.env.ADMIN_API_KEY;
+        const authHeader = request.headers["x-admin-key"] ||
+            String(request.headers["authorization"] ?? "").replace("Bearer ", "");
+        if (adminKey && authHeader !== adminKey) {
+            return reply.code(403).send({ error: "Invalid admin key" });
+        }
+        const count = await countStaleOffersWithoutDeals(sql);
+        return { staleCount: count, staleDays: STALE_OFFER_DAYS };
     });
     /**
      * POST /api/admin/offers/auto-archive-stale
@@ -536,6 +578,19 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       SELECT * FROM archived
     `;
         app.log.info({ count: archived.length }, "auto-archive-stale: archived offers");
+        // Audit log the bulk archival (WIS-247)
+        if (archived.length > 0) {
+            await sql `
+        INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
+        VALUES (NULL, ${'admin-auto-archive-stale'}, ${'offer'}, NULL, ${`admin-archive-${Date.now()}`}, ${JSON.stringify({
+                count: archived.length,
+                offerIds: archived.map((o) => String(o.id)),
+                staleDays: STALE_OFFER_DAYS,
+                triggeredAt: new Date().toISOString(),
+                trigger: 'admin-endpoint',
+            })}::jsonb)
+      `;
+        }
         return {
             archivedCount: archived.length,
             staleDays: STALE_OFFER_DAYS,

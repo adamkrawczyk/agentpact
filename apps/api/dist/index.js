@@ -6,6 +6,7 @@ import { z, ZodError } from "zod";
 import { initAuth } from "./auth.js";
 import { registerHealthChecks } from "./health.js";
 import { registerWebhookRoutes, notifyAgents } from "./webhooks.js";
+import { registerConciergeRoutes } from "./concierge-relay.js";
 import { autoVerify } from "./auto-verify.js";
 import { decrypt, ensureCredentialVaultSchema, encrypt, getCredentialEncryptionKey, getSensitiveFields, } from "./credential-vault.js";
 import { isOnChainMode, generateAcceptTransaction, resolveDisputeOnChain, } from "./chain.js";
@@ -14,13 +15,13 @@ import "./mpp.js";
 import { registerRoutes as registerAgentRoutes } from './routes/agents.js';
 import { registerRoutes as registerOffersRoutes } from './routes/offers.js';
 import { registerRoutes as registerNeedsRoutes } from './routes/needs.js';
-import { registerRoutes as registerMatchingRoutes, recomputeMatches as recomputeMatchesFn } from './routes/matching.js';
+import { registerRoutes as registerMatchingRoutes, recomputeMatches as recomputeMatchesFn, createRecomputeMatchesQueue } from './routes/matching.js';
 import { registerRoutes as registerDealsRoutes } from './routes/deals.js';
 import { registerRoutes as registerFulfillmentRoutes } from './routes/fulfillment.js';
 import { registerRoutes as registerDisputesRoutes } from './routes/disputes.js';
 import { registerRoutes as registerPaymentsRoutes } from './routes/payments.js';
 import { registerRoutes as registerReputationRoutes } from './routes/reputation.js';
-import { archiveStaleOffersWithoutDeals } from './routes/offers.js';
+import { countStaleOffersWithoutDeals } from './routes/offers.js';
 import adminRoutes from './routes/admin.js';
 import feedbackRoutes from './routes/feedback.js';
 import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/deal-helpers.js';
@@ -86,7 +87,8 @@ async function ensureFulfillmentStatusSchema() {
 }
 async function ensureOfferCompoundingSchema() {
     // Archive duplicate active offers (keep newest) before creating unique index
-    await sql `
+    // WIS-247: Added logging for visibility into how many duplicates are archived.
+    const dupeResult = await sql `
     UPDATE offers SET status = 'archived', updated_at = NOW()
     WHERE id IN (
       SELECT id FROM (
@@ -98,7 +100,11 @@ async function ensureOfferCompoundingSchema() {
         WHERE status = 'active'
       ) dupes WHERE rn > 1
     )
+    RETURNING id
   `;
+    if (dupeResult.length > 0) {
+        console.log(`[startup] ensureOfferCompoundingSchema: archived ${dupeResult.length} duplicate offers.`);
+    }
     await sql `
     CREATE UNIQUE INDEX IF NOT EXISTS offers_active_agent_category_title_unique
     ON offers (agent_id, lower(btrim(category)), lower(btrim(title)))
@@ -146,7 +152,10 @@ await ensureFulfillmentStatusSchema();
 await ensureOfferCompoundingSchema();
 await ensureConsultationSchema();
 await ensureMppSchema();
-await archiveStaleOffersWithoutDeals(sql);
+// WIS-247: Replaced silent auto-archive with dry-run count on startup.
+// Archival is now admin-only via POST /api/admin/offers/auto-archive-stale.
+const staleCount = await countStaleOffersWithoutDeals(sql);
+console.log(`[startup] ${staleCount} stale offers (>30d, 0 deals) eligible for archival. Use POST /api/admin/offers/auto-archive-stale to archive.`);
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
 const milestoneSchema = z.object({
     idx: z.number().int().positive(),
@@ -710,7 +719,8 @@ function extractEmbedding(value) {
 }
 async function recomputeMatches() {
     const offers = await sql `
-    SELECT o.*, COALESCE(a.skill_verification_count, 0)::int AS seller_skill_verification_count
+    SELECT o.*, COALESCE(a.skill_verification_count, 0)::int AS seller_skill_verification_count,
+           COALESCE(o.completed_deal_count, 0)::int AS offer_completed_deal_count
     FROM offers o
     JOIN agents a ON a.id = o.agent_id
     WHERE o.status = 'active'
@@ -756,12 +766,13 @@ async function recomputeMatches() {
                 : Math.max(0, 1 - Math.abs(toNumber(offer.base_price) - toNumber(need.budget_max)) / Math.max(toNumber(need.budget_max), 1));
             const tagScore = Math.min(1, overlap.length / Math.max(offer.tags.length, 1));
             const skillBoost = Number(offer.seller_skill_verification_count) > 0 ? 0.2 : 0;
+            const repScore = Math.min(0.3, 0.1 * (Number(offer.offer_completed_deal_count) ?? 0) / 10);
             let semanticScore = null;
             let score;
             if (!semanticEnabled) {
                 if (overlap.length === 0)
                     continue;
-                score = Number((0.7 * tagScore + 0.3 * budgetFit + skillBoost).toFixed(3));
+                score = Number((0.6 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost + 0.1 * repScore).toFixed(3));
             }
             else {
                 try {
@@ -774,10 +785,10 @@ async function recomputeMatches() {
                     semanticEnabled = false;
                     if (overlap.length === 0)
                         continue;
-                    score = Number((0.7 * tagScore + 0.3 * budgetFit + skillBoost).toFixed(3));
+                    score = Number((0.6 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost + 0.1 * repScore).toFixed(3));
                     await sql `
             INSERT INTO matches (offer_id, need_id, score, reason_json)
-            VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, semanticScore })}::jsonb)
+            VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, repScore, semanticScore })}::jsonb)
             ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
           `;
                     writes += 1;
@@ -785,11 +796,11 @@ async function recomputeMatches() {
                 }
                 if (overlap.length === 0 && semanticScore <= 0.75)
                     continue;
-                score = Number((0.5 * semanticScore + 0.2 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost).toFixed(3));
+                score = Number((0.5 * semanticScore + 0.2 * tagScore + 0.15 * budgetFit + 0.05 * skillBoost + 0.1 * repScore).toFixed(3));
             }
             await sql `
         INSERT INTO matches (offer_id, need_id, score, reason_json)
-        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, semanticScore })}::jsonb)
+        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, repScore, semanticScore })}::jsonb)
         ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
       `;
             writes += 1;
@@ -1043,6 +1054,7 @@ app.get('/health/pool', async () => {
 await initAuth(app);
 registerHealthChecks(app, sql);
 registerWebhookRoutes(app, sql);
+registerConciergeRoutes(app, sql);
 app.addHook("preHandler", async (request, reply) => {
     const routePath = (request.url.split("?")[0] ?? request.url);
     const publicRoutes = new Set(["/health", "/api/auth/register", "/api/auth/verify"]);
@@ -1062,6 +1074,19 @@ app.addHook("preHandler", async (request, reply) => {
     }
     // Cron/admin endpoints use their own auth (X-Admin-Key) or are intentionally public
     if (routePath.startsWith("/api/admin/")) {
+        return;
+    }
+    // Concierge relay endpoints — admin/cron accessible (uses queue/relay triggers)
+    if (routePath.startsWith("/api/concierge/relay") && request.method === "POST") {
+        return;
+    }
+    if (routePath.startsWith("/api/concierge/queue-") && request.method === "POST") {
+        return;
+    }
+    if (routePath === "/api/concierge/stats" && request.method === "GET") {
+        return;
+    }
+    if (routePath === "/api/concierge/run-full-cycle" && request.method === "POST") {
         return;
     }
     // Auto-complete timeout endpoint — cron-friendly, no agent auth required
@@ -1093,11 +1118,13 @@ app.addHook("preHandler", async (request, reply) => {
         storeBuyerContext,
         retrieveBuyerContext,
     };
-    const _recomputeMatches = () => recomputeMatchesFn(app, _sql);
+    const _recomputeMatches = createRecomputeMatchesQueue(() => recomputeMatchesFn(app, _sql), {
+        onError: (err) => app.log.error({ err }, "scheduled recomputeMatches failed"),
+    });
     await registerAgentRoutes(app, _sql, deps);
-    await registerOffersRoutes(app, _sql, deps, _recomputeMatches);
-    await registerNeedsRoutes(app, _sql, deps, _recomputeMatches);
-    await registerMatchingRoutes(app, _sql, deps);
+    await registerOffersRoutes(app, _sql, deps, _recomputeMatches.scheduleRecompute);
+    await registerNeedsRoutes(app, _sql, deps, _recomputeMatches.scheduleRecompute);
+    await registerMatchingRoutes(app, _sql, deps, _recomputeMatches.recomputeNow);
     await registerDealsRoutes(app, _sql, deps);
     await registerFulfillmentRoutes(app, _sql, deps);
     await registerDisputesRoutes(app, _sql, deps, _releaseMilestonePayment);
@@ -1114,6 +1141,9 @@ app.setErrorHandler((error, _request, reply) => {
     }
     if (typeof error.code === "string" && (error.code.startsWith("23") || error.code.startsWith("22"))) {
         return reply.code(400).send({ error: error.message ?? "Invalid request" });
+    }
+    if (error.code === "57014") {
+        return reply.code(504).send({ error: "Query timed out, please retry" });
     }
     const statusCode = error.statusCode ?? 500;
     const message = statusCode < 500 ? (error.message ?? 'Unknown error') : 'Internal server error';

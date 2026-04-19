@@ -6,6 +6,7 @@ import { isOnChainMode, generateAcceptTransaction, resolveDisputeOnChain, } from
 export const PLATFORM_FEE_PCT = Number(process.env.PLATFORM_FEE_PCT ?? 10);
 export const PLATFORM_WALLET = process.env.PLATFORM_WALLET ?? "0xAgentPactPlatformUSDC";
 export const BUYER_VAULT_PREFIX = "buyer__";
+export const BROWSE_STATEMENT_TIMEOUT_MS = 4_000;
 export const TRUST_TIERS = [
     { tier: "gold", label: "Gold", minDeals: 25, minReputation: 4.0, color: "#FFD700" },
     { tier: "silver", label: "Silver", minDeals: 10, minReputation: 3.5, color: "#C0C0C0" },
@@ -181,6 +182,12 @@ export const FULFILLMENT_TYPES = {
     },
 };
 // ── Helper functions ─────────────────────────────────────────────────
+export async function withBrowseStatementTimeout(sql, runQuery) {
+    return sql.begin(async (txn) => {
+        await txn.unsafe("SELECT set_config('statement_timeout', $1, true)", [`${BROWSE_STATEMENT_TIMEOUT_MS}ms`]);
+        return runQuery(txn);
+    });
+}
 export function computeTrustTier(completedDeals, reputationScore) {
     for (const t of TRUST_TIERS) {
         if (completedDeals >= t.minDeals && reputationScore >= t.minReputation) {

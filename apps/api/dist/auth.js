@@ -2,11 +2,24 @@ import fastifyJWT from "@fastify/jwt";
 import postgres from "postgres";
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
-const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/agentpact";
+const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:***@localhost:5432/agentpact";
 const JWT_SECRET = process.env.JWT_SECRET ?? "dev_secret_change_in_production";
+// Default events for auto-created webhooks at registration
+const DEFAULT_WEBHOOK_EVENTS = [
+    "deal.proposed",
+    "deal.accepted",
+    "deal.cancelled",
+    "deal.fulfillment_provided",
+    "deal.fulfillment_verified",
+    "payment.released",
+    "milestone.completed",
+    "concierge.message",
+];
 const registerSchema = z.object({
     agentId: z.string().uuid(),
-    walletAddress: z.string().min(4).optional()
+    walletAddress: z.string().min(4).optional(),
+    webhookUrl: z.string().url().optional(),
+    webhookEvents: z.array(z.string().min(1)).optional(),
 });
 /**
  * SHA-256 hash for API keys. API keys are 32 random bytes (256 bits of entropy),
@@ -101,7 +114,31 @@ export async function initAuth(app, injectedDb) {
             revokedAt: null,
             lastUsedAt: new Date()
         });
-        return reply.code(201).send({ agentId: body.agentId, apiKey });
+        // Auto-create webhook subscription if webhookUrl provided
+        let webhook = null;
+        if (body.webhookUrl) {
+            const events = body.webhookEvents && body.webhookEvents.length > 0
+                ? body.webhookEvents
+                : [...DEFAULT_WEBHOOK_EVENTS];
+            const webhookSecret = randomBytes(32).toString("hex");
+            try {
+                const [wh] = await db `
+            INSERT INTO agent_webhooks (agent_id, url, secret, events)
+            VALUES (${body.agentId}, ${body.webhookUrl}, ${webhookSecret}, ${events})
+            RETURNING id, url, events, active, created_at
+          `;
+                webhook = { ...wh, secret: webhookSecret };
+            }
+            catch (whErr) {
+                // Log but don't fail registration — webhook creation is best-effort
+                app.log.warn({ err: whErr }, "Failed to auto-create webhook during registration");
+            }
+        }
+        return reply.code(201).send({
+            agentId: body.agentId,
+            apiKey,
+            ...(webhook ? { webhook } : {}),
+        });
     });
     // Verify — check if API key is valid
     app.get("/api/auth/verify", { preHandler: app.authenticate }, async (request) => {
