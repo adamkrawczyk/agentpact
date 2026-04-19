@@ -27,6 +27,19 @@ export async function countStaleOffersWithoutDeals(sql: Sql<Record<string, unkno
   return rows[0]?.cnt ?? 0;
 }
 
+const DEFAULT_BROWSE_LIMIT = 200;
+const MAX_BROWSE_LIMIT = 200;
+const DEFAULT_GROUPED_LIMIT = 100;
+const MAX_GROUPED_LIMIT = 100;
+const MAX_BROWSE_OFFSET = 1000;
+
+function boundedInteger(value: string | undefined, defaultValue: number, min: number, max: number): number {
+  if (value === undefined || value.trim() === "") return defaultValue;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  return Math.min(Math.max(Math.trunc(parsed), min), max);
+}
+
 export async function archiveStaleOffersWithoutDeals(sql: Sql<Record<string, unknown>>): Promise<{ count: number; ids: string[] }> {
   const archivedOffers = await sql`
     UPDATE offers o
@@ -47,14 +60,14 @@ export async function archiveStaleOffersWithoutDeals(sql: Sql<Record<string, unk
       INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
       VALUES (NULL, ${'auto-archive-stale-offers'}, ${'offer'}, NULL, ${`auto-archive-${Date.now()}`}, ${JSON.stringify({
         count: archivedOffers.length,
-        offerIds: archivedOffers.map((r: { id: string }) => r.id),
+        offerIds: archivedOffers.map((r) => String((r as Record<string, unknown>).id)),
         staleDays: STALE_OFFER_DAYS,
         triggeredAt: new Date().toISOString(),
       })}::jsonb)
     `;
   }
 
-  return { count: archivedOffers.length, ids: archivedOffers.map((r: { id: string }) => r.id) };
+  return { count: archivedOffers.length, ids: archivedOffers.map((r) => String((r as Record<string, unknown>).id)) };
 }
 
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
@@ -62,6 +75,25 @@ async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, 
     INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
     VALUES (${actorId}, ${action}, ${objectType}, ${objectId}, ${idem}, ${JSON.stringify(payload)}::jsonb)
   `;
+}
+
+async function auditBestEffort(
+  app: FastifyInstance,
+  sql: Sql<Record<string, unknown>>,
+  action: string,
+  objectType: string,
+  objectId: string | null,
+  payload: unknown,
+): Promise<void> {
+  try {
+    await audit(sql, null, action, objectType, objectId, `metrics:${action}:${Date.now()}`, payload);
+  } catch (err) {
+    app.log.warn({ err, action, objectType, objectId }, "metrics audit insert failed");
+  }
+}
+
+function elapsedMs(startedAt: bigint): number {
+  return Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
 }
 
 export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, _deps: Deps, recomputeMatches: () => Promise<number>): Promise<void> {
@@ -258,6 +290,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.get("/api/offers", async (request) => {
+    const startedAt = process.hrtime.bigint();
     const q = z.object({
       query: z.string().optional(),
       tags: z.string().optional(),
@@ -265,15 +298,21 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       maxPrice: z.string().optional(),
       verifiedOnly: z.string().optional(),
       free_only: z.string().optional(),
+      limit: z.string().optional(),
+      offset: z.string().optional(),
     }).parse(request.query ?? {});
     const tags = q.tags ? q.tags.split(",").filter(Boolean) : [];
-    const query = `%${q.query ?? ""}%`;
+    const search = q.query?.trim() ?? "";
+    const query = `%${search}%`;
     const min = q.minPrice ? Number(q.minPrice) : 0;
     const max = q.maxPrice ? Number(q.maxPrice) : Number.MAX_SAFE_INTEGER;
     const verifiedOnly = parseBooleanish(q.verifiedOnly);
     const freeOnly = parseBooleanish(q.free_only);
+    const limit = boundedInteger(q.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
+    const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
 
-    const rows = await sql`
+    const rows = search
+      ? await sql`
       SELECT o.* FROM offers o
       JOIN agents a ON a.id = o.agent_id
       WHERE o.status = 'active'
@@ -283,12 +322,37 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)
         AND (${freeOnly} = FALSE OR o.base_price = 0)
       ORDER BY o.created_at DESC
-      LIMIT 200
+      LIMIT ${limit}
+      OFFSET ${offset}
+    `
+      : await sql`
+      SELECT o.* FROM offers o
+      JOIN agents a ON a.id = o.agent_id
+      WHERE o.status = 'active'
+        AND o.base_price BETWEEN ${min} AND ${max}
+        AND (${tags.length} = 0 OR o.tags && ${tags})
+        AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)
+        AND (${freeOnly} = FALSE OR o.base_price = 0)
+      ORDER BY o.created_at DESC
+      LIMIT ${limit}
+      OFFSET ${offset}
     `;
-    return rows.map((row) => enrichOfferRow(row as Record<string, unknown>));
+    const enrichedRows = rows.map((row) => enrichOfferRow(row as Record<string, unknown>));
+    void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+      endpoint: "/api/offers",
+      method: "GET",
+      durationMs: elapsedMs(startedAt),
+      resultCount: enrichedRows.length,
+      hasQuery: search.length > 0,
+      hasTags: tags.length > 0,
+      limit,
+      offset,
+    }).catch((err) => app.log.warn({ err }, "audit insert failed"));
+    return enrichedRows;
   });
 
   app.get("/api/categories", async () => {
+    const startedAt = process.hrtime.bigint();
     const rows = await sql`
       WITH active_offers AS (
         SELECT id, agent_id, category, base_price, currency
@@ -333,7 +397,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       ORDER BY COUNT(*) DESC, o.category ASC
     `;
 
-    return rows.map((row) => ({
+    const categories = rows.map((row) => ({
       name: row.name,
       offerCount: Number(row.offer_count),
       agentIds: Array.isArray(row.agent_ids) ? row.agent_ids : [],
@@ -349,6 +413,13 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
           }
         : null,
     }));
+    void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+      endpoint: "/api/categories",
+      method: "GET",
+      durationMs: elapsedMs(startedAt),
+      resultCount: categories.length,
+    }).catch((err) => app.log.warn({ err }, "audit insert failed"));
+    return categories;
   });
 
   /**
@@ -369,13 +440,20 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
    * }
    */
   app.get("/api/offers/grouped", async (request) => {
+    const startedAt = process.hrtime.bigint();
     const q = z.object({
       query: z.string().optional(),
+      limit: z.string().optional(),
+      offset: z.string().optional(),
     }).parse(request.query ?? {});
 
-    const queryFilter = `%${q.query ?? ""}%`;
+    const search = q.query?.trim() ?? "";
+    const queryFilter = `%${search}%`;
+    const limit = boundedInteger(q.limit, DEFAULT_GROUPED_LIMIT, 1, MAX_GROUPED_LIMIT);
+    const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
 
-    const rows = await sql`
+    const rows = search
+      ? await sql`
       SELECT
         o.category,
         COUNT(o.id)::int                          AS offer_count,
@@ -390,7 +468,11 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
             SELECT s2.id, s2.title, s2.description_md, s2.base_price, s2.sla_days, s2.tags, s2.agent_id
             FROM offers s2
             WHERE s2.category = o.category AND s2.status = 'active'
-              AND (s2.title ILIKE ${queryFilter} OR s2.description_md ILIKE ${queryFilter} OR ${q.query ?? ""} = '')
+              AND (
+                s2.title ILIKE ${queryFilter}
+                OR s2.description_md ILIKE ${queryFilter}
+                OR s2.category ILIKE ${queryFilter}
+              )
             ORDER BY s2.base_price ASC, s2.sla_days ASC
             LIMIT 1
           ) s
@@ -417,15 +499,70 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       FROM offers o
       WHERE o.status = 'active'
         AND (
-          ${q.query ?? ""} = ''
-          OR o.title ILIKE ${queryFilter}
+          o.title ILIKE ${queryFilter}
           OR o.description_md ILIKE ${queryFilter}
           OR o.category ILIKE ${queryFilter}
         )
       GROUP BY o.category
       ORDER BY offer_count DESC
+      LIMIT ${limit}
+      OFFSET ${offset}
+    `
+      : await sql`
+      SELECT
+        o.category,
+        COUNT(o.id)::int                          AS offer_count,
+        COUNT(DISTINCT o.agent_id)::int           AS agent_count,
+        MIN(o.base_price)::float                  AS min_price,
+        MAX(o.base_price)::float                  AS max_price,
+        AVG(o.base_price)::float                  AS avg_price,
+        -- Sample offer: cheapest active, soonest SLA
+        (
+          SELECT row_to_json(s)
+          FROM (
+            SELECT s2.id, s2.title, s2.description_md, s2.base_price, s2.sla_days, s2.tags, s2.agent_id
+            FROM offers s2
+            WHERE s2.category = o.category AND s2.status = 'active'
+            ORDER BY s2.base_price ASC, s2.sla_days ASC
+            LIMIT 1
+          ) s
+        ) AS sample_offer,
+        -- Top providers: up to 5, ranked by reputation then offer count
+        (
+          SELECT json_agg(p ORDER BY p.reputation_score DESC, p.offer_count DESC)
+          FROM (
+            SELECT
+              a.id        AS agent_id,
+              a.handle,
+              a.display_name,
+              COUNT(o2.id)::int AS offer_count,
+              MIN(o2.base_price)::float AS min_price,
+              COALESCE(a.reputation_score, 0)::float AS reputation_score
+            FROM offers o2
+            JOIN agents a ON a.id = o2.agent_id
+            WHERE o2.category = o.category AND o2.status = 'active'
+            GROUP BY a.id, a.handle, a.display_name, a.reputation_score
+            ORDER BY a.reputation_score DESC, COUNT(o2.id) DESC
+            LIMIT 5
+          ) p
+        ) AS top_providers
+      FROM offers o
+      WHERE o.status = 'active'
+      GROUP BY o.category
+      ORDER BY offer_count DESC
+      LIMIT ${limit}
+      OFFSET ${offset}
     `;
 
+    void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+      endpoint: "/api/offers/grouped",
+      method: "GET",
+      durationMs: elapsedMs(startedAt),
+      resultCount: rows.length,
+      hasQuery: search.length > 0,
+      limit,
+      offset,
+    }).catch((err) => app.log.warn({ err }, "audit insert failed"));
     return rows;
   });
 
@@ -433,6 +570,11 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const { id } = request.params as { id: string };
     const [offer] = await sql`SELECT * FROM offers WHERE id = ${id}`;
     if (!offer) return reply.code(404).send({ error: "Offer not found" });
+    void auditBestEffort(app, sql, "offer.view", "offer", id, {
+      endpoint: "/api/offers/:id",
+      method: "GET",
+      offerId: id,
+    }).catch((err) => app.log.warn({ err }, "audit insert failed"));
     return enrichOfferRow(offer as Record<string, unknown>);
   });
 
@@ -495,7 +637,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
         VALUES (NULL, ${'admin-auto-archive-stale'}, ${'offer'}, NULL, ${`admin-archive-${Date.now()}`}, ${JSON.stringify({
           count: archived.length,
-          offerIds: archived.map((o: { id: string }) => o.id),
+          offerIds: archived.map((o) => String((o as Record<string, unknown>).id)),
           staleDays: STALE_OFFER_DAYS,
           triggeredAt: new Date().toISOString(),
           trigger: 'admin-endpoint',
