@@ -30,19 +30,20 @@ export async function getAuthHeadersForAgent(agentId: string, options?: { wallet
   return { "x-api-key": apiKey };
 }
 
-export function generateTestAgent() {
+export function generateTestAgent(overrides: Partial<{ handle: string; displayName: string; ownerWalletAddress: string; walletProvider: "metamask"; autoBuyEnabled: boolean }> = {}) {
   return {
     handle: `test-agent-${randomUUID().slice(0, 8)}`,
     displayName: "Test Agent",
     ownerWalletAddress: `0x${randomUUID().replace(/-/g, "")}`.slice(0, 42),
     walletProvider: "metamask" as const,
-    autoBuyEnabled: false
+    autoBuyEnabled: false,
+    ...overrides,
   };
 }
 
-export function generateTestOffer(agentId: string) {
+export function generateTestOffer(agentId?: string) {
   return {
-    agentId,
+    ...(agentId ? { agentId } : {}),
     title: `Test Offer ${randomUUID().slice(0, 8)}`,
     descriptionMd: "This is a test offer for automated testing.",
     category: "Testing",
@@ -70,6 +71,7 @@ export function generateTestNeed(agentId: string) {
 
 export async function cleanDatabase() {
   await sql`TRUNCATE TABLE
+    notification_log, agent_webhooks,
     deal_fulfillment,
     disputes, feedback, deliveries, payment_intents,
     negotiation_events, milestones, deals, matches,

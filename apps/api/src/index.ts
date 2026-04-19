@@ -7,6 +7,7 @@ import { z, ZodError } from "zod";
 import { initAuth } from "./auth.js";
 import { registerHealthChecks } from "./health.js";
 import { registerWebhookRoutes, notifyAgents } from "./webhooks.js";
+import { registerConciergeRoutes } from "./concierge-relay.js";
 import { autoVerify } from "./auto-verify.js";
 import {
   decrypt,
@@ -45,7 +46,7 @@ import { registerRoutes as registerFulfillmentRoutes } from './routes/fulfillmen
 import { registerRoutes as registerDisputesRoutes } from './routes/disputes.js';
 import { registerRoutes as registerPaymentsRoutes } from './routes/payments.js';
 import { registerRoutes as registerReputationRoutes } from './routes/reputation.js';
-import { archiveStaleOffersWithoutDeals } from './routes/offers.js';
+import { countStaleOffersWithoutDeals } from './routes/offers.js';
 import adminRoutes from './routes/admin.js';
 import feedbackRoutes from './routes/feedback.js';
 import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/deal-helpers.js';
@@ -119,7 +120,8 @@ async function ensureFulfillmentStatusSchema(): Promise<void> {
 
 async function ensureOfferCompoundingSchema(): Promise<void> {
   // Archive duplicate active offers (keep newest) before creating unique index
-  await sql`
+  // WIS-247: Added logging for visibility into how many duplicates are archived.
+  const dupeResult = await sql`
     UPDATE offers SET status = 'archived', updated_at = NOW()
     WHERE id IN (
       SELECT id FROM (
@@ -131,7 +133,11 @@ async function ensureOfferCompoundingSchema(): Promise<void> {
         WHERE status = 'active'
       ) dupes WHERE rn > 1
     )
+    RETURNING id
   `;
+  if (dupeResult.length > 0) {
+    console.log(`[startup] ensureOfferCompoundingSchema: archived ${dupeResult.length} duplicate offers.`);
+  }
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS offers_active_agent_category_title_unique
     ON offers (agent_id, lower(btrim(category)), lower(btrim(title)))
@@ -182,7 +188,10 @@ await ensureFulfillmentStatusSchema();
 await ensureOfferCompoundingSchema();
 await ensureConsultationSchema();
 await ensureMppSchema();
-await archiveStaleOffersWithoutDeals(sql);
+// WIS-247: Replaced silent auto-archive with dry-run count on startup.
+// Archival is now admin-only via POST /api/admin/offers/auto-archive-stale.
+const staleCount = await countStaleOffersWithoutDeals(sql);
+console.log(`[startup] ${staleCount} stale offers (>30d, 0 deals) eligible for archival. Use POST /api/admin/offers/auto-archive-stale to archive.`);
 
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
 
@@ -1238,6 +1247,7 @@ app.get('/health/pool', async () => {
 await initAuth(app);
 registerHealthChecks(app, sql);
 registerWebhookRoutes(app, sql);
+registerConciergeRoutes(app, sql as unknown as Sql<Record<string, unknown>>);
 
 app.addHook("preHandler", async (request, reply) => {
   const routePath = (request.url.split("?")[0] ?? request.url);
@@ -1264,6 +1274,20 @@ app.addHook("preHandler", async (request, reply) => {
 
   // Cron/admin endpoints use their own auth (X-Admin-Key) or are intentionally public
   if (routePath.startsWith("/api/admin/")) {
+    return;
+  }
+
+  // Concierge relay endpoints — admin/cron accessible (uses queue/relay triggers)
+  if (routePath.startsWith("/api/concierge/relay") && request.method === "POST") {
+    return;
+  }
+  if (routePath.startsWith("/api/concierge/queue-") && request.method === "POST") {
+    return;
+  }
+  if (routePath === "/api/concierge/stats" && request.method === "GET") {
+    return;
+  }
+  if (routePath === "/api/concierge/run-full-cycle" && request.method === "POST") {
     return;
   }
 
