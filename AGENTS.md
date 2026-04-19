@@ -180,3 +180,74 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 - Generate docs: `npx gitnexus wiki`
 
 <!-- gitnexus:end -->
+<!-- Workspace discipline rules — appended to agentpact repo AGENTS.md by Tori 2026-04-19 -->
+
+## 🛡️ Workspace Discipline (Codex + Paperclip, mandatory)
+
+### Branch per ticket
+- ALWAYS create a branch `fix/WIS-NNN-short-slug` or `feat/WIS-NNN-short-slug` from `origin/main` at task start.
+- NEVER reuse an existing branch for a new ticket.
+- NEVER commit directly to `main`.
+
+### Push or it didn't happen
+- Before marking a Paperclip issue `done`, you MUST:
+  1. `git push origin $BRANCH`
+  2. `gh pr create` with `[WIS-NNN]` in the title and body
+  3. Post the PR URL as a Paperclip comment on the ticket
+- No exceptions. No "local commit is done" — it isn't.
+
+### Workspace starts clean
+- Every task begins with:
+  ```bash
+  git fetch origin --prune
+  git checkout main && git pull --ff-only
+  git checkout -b fix/WIS-NNN-slug
+  ```
+- If the workspace is dirty, stash with a named message before switching: `git stash push -m "preserve-pre-WIS-NNN"`.
+- NEVER start a new ticket on a branch that is not `main` + new branch.
+
+### Verification before "done"
+- `npm run build` passes (all 3 workspaces)
+- `npm run test` passes (no new failures)
+- Paste the tail of both commands as Paperclip ticket evidence.
+- If any fail, do NOT mark done — post a `[BLOCKED]` comment with the error.
+
+### Done criteria in the ticket description
+Every ticket spec must end with a "Done when" checklist. If it doesn't, ask in `#agent-sync` with `[CONTEXT_NEEDED]` before coding.
+
+### Retrospective rule (from OpenAI best practices)
+If you make the same mistake twice, write a retrospective entry in this AGENTS.md under "Lessons" with:
+- what was tried
+- what failed
+- the fix / new rule
+- date
+
+### Subagent usage
+Available subagents in `~/.codex/agents/` for self-delegation:
+- `code-reviewer` — adversarial PR review (read-only, gpt-5.4, high reasoning)
+- `typescript-pro` — TS-specific fixes
+- `backend-developer` — API layer work
+- `database-optimizer` — query/index work
+- `debugger` — root cause analysis
+- `security-auditor` — security review
+- `performance-engineer` — latency/throughput
+- `critic`, `architect`, `executor`, `verifier`, `test-engineer`, etc.
+
+Use `@subagent-name` or delegate explicitly when:
+- Code change touches security or auth → invoke `security-auditor` read-only first
+- New DB query or index → `database-optimizer`
+- Before marking any PR ready → `code-reviewer` self-review pass
+
+### No silent failures
+If you cannot proceed, post `[BLOCKED]` with reason in the Paperclip ticket. Never:
+- leave uncommitted work
+- skip the push step
+- mark `done` without PR URL evidence
+- delete files outside the ticket scope
+
+## Lessons (retrospectives)
+
+### 2026-04-19 — Unpushed work accumulated on stale branch
+- **What happened:** 4 commits (WIS-244..247) sat on local branch `WIS-244-concierge-relay` on wisechef-agents for days, never pushed. Each subsequent Codex run dirtied the same branch with new ticket work. Downstream WIS-249 ran on top of contaminated worktree.
+- **Root cause:** Codex adapter on wisechef-agents had no `git push` step after commit. Paperclip `done` status was set without push evidence.
+- **Fix:** Branch-per-ticket rule (above) + push-or-die rule + nightly workspace-reset cron + Tori PR-URL verification before ACK.
