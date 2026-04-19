@@ -137,7 +137,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
       LIMIT ${limit}
       OFFSET ${offset}
     `;
-        await auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+        void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
             endpoint: "/api/needs",
             method: "GET",
             durationMs: elapsedMs(startedAt),
@@ -146,7 +146,7 @@ export async function registerRoutes(app, sql, _deps, recomputeMatches) {
             hasTags: tags.length > 0,
             limit,
             offset,
-        });
+        }).catch((err) => app.log.warn({ err }, "audit insert failed"));
         return rows;
     });
     app.get("/api/needs/:id", async (request, reply) => {

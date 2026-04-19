@@ -309,7 +309,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       OFFSET ${offset}
     `;
     const enrichedRows = rows.map((row) => enrichOfferRow(row as Record<string, unknown>));
-    await auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+    void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
       endpoint: "/api/offers",
       method: "GET",
       durationMs: elapsedMs(startedAt),
@@ -318,7 +318,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       hasTags: tags.length > 0,
       limit,
       offset,
-    });
+    }).catch((err) => app.log.warn({ err }, "audit insert failed"));
     return enrichedRows;
   });
 
@@ -384,12 +384,12 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
           }
         : null,
     }));
-    await auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+    void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
       endpoint: "/api/categories",
       method: "GET",
       durationMs: elapsedMs(startedAt),
       resultCount: categories.length,
-    });
+    }).catch((err) => app.log.warn({ err }, "audit insert failed"));
     return categories;
   });
 
@@ -525,7 +525,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       OFFSET ${offset}
     `;
 
-    await auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+    void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
       endpoint: "/api/offers/grouped",
       method: "GET",
       durationMs: elapsedMs(startedAt),
@@ -533,7 +533,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       hasQuery: search.length > 0,
       limit,
       offset,
-    });
+    }).catch((err) => app.log.warn({ err }, "audit insert failed"));
     return rows;
   });
 
@@ -541,11 +541,11 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const { id } = request.params as { id: string };
     const [offer] = await sql`SELECT * FROM offers WHERE id = ${id}`;
     if (!offer) return reply.code(404).send({ error: "Offer not found" });
-    await auditBestEffort(app, sql, "offer.view", "offer", id, {
+    void auditBestEffort(app, sql, "offer.view", "offer", id, {
       endpoint: "/api/offers/:id",
       method: "GET",
       offerId: id,
-    });
+    }).catch((err) => app.log.warn({ err }, "audit insert failed"));
     return enrichOfferRow(offer as Record<string, unknown>);
   });
 

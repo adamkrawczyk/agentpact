@@ -153,7 +153,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       LIMIT ${limit}
       OFFSET ${offset}
     `;
-    await auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
+    void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
       endpoint: "/api/needs",
       method: "GET",
       durationMs: elapsedMs(startedAt),
@@ -162,7 +162,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       hasTags: tags.length > 0,
       limit,
       offset,
-    });
+    }).catch((err) => app.log.warn({ err }, "audit insert failed"));
     return rows;
   });
 
