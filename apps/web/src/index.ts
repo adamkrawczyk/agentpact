@@ -32,6 +32,14 @@ type Need = {
   currency?: string;
   tags?: string[];
   agent_id?: string;
+  category?: string;
+  description_md?: string;
+  deadline_at?: string | null;
+  fulfillment_type?: string;
+  location?: { city?: string; country?: string } | null;
+  created_at?: string;
+  status?: string;
+  acceptance_criteria?: unknown;
 };
 
 type Match = {
@@ -719,7 +727,7 @@ const needsHandler = async (request: any, reply: any) => {
       ? `${formatPrice(need.budget_min ?? 0)} – ${formatPrice(need.budget_max ?? "∞")} ${escapeHtml(need.currency ?? "USDC")}`
       : "Open";
     return `<div class="card">
-  <div class="card-title">${escapeHtml(need.title)}</div>
+  <div class="card-title"><a href="/needs/${escapeHtml(need.id)}">${escapeHtml(need.title)}</a></div>
   <div class="card-row"><span class="card-label">budget</span><span class="card-value price">${budget}</span></div>
   ${tags ? `<div class="card-tags">${tags}</div>` : ""}
 </div>`;
@@ -735,6 +743,62 @@ const needsHandler = async (request: any, reply: any) => {
 };
 app.get("/needs", needsHandler);
 app.get("/needs.json", needsHandler);
+
+// Need detail page
+app.get("/needs/:id", async (request: any, reply: any) => {
+  const { id } = request.params as { id: string };
+  if (wantsJson(request.url, request.headers.accept)) {
+    return reply.send((await getJson(`/api/needs/${id}`)) as Need);
+  }
+
+  let need: Need;
+  try {
+    need = (await getJson(`/api/needs/${id}`)) as Need;
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: unknown }).statusCode === "number"
+      ? Number((error as { statusCode?: number }).statusCode)
+      : 503;
+    const title = statusCode === 404 ? "Need not found" : "Need temporarily unavailable";
+    const message = statusCode === 404
+      ? "This need could not be found."
+      : upstreamWarning(`/api/needs/${id}`, error);
+    const body = `<a href="/needs" class="back-link">← back to needs</a>${warningSection(message)}`;
+    return reply.code(statusCode === 404 ? 404 : 503).send(page(title, body));
+  }
+
+  const tags = (need.tags ?? []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("");
+  const location = need.location
+    ? `${escapeHtml(need.location.city ?? "")}${need.location.country ? ", " + escapeHtml(need.location.country) : ""}`
+    : "-";
+  const budget = need.budget_min || need.budget_max
+    ? `${formatPrice(need.budget_min ?? 0)} – ${formatPrice(need.budget_max ?? "∞")} ${escapeHtml(need.currency ?? "USDC")}`
+    : "Open";
+  const description = need.description_md ?? "";
+  const images = extractImages(description);
+  const descHtml = mdToPlainHtml(description);
+  const deadline = need.deadline_at ? new Date(need.deadline_at).toISOString().slice(0, 10) : "-";
+
+  const imageLinks = images.length > 0
+    ? `<div class="detail-section"><h3>📷 Images</h3>${images.map((img, i) => `<a class="img-link" href="${escapeHtml(img.url)}" target="_blank">[${escapeHtml(img.alt || `Image ${i + 1}`)}]</a>`).join(" ")}</div>`
+    : "";
+
+  const body = `
+<a href="/needs" class="back-link">← back to needs</a>
+<div class="card">
+  <div class="card-title">${escapeHtml(need.title)}</div>
+  <div class="card-row"><span class="card-label">budget</span><span class="card-value price">${budget}</span></div>
+  <div class="card-row"><span class="card-label">category</span><span class="card-value">${escapeHtml(need.category ?? "-")}</span></div>
+  <div class="card-row"><span class="card-label">location</span><span class="card-value">${location}</span></div>
+  <div class="card-row"><span class="card-label">deadline</span><span class="card-value">${deadline}</span></div>
+  <div class="card-row"><span class="card-label">fulfillment</span><span class="card-value">${escapeHtml(need.fulfillment_type ?? "-")}</span></div>
+  <div class="card-row"><span class="card-label">posted</span><span class="card-value">${need.created_at ? new Date(need.created_at).toISOString().slice(0, 10) : "-"}</span></div>
+  <div class="card-row"><span class="card-label">agent</span><span class="card-value">${escapeHtml(safe(need.agent_id))}</span></div>
+  ${tags ? `<div class="card-tags">${tags}</div>` : ""}
+  ${imageLinks}
+  <div class="detail-section"><h3>Description</h3><div>${descHtml}</div></div>
+</div>`;
+  return page(need.title, body);
+});
 
 type Deal = {
   id: string;
