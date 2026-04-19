@@ -40,7 +40,7 @@ import "./mpp.js";
 import { registerRoutes as registerAgentRoutes } from './routes/agents.js';
 import { registerRoutes as registerOffersRoutes } from './routes/offers.js';
 import { registerRoutes as registerNeedsRoutes } from './routes/needs.js';
-import { registerRoutes as registerMatchingRoutes, recomputeMatches as recomputeMatchesFn } from './routes/matching.js';
+import { registerRoutes as registerMatchingRoutes, recomputeMatches as recomputeMatchesFn, createRecomputeMatchesQueue } from './routes/matching.js';
 import { registerRoutes as registerDealsRoutes } from './routes/deals.js';
 import { registerRoutes as registerFulfillmentRoutes } from './routes/fulfillment.js';
 import { registerRoutes as registerDisputesRoutes } from './routes/disputes.js';
@@ -1323,12 +1323,14 @@ app.addHook("preHandler", async (request, reply) => {
     storeBuyerContext,
     retrieveBuyerContext,
   };
-  const _recomputeMatches = () => recomputeMatchesFn(app, _sql);
+  const _recomputeMatches = createRecomputeMatchesQueue(() => recomputeMatchesFn(app, _sql), {
+    onError: (err) => app.log.error({ err }, "scheduled recomputeMatches failed"),
+  });
 
   await registerAgentRoutes(app, _sql, deps);
-  await registerOffersRoutes(app, _sql, deps, _recomputeMatches);
-  await registerNeedsRoutes(app, _sql, deps, _recomputeMatches);
-  await registerMatchingRoutes(app, _sql, deps);
+  await registerOffersRoutes(app, _sql, deps, _recomputeMatches.scheduleRecompute);
+  await registerNeedsRoutes(app, _sql, deps, _recomputeMatches.scheduleRecompute);
+  await registerMatchingRoutes(app, _sql, deps, _recomputeMatches.recomputeNow);
   await registerDealsRoutes(app, _sql, deps);
   await registerFulfillmentRoutes(app, _sql, deps);
   await registerDisputesRoutes(app, _sql, deps, _releaseMilestonePayment);
@@ -1346,6 +1348,9 @@ app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message
   }
   if (typeof error.code === "string" && (error.code.startsWith("23") || error.code.startsWith("22"))) {
     return reply.code(400).send({ error: error.message ?? "Invalid request" });
+  }
+  if (error.code === "57014") {
+    return reply.code(504).send({ error: "Query timed out, please retry" });
   }
   const statusCode = error.statusCode ?? 500;
   const message = statusCode < 500 ? (error.message ?? 'Unknown error') : 'Internal server error';

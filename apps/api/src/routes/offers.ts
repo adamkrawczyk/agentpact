@@ -3,7 +3,7 @@ import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
 import { createOfferSchema, updateOfferSchema, autopilotSettingsSchema } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey, enrichOfferRow, parseBooleanish } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, enrichOfferRow, parseBooleanish, withBrowseStatementTimeout } from "./utils.js";
 
 /** Maximum active offers an agent may have at one time (anti-spam). */
 const MAX_ACTIVE_OFFERS_PER_AGENT = 15;
@@ -96,7 +96,7 @@ function elapsedMs(startedAt: bigint): number {
   return Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
 }
 
-export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, _deps: Deps, recomputeMatches: () => Promise<number>): Promise<void> {
+export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, _deps: Deps, scheduleRecompute: () => void): Promise<void> {
   app.post("/api/autopilot/settings", async (request, reply) => {
     const idem = idempotencyKey(request.headers as Record<string, unknown>);
     const body = autopilotSettingsSchema.parse(request.body);
@@ -222,7 +222,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     }
 
     await audit(sql, body.agentId, "offer.create", "offer", String(offer.id), idem, body);
-    recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after offer.create"));
+    scheduleRecompute();
     return reply.code(201).send(offer);
   });
 
@@ -273,7 +273,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       WHERE id = ${id}
       RETURNING *
     `;
-    recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after offer.update"));
+    scheduleRecompute();
     return offer;
   });
 
@@ -311,8 +311,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const limit = boundedInteger(q.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
     const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
 
-    const rows = search
-      ? await sql`
+    const rows = await withBrowseStatementTimeout(sql, async (querySql) => search
+      ? await querySql`
       SELECT o.* FROM offers o
       JOIN agents a ON a.id = o.agent_id
       WHERE o.status = 'active'
@@ -325,7 +325,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       LIMIT ${limit}
       OFFSET ${offset}
     `
-      : await sql`
+      : await querySql`
       SELECT o.* FROM offers o
       JOIN agents a ON a.id = o.agent_id
       WHERE o.status = 'active'
@@ -336,7 +336,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       ORDER BY o.created_at DESC
       LIMIT ${limit}
       OFFSET ${offset}
-    `;
+    `);
     const enrichedRows = rows.map((row) => enrichOfferRow(row as Record<string, unknown>));
     void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
       endpoint: "/api/offers",
@@ -452,8 +452,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const limit = boundedInteger(q.limit, DEFAULT_GROUPED_LIMIT, 1, MAX_GROUPED_LIMIT);
     const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
 
-    const rows = search
-      ? await sql`
+    const rows = await withBrowseStatementTimeout(sql, async (querySql) => search
+      ? await querySql`
       SELECT
         o.category,
         COUNT(o.id)::int                          AS offer_count,
@@ -508,7 +508,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       LIMIT ${limit}
       OFFSET ${offset}
     `
-      : await sql`
+      : await querySql`
       SELECT
         o.category,
         COUNT(o.id)::int                          AS offer_count,
@@ -552,7 +552,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       ORDER BY offer_count DESC
       LIMIT ${limit}
       OFFSET ${offset}
-    `;
+    `);
 
     void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
       endpoint: "/api/offers/grouped",

@@ -3,7 +3,7 @@ import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
 import { createNeedSchema } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, withBrowseStatementTimeout } from "./utils.js";
 
 const DEFAULT_BROWSE_LIMIT = 200;
 const MAX_BROWSE_LIMIT = 200;
@@ -42,7 +42,7 @@ function elapsedMs(startedAt: bigint): number {
   return Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
 }
 
-export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, _deps: Deps, recomputeMatches: () => Promise<number>): Promise<void> {
+export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, _deps: Deps, scheduleRecompute: () => void): Promise<void> {
   app.post("/api/needs", async (request, reply) => {
     const idem = idempotencyKey(request.headers as Record<string, unknown>);
     const body = createNeedSchema.parse(request.body);
@@ -66,7 +66,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     `;
 
     await audit(sql, body.agentId, "need.create", "need", need.id, idem, body);
-    recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after need.create"));
+    scheduleRecompute();
     return reply.code(201).send(need);
   });
 
@@ -105,7 +105,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       WHERE id = ${id}
       RETURNING *
     `;
-    recomputeMatches().catch((err) => app.log.error({ err }, "recomputeMatches failed after need.update"));
+    scheduleRecompute();
     return need;
   });
 
@@ -135,8 +135,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const limit = boundedInteger(q.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
     const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
 
-    const rows = search
-      ? await sql`
+    const rows = await withBrowseStatementTimeout(sql, async (querySql) => search
+      ? await querySql`
       SELECT * FROM needs
       WHERE status = 'open'
         AND (title ILIKE ${query} OR description_md ILIKE ${query})
@@ -145,14 +145,14 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       LIMIT ${limit}
       OFFSET ${offset}
     `
-      : await sql`
+      : await querySql`
       SELECT * FROM needs
       WHERE status = 'open'
         AND (${tags.length} = 0 OR tags && ${tags})
       ORDER BY created_at DESC
       LIMIT ${limit}
       OFFSET ${offset}
-    `;
+    `);
     void auditBestEffort(app, sql, "browse.latency", "endpoint", null, {
       endpoint: "/api/needs",
       method: "GET",
