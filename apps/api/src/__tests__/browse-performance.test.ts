@@ -18,6 +18,12 @@ function createSqlCapture(): CapturedSql {
     values.push(params);
     return [];
   }) as any;
+  sql.unsafe = (statement: string, params: unknown[] = []) => {
+    statements.push(statement);
+    values.push(params);
+    return [];
+  };
+  sql.begin = async (handler: (txn: typeof sql) => unknown) => handler(sql);
   return { statements, values, sql };
 }
 
@@ -49,6 +55,12 @@ function lastSelect(capture: CapturedSql): { statement: string; values: unknown[
   throw new Error("No SELECT statement captured");
 }
 
+function expectBrowseStatementTimeout(capture: CapturedSql): void {
+  const timeoutIndex = capture.statements.findIndex((statement) => statement.includes("set_config('statement_timeout'"));
+  expect(timeoutIndex).toBeGreaterThan(-1);
+  expect(capture.values[timeoutIndex]).toContain("4000ms");
+}
+
 describe("public browse SQL performance", () => {
   it("omits offer text search when query is blank", async () => {
     const app = Fastify();
@@ -58,6 +70,7 @@ describe("public browse SQL performance", () => {
     const response = await app.inject({ method: "GET", url: "/api/offers" });
 
     expect(response.statusCode).toBe(200);
+    expectBrowseStatementTimeout(capture);
     expect(lastSelect(capture).statement).not.toMatch(/\bILIKE\b/);
   });
 
@@ -156,6 +169,7 @@ describe("public browse SQL performance", () => {
     const response = await app.inject({ method: "GET", url: "/api/offers/grouped" });
 
     expect(response.statusCode).toBe(200);
+    expectBrowseStatementTimeout(capture);
     expect(lastSelect(capture).statement).not.toMatch(/\bILIKE\b/);
   });
 
@@ -167,6 +181,7 @@ describe("public browse SQL performance", () => {
     const response = await app.inject({ method: "GET", url: "/api/needs" });
 
     expect(response.statusCode).toBe(200);
+    expectBrowseStatementTimeout(capture);
     expect(lastSelect(capture).statement).not.toMatch(/\bILIKE\b/);
   });
 });

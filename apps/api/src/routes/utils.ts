@@ -20,6 +20,7 @@ import { notifyAgents } from "../webhooks.js";
 export const PLATFORM_FEE_PCT = Number(process.env.PLATFORM_FEE_PCT ?? 10);
 export const PLATFORM_WALLET = process.env.PLATFORM_WALLET ?? "0xAgentPactPlatformUSDC";
 export const BUYER_VAULT_PREFIX = "buyer__";
+export const BROWSE_STATEMENT_TIMEOUT_MS = 4_000;
 
 export const TRUST_TIERS = [
   { tier: "gold",   label: "Gold",   minDeals: 25, minReputation: 4.0, color: "#FFD700" },
@@ -198,6 +199,16 @@ export const FULFILLMENT_TYPES = {
 } as const;
 
 // ── Helper functions ─────────────────────────────────────────────────
+
+export async function withBrowseStatementTimeout<T>(
+  sql: Sql<Record<string, unknown>>,
+  runQuery: (querySql: Sql<Record<string, unknown>>) => Promise<T>,
+): Promise<T> {
+  return sql.begin(async (txn) => {
+    await txn.unsafe("SELECT set_config('statement_timeout', $1, true)", [`${BROWSE_STATEMENT_TIMEOUT_MS}ms`]);
+    return runQuery(txn as unknown as Sql<Record<string, unknown>>);
+  }) as Promise<T>;
+}
 
 export function computeTrustTier(completedDeals: number, reputationScore: number): { tier: string; label: string; color: string } {
   for (const t of TRUST_TIERS) {

@@ -125,6 +125,61 @@ export async function recomputeMatches(app: FastifyInstance, sql: Sql<Record<str
   return writes;
 }
 
+export function createRecomputeMatchesQueue(
+  run: () => Promise<number>,
+  opts: {
+    delayMs?: number;
+    onError?: (error: unknown) => void;
+  } = {},
+): {
+  recomputeNow: () => Promise<number>;
+  scheduleRecompute: () => void;
+} {
+  let inFlight: Promise<number> | null = null;
+  let pending = false;
+  let scheduled: ReturnType<typeof setTimeout> | null = null;
+  const delayMs = opts.delayMs ?? 5000;
+  const onError = opts.onError ?? (() => undefined);
+
+  const drain = async () => {
+    let writes = 0;
+    do {
+      pending = false;
+      writes += await run();
+    } while (pending);
+    return writes;
+  };
+
+  const recomputeNow = () => {
+    if (inFlight) {
+      pending = true;
+      return inFlight;
+    }
+    if (scheduled) {
+      clearTimeout(scheduled);
+      scheduled = null;
+    }
+    pending = true;
+
+    inFlight = drain().finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
+  };
+
+  const scheduleRecompute = () => {
+    pending = true;
+    if (inFlight || scheduled) return;
+    scheduled = setTimeout(() => {
+      scheduled = null;
+      recomputeNow().catch(onError);
+    }, delayMs);
+    scheduled.unref?.();
+  };
+
+  return { recomputeNow, scheduleRecompute };
+}
+
 async function createDealProposal(
   sql: Sql<Record<string, unknown>>,
   proposal: {
@@ -209,8 +264,12 @@ async function createDealProposal(
   return result as Record<string, unknown>;
 }
 
-export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, deps: Deps): Promise<void> {
-  const recomputeMatchesFn = () => recomputeMatches(app, sql);
+export async function registerRoutes(
+  app: FastifyInstance,
+  sql: Sql<Record<string, unknown>>,
+  deps: Deps,
+  recomputeMatchesFn = createRecomputeMatchesQueue(() => recomputeMatches(app, sql)).recomputeNow,
+): Promise<void> {
 
   app.get("/api/matches/recommendations", async (request) => {
     const q = z.object({
