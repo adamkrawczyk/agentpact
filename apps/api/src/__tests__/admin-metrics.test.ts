@@ -101,6 +101,20 @@ describe("Admin metrics", () => {
     expect(response.statusCode).toBe(403);
   });
 
+  it("fails closed (503) when ADMIN_API_KEY is unset — WIS-255", async () => {
+    const { app } = await createTestApp();
+    delete process.env.ADMIN_API_KEY;
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/admin/metrics",
+      headers: { "x-admin-key": "test-admin-key" },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(JSON.parse(response.body)).toMatchObject({ error: "Admin API not configured" });
+  });
+
   it("returns funnel, latency, GMV, fee revenue, and conversion metrics", async () => {
     const { app } = await createTestApp();
 

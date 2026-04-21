@@ -15,10 +15,14 @@ export default async function adminRoutes(app: FastifyInstance) {
     reply: { code: (n: number) => { send: (v: unknown) => unknown } },
   ): boolean {
     const adminKey = process.env.ADMIN_API_KEY;
+    if (!adminKey) {
+      reply.code(503).send({ error: "Admin API not configured" });
+      return false;
+    }
     const authHeader =
       (request.headers["x-admin-key"] as string | undefined) ||
       String(request.headers["authorization"] ?? "").replace("Bearer ", "");
-    if (adminKey && authHeader !== adminKey) {
+    if (authHeader !== adminKey) {
       reply.code(403).send({ error: "Invalid admin key" });
       return false;
     }
