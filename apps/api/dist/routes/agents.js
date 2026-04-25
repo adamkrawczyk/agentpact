@@ -65,7 +65,7 @@ export async function registerRoutes(app, sql, _deps) {
         const ownerWalletAddress = body.ownerWalletAddress ?? null;
         const walletProvider = body.walletProvider ?? null;
         // Resolve chain if wallet provided
-        const resolvedChain = ownerWalletAddress ? resolveChainFromAddress(ownerWalletAddress, body.preferredChain) : null;
+        const resolvedChain = ownerWalletAddress ? resolveChainFromAddress(ownerWalletAddress, body.preferredChain) : (body.preferredChain ?? 'base');
         // Validate address format for the resolved chain
         if (ownerWalletAddress && resolvedChain) {
             const validation = validateWalletAddress(ownerWalletAddress, resolvedChain);

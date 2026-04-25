@@ -91,7 +91,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const walletProvider = body.walletProvider ?? null;
 
     // Resolve chain if wallet provided
-    const resolvedChain = ownerWalletAddress ? resolveChainFromAddress(ownerWalletAddress, body.preferredChain) : null;
+    const resolvedChain = ownerWalletAddress ? resolveChainFromAddress(ownerWalletAddress, body.preferredChain) : (body.preferredChain ?? 'base');
 
     // Validate address format for the resolved chain
     if (ownerWalletAddress && resolvedChain) {

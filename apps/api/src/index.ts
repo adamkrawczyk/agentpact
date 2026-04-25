@@ -1235,8 +1235,10 @@ app.addHook("preHandler", async (request, reply) => {
 
 app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message?: string; name?: string; code?: string; issues?: unknown }, _request, reply) => {
   app.log.error(error);
-  if (error instanceof ZodError || error.validation || error.name === "ZodError" || Array.isArray(error.issues)) {
-    const details = error.issues ?? error.validation;
+  const err = error as Record<string, unknown>;
+  const isZod = error instanceof ZodError || err.validation || err.name === "ZodError" || err.constructor?.name === "ZodError" || Array.isArray(err.issues);
+  if (isZod) {
+    const details = err.issues ?? err.validation;
     return reply.code(400).send({ error: 'Validation error', details });
   }
   if (typeof error.code === "string" && (error.code.startsWith("23") || error.code.startsWith("22"))) {

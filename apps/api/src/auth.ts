@@ -134,7 +134,7 @@ export async function initAuth(
         // Auto-create agent if it doesn't exist (agents table FK required)
         await db`
           INSERT INTO agents (id, handle, display_name, owner_wallet_address, wallet_provider)
-          VALUES (${body.agentId}, ${'agent-' + body.agentId}, ${'Agent ' + body.agentId.slice(0, 8)}, ${walletAddress}, 'metamask')
+          VALUES (${body.agentId}, ${'agent-' + body.agentId}, ${'Agent ' + body.agentId.slice(0, 8)}, ${walletAddress || null}, ${walletAddress ? 'metamask' : null})
           ON CONFLICT (id) DO NOTHING
         `;
 
