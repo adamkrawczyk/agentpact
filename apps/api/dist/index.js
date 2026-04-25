@@ -1047,6 +1047,14 @@ app.setErrorHandler((error, _request, reply) => {
     const message = statusCode < 500 ? (error.message ?? 'Unknown error') : 'Internal server error';
     reply.code(statusCode).send({ error: message });
 });
+// Fallback: catch ZodErrors that slip through setErrorHandler
+app.addHook('onError', async (request, reply, error) => {
+    const err = error;
+    if (Array.isArray(err.issues) || err.name === 'ZodError') {
+        void reply.code(400).send({ error: 'Validation error', details: err.issues });
+        return;
+    }
+});
 export const shutdown = async () => {
     await app.close();
     await sql.end({ timeout: 5 });

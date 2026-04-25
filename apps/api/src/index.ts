@@ -1254,6 +1254,15 @@ app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message
   reply.code(statusCode).send({ error: message });
 });
 
+// Fallback: catch ZodErrors that slip through setErrorHandler
+app.addHook('onError', async (request, reply, error) => {
+  const err = error as Record<string, unknown>;
+  if (Array.isArray(err.issues) || err.name === 'ZodError') {
+    void reply.code(400).send({ error: 'Validation error', details: err.issues });
+    return;
+  }
+});
+
 export const shutdown = async () => {
   await app.close();
   await sql.end({ timeout: 5 });

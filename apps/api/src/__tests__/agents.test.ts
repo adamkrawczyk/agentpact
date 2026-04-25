@@ -180,7 +180,7 @@ describe("Agents API", () => {
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body) as { agent_id: string; overall_score: number; total_reviews: number };
       expect(body.agent_id).toBe(id);
-      expect(body.overall_score).toBe(0);
+      expect(body.overall_score).toBe(50); // NEUTRAL_REPUTATION_SCORE
       expect(body.total_reviews).toBe(0);
     });
   });
