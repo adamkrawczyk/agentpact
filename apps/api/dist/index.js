@@ -30,6 +30,15 @@ const HOST = process.env.API_HOST ?? "0.0.0.0";
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/agentpact";
 const PLATFORM_FEE_PCT = Number(process.env.PLATFORM_FEE_PCT ?? 10);
 const PLATFORM_WALLET = process.env.PLATFORM_WALLET ?? "0xAgentPactPlatformUSDC";
+// ── WIS-255 (AP-P1-3): Admin-routes fail-closed guard ─────────────────────
+// Boot-time fatal check: in production we require ADMIN_API_KEY to be set,
+// otherwise the admin surface would 503 silently and someone would notice
+// only by user report. Fail loud and early instead.
+if (process.env.NODE_ENV === "production" && !process.env.ADMIN_API_KEY) {
+    console.error("[fatal] ADMIN_API_KEY is unset in production — refusing to boot. " +
+        "Set ADMIN_API_KEY in the Railway environment and redeploy.");
+    process.exit(1);
+}
 // ── Trust Tier definitions (informational only — no deal limits) ─────
 const TRUST_TIERS = [
     { tier: "gold", label: "Gold", minDeals: 25, minReputation: 4.0, color: "#FFD700" },
@@ -1057,7 +1066,7 @@ registerWebhookRoutes(app, sql);
 registerConciergeRoutes(app, sql);
 app.addHook("preHandler", async (request, reply) => {
     const routePath = (request.url.split("?")[0] ?? request.url);
-    const publicRoutes = new Set(["/health", "/api/auth/register", "/api/auth/verify"]);
+    const publicRoutes = new Set(["/health", "/api/health", "/api/config", "/api/auth/register", "/api/auth/verify", "/api/auth/nonce"]);
     if (publicRoutes.has(routePath)) {
         return;
     }

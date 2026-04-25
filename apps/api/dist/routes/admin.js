@@ -7,9 +7,13 @@ import { isOnChainMode, resolveDisputeOnChain, } from "../chain.js";
 export default async function adminRoutes(app) {
     function checkAdminKey(request, reply) {
         const adminKey = process.env.ADMIN_API_KEY;
+        if (!adminKey) {
+            reply.code(503).send({ error: "Admin API not configured" });
+            return false;
+        }
         const authHeader = request.headers["x-admin-key"] ||
             String(request.headers["authorization"] ?? "").replace("Bearer ", "");
-        if (adminKey && authHeader !== adminKey) {
+        if (authHeader !== adminKey) {
             reply.code(403).send({ error: "Invalid admin key" });
             return false;
         }

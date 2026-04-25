@@ -1265,7 +1265,7 @@ registerConciergeRoutes(app, sql as unknown as Sql<Record<string, unknown>>);
 
 app.addHook("preHandler", async (request, reply) => {
   const routePath = (request.url.split("?")[0] ?? request.url);
-  const publicRoutes = new Set(["/health", "/api/auth/register", "/api/auth/verify"]);
+  const publicRoutes = new Set(["/health", "/api/health", "/api/config", "/api/auth/register", "/api/auth/verify", "/api/auth/nonce"]);
 
   if (publicRoutes.has(routePath)) {
     return;
