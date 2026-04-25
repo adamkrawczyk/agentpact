@@ -1256,7 +1256,7 @@ app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message
 
 // Fallback: catch ZodErrors that slip through setErrorHandler
 app.addHook('onError', async (request, reply, error) => {
-  const err = error as Record<string, unknown>;
+  const err = error as unknown as Record<string, unknown>;
   if (Array.isArray(err.issues) || err.name === 'ZodError') {
     void reply.code(400).send({ error: 'Validation error', details: err.issues });
     return;
