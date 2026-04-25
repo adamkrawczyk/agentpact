@@ -11,7 +11,12 @@ export async function getAuthHeaders() {
   return getAuthHeadersForAgent(TEST_AGENT_ID);
 }
 
+const authHeadersCache = new Map<string, { "x-api-key": string }>();
+
 export async function getAuthHeadersForAgent(agentId: string, options?: { walletAddress?: string | null }) {
+  const cached = authHeadersCache.get(agentId);
+  if (cached) return cached;
+
   const payload: { agentId: string; walletAddress?: string | null } = {
     agentId
   };
@@ -27,14 +32,18 @@ export async function getAuthHeadersForAgent(agentId: string, options?: { wallet
     payload
   });
   const { apiKey } = JSON.parse(registerRes.body) as { apiKey: string };
-  return { "x-api-key": apiKey };
+  const headers = { "x-api-key": apiKey };
+  authHeadersCache.set(agentId, headers);
+  return headers;
 }
+
+export function clearAuthHeadersCache() { authHeadersCache.clear(); }
 
 export function generateTestAgent(overrides: Partial<{ handle: string; displayName: string; ownerWalletAddress: string; walletProvider: "metamask"; autoBuyEnabled: boolean }> = {}) {
   return {
     handle: `test-agent-${randomUUID().slice(0, 8)}`,
     displayName: "Test Agent",
-    ownerWalletAddress: `0x${randomUUID().replace(/-/g, "")}`.slice(0, 42),
+    ownerWalletAddress: `0x${randomUUID().replace(/-/g, "")}${randomUUID().slice(0, 8)}`.slice(0, 42),
     walletProvider: "metamask" as const,
     autoBuyEnabled: false,
     ...overrides,
@@ -70,11 +79,15 @@ export function generateTestNeed(agentId: string) {
 }
 
 export async function cleanDatabase() {
+  authHeadersCache.clear();
   await sql`TRUNCATE TABLE
     notification_log, agent_webhooks,
-    deal_fulfillment,
+    deal_fulfillment, consultation_responses,
     disputes, feedback, deliveries, payment_intents,
     negotiation_events, milestones, deals, matches,
-    needs, offers, alert_subscriptions, agent_credentials, agents, audit_log
+    needs, offers, alert_subscriptions, agent_credentials, agents, audit_log,
+    api_usage, credential_access_log, credential_vault,
+    endorsements, skill_verifications, skill_challenges,
+    concierge_messages, concierge_relay_log
     RESTART IDENTITY CASCADE`;
 }

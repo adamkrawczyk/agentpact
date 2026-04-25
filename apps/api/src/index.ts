@@ -29,12 +29,6 @@ import {
   ESCROW_ADDRESS,
   USDC_ADDRESS,
 } from "./chain.js";
-import {
-  cacheEmbedding,
-  computeSemanticScore,
-  generateEmbeddings,
-  isSemanticMatchingEnabled,
-} from "./semantic-match.js";
 import type { Hex, Address } from "viem";
 import "./mpp.js";
 import { registerRoutes as registerAgentRoutes } from './routes/agents.js';
@@ -837,121 +831,6 @@ async function audit(actorId: string | null, action: string, objectType: string,
   `;
 }
 
-function buildSemanticText(input: { title?: string | null; description_md?: string | null; category?: string | null; tags?: string[] | null }): string {
-  const tags = Array.isArray(input.tags) ? input.tags.join(", ") : "";
-  return [
-    input.title ?? "",
-    input.description_md ?? "",
-    input.category ?? "",
-    tags,
-  ]
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .join("\n");
-}
-
-function extractEmbedding(value: unknown): number[] | null {
-  if (!Array.isArray(value)) return null;
-  const embedding: number[] = [];
-  for (const item of value) {
-    if (typeof item !== "number" || !Number.isFinite(item)) return null;
-    embedding.push(item);
-  }
-  return embedding.length > 0 ? embedding : null;
-}
-
-async function recomputeMatches(): Promise<number> {
-  const offers = await sql`
-    SELECT o.*, COALESCE(a.skill_verification_count, 0)::int AS seller_skill_verification_count,
-           COALESCE(o.completed_deal_count, 0)::int AS offer_completed_deal_count
-    FROM offers o
-    JOIN agents a ON a.id = o.agent_id
-    WHERE o.status = 'active'
-  `;
-  const needs = await sql`SELECT * FROM needs WHERE status = 'open'`;
-  let writes = 0;
-  let semanticEnabled = isSemanticMatchingEnabled();
-  const offerTexts = new Map<string, string>();
-  const needTexts = new Map<string, string>();
-
-  if (semanticEnabled) {
-    try {
-      const allTexts: string[] = [];
-      for (const offer of offers) {
-        const text = buildSemanticText(offer);
-        offerTexts.set(String(offer.id), text);
-        const cachedEmbedding = extractEmbedding(offer.description_embedding);
-        if (cachedEmbedding) {
-          cacheEmbedding(text, cachedEmbedding);
-        }
-        allTexts.push(text);
-      }
-      for (const need of needs) {
-        const text = buildSemanticText(need);
-        needTexts.set(String(need.id), text);
-        const cachedEmbedding = extractEmbedding(need.description_embedding);
-        if (cachedEmbedding) {
-          cacheEmbedding(text, cachedEmbedding);
-        }
-        allTexts.push(text);
-      }
-      await generateEmbeddings(allTexts);
-    } catch (error) {
-      app.log.warn({ err: error }, "Semantic matching warmup failed, using tag-only matching");
-      semanticEnabled = false;
-    }
-  }
-
-  for (const offer of offers) {
-    for (const need of needs) {
-      const overlap = offer.tags.filter((t: string) => need.tags.includes(t));
-      const budgetFit =
-        need.budget_max === null || need.budget_max === undefined
-          ? 1
-          : Math.max(0, 1 - Math.abs(toNumber(offer.base_price) - toNumber(need.budget_max)) / Math.max(toNumber(need.budget_max), 1));
-      const tagScore = Math.min(1, overlap.length / Math.max(offer.tags.length, 1));
-      const skillBoost = Number(offer.seller_skill_verification_count) > 0 ? 0.2 : 0;
-      const repScore = Math.min(0.3, 0.1 * (Number(offer.offer_completed_deal_count) ?? 0) / 10);
-      let semanticScore: number | null = null;
-      let score: number;
-
-      if (!semanticEnabled) {
-        if (overlap.length === 0) continue;
-        score = Number((0.6 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost + 0.1 * repScore).toFixed(3));
-      } else {
-        try {
-          const offerText = offerTexts.get(String(offer.id)) ?? buildSemanticText(offer);
-          const needText = needTexts.get(String(need.id)) ?? buildSemanticText(need);
-          semanticScore = await computeSemanticScore(offerText, needText);
-        } catch (error) {
-          app.log.warn({ err: error }, "Semantic score failed, reverting to tag-only matching");
-          semanticEnabled = false;
-          if (overlap.length === 0) continue;
-          score = Number((0.6 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost + 0.1 * repScore).toFixed(3));
-          await sql`
-            INSERT INTO matches (offer_id, need_id, score, reason_json)
-            VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, repScore, semanticScore })}::jsonb)
-            ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
-          `;
-          writes += 1;
-          continue;
-        }
-
-        if (overlap.length === 0 && semanticScore <= 0.75) continue;
-        score = Number((0.5 * semanticScore + 0.2 * tagScore + 0.15 * budgetFit + 0.05 * skillBoost + 0.1 * repScore).toFixed(3));
-      }
-
-      await sql`
-        INSERT INTO matches (offer_id, need_id, score, reason_json)
-        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, repScore, semanticScore })}::jsonb)
-        ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
-      `;
-      writes += 1;
-    }
-  }
-  return writes;
-}
-
 type ProposeDealInput = z.infer<typeof proposeDealSchema>;
 
 async function createDealProposal(
@@ -1355,10 +1234,14 @@ app.addHook("preHandler", async (request, reply) => {
 }
 
 app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message?: string; name?: string; code?: string; issues?: unknown }, _request, reply) => {
-  app.log.error(error);
-  if (error instanceof ZodError || error.validation || error.name === "ZodError" || Array.isArray(error.issues)) {
-    const details = error.issues ?? error.validation;
-    return reply.code(400).send({ error: 'Validation error', details });
+  const err = error as Record<string, unknown>;
+  // ZodError detection: duck-typing (instanceof fails with ESM dual packages)
+  const issues = err.issues;
+  const isZod = Array.isArray(issues) && issues.length > 0 && typeof (issues[0] as any)?.path !== 'undefined'
+    || err.name === 'ZodError' || err.validation;
+  if (isZod) {
+    app.log.warn({ err: { name: err.name, message: err.message } }, 'validation error');
+    return reply.code(400).send({ error: 'Validation error', details: issues ?? err.validation });
   }
   if (typeof error.code === "string" && (error.code.startsWith("23") || error.code.startsWith("22"))) {
     return reply.code(400).send({ error: error.message ?? "Invalid request" });
@@ -1369,6 +1252,15 @@ app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message
   const statusCode = error.statusCode ?? 500;
   const message = statusCode < 500 ? (error.message ?? 'Unknown error') : 'Internal server error';
   reply.code(statusCode).send({ error: message });
+});
+
+// Fallback: catch ZodErrors that slip through setErrorHandler
+app.addHook('onError', async (request, reply, error) => {
+  const err = error as unknown as Record<string, unknown>;
+  if (Array.isArray(err.issues) || err.name === 'ZodError') {
+    void reply.code(400).send({ error: 'Validation error', details: err.issues });
+    return;
+  }
 });
 
 export const shutdown = async () => {

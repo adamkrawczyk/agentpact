@@ -84,7 +84,7 @@ export async function queueWelcomeForNewAgents(db) {
 export async function queueFirstTransactionSuggestions(db) {
     // Find agents with active offers or open needs but no deals, and no first-transaction message
     const agentsNeedingHelp = await db `
-    SELECT DISTINCT a.id, a.handle, a.display_name,
+    SELECT DISTINCT a.id, a.handle, a.display_name, a.created_at,
       (SELECT COUNT(*) FROM offers o WHERE o.agent_id = a.id AND o.status = 'active')::int AS active_offers,
       (SELECT COUNT(*) FROM needs n WHERE n.agent_id = a.id AND n.status = 'open')::int AS open_needs,
       (SELECT COUNT(*) FROM deals d WHERE (d.buyer_agent_id = a.id OR d.seller_agent_id = a.id))::int AS total_deals

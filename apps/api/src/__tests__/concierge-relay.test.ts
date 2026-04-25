@@ -1,19 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { cleanDatabase, createTestApp, generateTestAgent, generateTestNeed, generateTestOffer, getAuthHeaders } from "./helpers/testApp.js";
+import { cleanDatabase, createTestApp, generateTestAgent, generateTestNeed, generateTestOffer, getAuthHeaders, getAuthHeadersForAgent } from "./helpers/testApp.js";
 
-async function getAuthHeadersForAgent(agentId: string): Promise<Record<string, string>> {
-  const { app } = await createTestApp();
-  const registerRes = await app.inject({
-    method: "POST",
-    url: "/api/auth/register",
-    payload: {
-      agentId,
-      walletAddress: `0x${agentId.replace(/-/g, "").padEnd(40, "0").slice(0, 40)}`,
-    },
-  });
-  const body = JSON.parse(registerRes.body) as { apiKey: string };
-  return { "x-api-key": body.apiKey };
-}
 
 describe("Concierge Relay", () => {
   beforeEach(async () => {
@@ -417,13 +404,15 @@ describe("Concierge Relay", () => {
       const { app, sql } = await createTestApp();
       const headers = await getAuthHeaders();
 
-      // Create an inactive agent (no offers, no needs)
       await app.inject({
         method: "POST",
         url: "/api/agents",
         headers,
         payload: generateTestAgent({ handle: "inactive1" }),
       });
+
+      // Set created_at to 2 hours ago so activation nudge logic picks it up (skips <1h agents)
+      await sql`UPDATE agents SET created_at = NOW() - INTERVAL '2 hours' WHERE handle = 'inactive1'`;
 
       // Run activation nudge queue
       const res = await app.inject({

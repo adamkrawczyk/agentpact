@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { proposeDealSchema } from "./schemas.js";
 import { getRequesterAgentId, toNumber, isZeroPrice, withReputationOnlyTag, normalizeTags, parseBooleanish } from "./utils.js";
-import { isSemanticMatchingEnabled, cacheEmbedding, computeSemanticScore, generateEmbeddings, } from "../semantic-match.js";
+import { isSemanticMatchingEnabled, cacheEmbedding, cosineSimilarity, generateEmbeddings, } from "../semantic-match.js";
 function buildSemanticText(input) {
     const tags = Array.isArray(input.tags) ? input.tags.join(", ") : "";
     return [
@@ -36,35 +36,80 @@ export async function recomputeMatches(app, sql) {
     const needs = await sql `SELECT * FROM needs WHERE status = 'open'`;
     let writes = 0;
     let semanticEnabled = isSemanticMatchingEnabled();
-    const offerTexts = new Map();
-    const needTexts = new Map();
+    // Build embedding maps from stored DB embeddings; generate only for missing ones
+    const offerEmbeddings = new Map();
+    const needEmbeddings = new Map();
     if (semanticEnabled) {
         try {
-            const allTexts = [];
+            const missingTexts = [];
+            const missingRefs = [];
             for (const offer of offers) {
                 const text = buildSemanticText(offer);
-                offerTexts.set(String(offer.id), text);
-                const cachedEmbedding = extractEmbedding(offer.description_embedding);
-                if (cachedEmbedding) {
-                    cacheEmbedding(text, cachedEmbedding);
+                const stored = extractEmbedding(offer.description_embedding);
+                if (stored) {
+                    offerEmbeddings.set(String(offer.id), stored);
+                    cacheEmbedding(text, stored);
                 }
-                allTexts.push(text);
+                else {
+                    missingTexts.push(text);
+                    missingRefs.push({ type: 'offer', id: String(offer.id), text });
+                }
             }
             for (const need of needs) {
                 const text = buildSemanticText(need);
-                needTexts.set(String(need.id), text);
-                const cachedEmbedding = extractEmbedding(need.description_embedding);
-                if (cachedEmbedding) {
-                    cacheEmbedding(text, cachedEmbedding);
+                const stored = extractEmbedding(need.description_embedding);
+                if (stored) {
+                    needEmbeddings.set(String(need.id), stored);
+                    cacheEmbedding(text, stored);
                 }
-                allTexts.push(text);
+                else {
+                    missingTexts.push(text);
+                    missingRefs.push({ type: 'need', id: String(need.id), text });
+                }
             }
-            await generateEmbeddings(allTexts);
+            if (missingTexts.length > 0) {
+                const newEmbeddings = await generateEmbeddings(missingTexts);
+                // Batch write back new embeddings to DB (awaited, not fire-and-forget)
+                const embeddingUpdates = [];
+                for (let i = 0; i < missingRefs.length; i += 1) {
+                    const ref = missingRefs[i];
+                    const emb = newEmbeddings[i];
+                    if (ref.type === 'offer') {
+                        offerEmbeddings.set(ref.id, emb);
+                    }
+                    else {
+                        needEmbeddings.set(ref.id, emb);
+                    }
+                    cacheEmbedding(ref.text, emb);
+                    const table = ref.type === 'offer' ? 'offers' : 'needs';
+                    embeddingUpdates.push(sql.unsafe(`UPDATE ${table} SET description_embedding = $1::jsonb WHERE id = $2`, [JSON.stringify(emb), ref.id])
+                        .then(() => { })
+                        .catch((err) => { app.log.warn({ err, id: ref.id, type: ref.type }, 'Failed to store embedding'); }));
+                }
+                await Promise.all(embeddingUpdates);
+            }
         }
         catch (error) {
             app.log.warn({ err: error }, "Semantic matching warmup failed, using tag-only matching");
             semanticEnabled = false;
         }
+    }
+    // Flush batch helper to keep memory bounded during large N×M runs
+    const BATCH_SIZE = 200;
+    let batchBuffer = [];
+    async function flushBatch() {
+        if (batchBuffer.length === 0)
+            return 0;
+        const params = [];
+        const placeholders = batchBuffer.map((m, idx) => {
+            const base = idx * 4;
+            params.push(m.offer_id, m.need_id, m.score, m.reason_json);
+            return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}::jsonb)`;
+        }).join(', ');
+        await sql.unsafe(`INSERT INTO matches (offer_id, need_id, score, reason_json) VALUES ${placeholders} ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json`, params);
+        const count = batchBuffer.length;
+        batchBuffer = [];
+        return count;
     }
     for (const offer of offers) {
         for (const need of needs) {
@@ -83,44 +128,50 @@ export async function recomputeMatches(app, sql) {
                 score = Number((0.6 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost + 0.1 * repScore).toFixed(3));
             }
             else {
-                try {
-                    const offerText = offerTexts.get(String(offer.id)) ?? buildSemanticText(offer);
-                    const needText = needTexts.get(String(need.id)) ?? buildSemanticText(need);
-                    semanticScore = await computeSemanticScore(offerText, needText);
+                // Use pre-computed stored embeddings — NO per-pair API calls
+                const offerEmb = offerEmbeddings.get(String(offer.id));
+                const needEmb = needEmbeddings.get(String(need.id));
+                if (offerEmb && needEmb) {
+                    semanticScore = cosineSimilarity(offerEmb, needEmb);
                 }
-                catch (error) {
-                    app.log.warn({ err: error }, "Semantic score failed, reverting to tag-only matching");
-                    semanticEnabled = false;
+                else {
+                    // Fallback: no embedding available for this item
+                    if (overlap.length === 0)
+                        continue;
+                    semanticScore = null;
+                }
+                if (semanticScore !== null && overlap.length === 0 && semanticScore <= 0.75)
+                    continue;
+                if (semanticScore !== null) {
+                    score = Number((0.5 * semanticScore + 0.2 * tagScore + 0.15 * budgetFit + 0.05 * skillBoost + 0.1 * repScore).toFixed(3));
+                }
+                else {
                     if (overlap.length === 0)
                         continue;
                     score = Number((0.6 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost + 0.1 * repScore).toFixed(3));
-                    await sql `
-            INSERT INTO matches (offer_id, need_id, score, reason_json)
-            VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, repScore, semanticScore })}::jsonb)
-            ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
-          `;
-                    writes += 1;
-                    continue;
                 }
-                if (overlap.length === 0 && semanticScore <= 0.75)
-                    continue;
-                score = Number((0.5 * semanticScore + 0.2 * tagScore + 0.15 * budgetFit + 0.05 * skillBoost + 0.1 * repScore).toFixed(3));
             }
-            await sql `
-        INSERT INTO matches (offer_id, need_id, score, reason_json)
-        VALUES (${offer.id}, ${need.id}, ${score}, ${JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, repScore, semanticScore })}::jsonb)
-        ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json
-      `;
-            writes += 1;
+            // Push to batch buffer, flush when full
+            batchBuffer.push({
+                offer_id: String(offer.id),
+                need_id: String(need.id),
+                score,
+                reason_json: JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, repScore, semanticScore }),
+            });
+            if (batchBuffer.length >= BATCH_SIZE) {
+                writes += await flushBatch();
+            }
         }
     }
+    // Flush remaining
+    writes += await flushBatch();
     return writes;
 }
 export function createRecomputeMatchesQueue(run, opts = {}) {
     let inFlight = null;
     let pending = false;
     let scheduled = null;
-    const delayMs = opts.delayMs ?? 5000;
+    const delayMs = opts.delayMs ?? 60000;
     const onError = opts.onError ?? (() => undefined);
     const drain = async () => {
         let writes = 0;

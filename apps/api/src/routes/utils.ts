@@ -261,6 +261,10 @@ export function enrichOfferRow<T extends Record<string, unknown>>(offer: T): T &
   pricing_model: "paid" | "reputation-only";
 } {
   const isFreeTier = isZeroPrice(offer.base_price);
+  // Parse JSONB location if it's a string (postgres.js test env)
+  if (typeof offer.location === "string") {
+    try { offer = { ...offer, location: JSON.parse(offer.location) }; } catch {}
+  }
   return {
     ...offer,
     tags: isFreeTier ? withReputationOnlyTag(offer.tags) : normalizeTags(offer.tags),

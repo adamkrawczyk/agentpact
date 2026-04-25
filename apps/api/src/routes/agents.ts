@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import type { Deps } from "./types.js";
 import { resolveChainFromAddress, validateWalletAddress } from "../chain.js";
 import {
@@ -75,23 +75,29 @@ function gradeSkillSubmission(expectedCriteria: Record<string, unknown>, submiss
 }
 
 export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, _deps: Deps): Promise<void> {
+  const agentSchema = z.object({
+    handle: z.string().min(3),
+    displayName: z.string().min(2),
+    ownerWalletAddress: z.string().min(4).optional().nullable(),
+    walletProvider: z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]).optional().nullable(),
+    preferredChain: z.string().optional(),
+    autoBuyEnabled: z.boolean().default(false)
+  });
+
   app.post("/api/agents", async (request, reply) => {
-    const body = z
-      .object({
-        handle: z.string().min(3),
-        displayName: z.string().min(2),
-        ownerWalletAddress: z.string().min(4).optional().nullable(),
-        walletProvider: z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]).optional().nullable(),
-        preferredChain: z.string().optional(),
-        autoBuyEnabled: z.boolean().default(false)
-      })
-      .parse(request.body);
+    let body: z.infer<typeof agentSchema>;
+    try {
+      body = agentSchema.parse(request.body);
+    } catch (e) {
+      if (e instanceof ZodError) return reply.code(400).send({ error: 'Validation error', details: e.issues });
+      throw e;
+    }
 
     const ownerWalletAddress = body.ownerWalletAddress ?? null;
     const walletProvider = body.walletProvider ?? null;
 
     // Resolve chain if wallet provided
-    const resolvedChain = ownerWalletAddress ? resolveChainFromAddress(ownerWalletAddress, body.preferredChain) : null;
+    const resolvedChain = ownerWalletAddress ? resolveChainFromAddress(ownerWalletAddress, body.preferredChain) : (body.preferredChain ?? 'base');
 
     // Validate address format for the resolved chain
     if (ownerWalletAddress && resolvedChain) {
