@@ -404,13 +404,15 @@ describe("Concierge Relay", () => {
       const { app, sql } = await createTestApp();
       const headers = await getAuthHeaders();
 
-      // Create an inactive agent (no offers, no needs)
       await app.inject({
         method: "POST",
         url: "/api/agents",
         headers,
         payload: generateTestAgent({ handle: "inactive1" }),
       });
+
+      // Set created_at to 2 hours ago so activation nudge logic picks it up (skips <1h agents)
+      await sql`UPDATE agents SET created_at = NOW() - INTERVAL '2 hours' WHERE handle = 'inactive1'`;
 
       // Run activation nudge queue
       const res = await app.inject({
