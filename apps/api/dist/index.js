@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
-import { z, ZodError } from "zod";
+import { z } from "zod";
 import { initAuth } from "./auth.js";
 import { registerHealthChecks } from "./health.js";
 import { registerWebhookRoutes, notifyAgents } from "./webhooks.js";
@@ -1028,12 +1028,14 @@ app.addHook("preHandler", async (request, reply) => {
     await app.register(feedbackRoutes);
 }
 app.setErrorHandler((error, _request, reply) => {
-    app.log.error(error);
     const err = error;
-    const isZod = error instanceof ZodError || err.validation || err.name === "ZodError" || err.constructor?.name === "ZodError" || Array.isArray(err.issues);
+    // ZodError detection: duck-typing (instanceof fails with ESM dual packages)
+    const issues = err.issues;
+    const isZod = Array.isArray(issues) && issues.length > 0 && typeof issues[0]?.path !== 'undefined'
+        || err.name === 'ZodError' || err.validation;
     if (isZod) {
-        const details = err.issues ?? err.validation;
-        return reply.code(400).send({ error: 'Validation error', details });
+        app.log.warn({ err: { name: err.name, message: err.message } }, 'validation error');
+        return reply.code(400).send({ error: 'Validation error', details: issues ?? err.validation });
     }
     if (typeof error.code === "string" && (error.code.startsWith("23") || error.code.startsWith("22"))) {
         return reply.code(400).send({ error: error.message ?? "Invalid request" });

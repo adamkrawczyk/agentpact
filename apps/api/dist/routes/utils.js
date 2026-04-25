@@ -228,6 +228,13 @@ export function normalizeTags(tags) {
 }
 export function enrichOfferRow(offer) {
     const isFreeTier = isZeroPrice(offer.base_price);
+    // Parse JSONB location if it's a string (postgres.js test env)
+    if (typeof offer.location === "string") {
+        try {
+            offer = { ...offer, location: JSON.parse(offer.location) };
+        }
+        catch { }
+    }
     return {
         ...offer,
         tags: isFreeTier ? withReputationOnlyTag(offer.tags) : normalizeTags(offer.tags),

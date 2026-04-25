@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import { resolveChainFromAddress, validateWalletAddress } from "../chain.js";
 import { agentIdParamSchema, challengeIdParamSchema, listChallengesQuerySchema, onlineAgentsQuerySchema, startChallengeSchema, submitChallengeSchema, } from "./schemas.js";
 import { getRequesterAgentId, getAgentStats, computeTrustTier } from "./utils.js";
@@ -51,17 +51,24 @@ function gradeSkillSubmission(expectedCriteria, submission) {
     };
 }
 export async function registerRoutes(app, sql, _deps) {
+    const agentSchema = z.object({
+        handle: z.string().min(3),
+        displayName: z.string().min(2),
+        ownerWalletAddress: z.string().min(4).optional().nullable(),
+        walletProvider: z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]).optional().nullable(),
+        preferredChain: z.string().optional(),
+        autoBuyEnabled: z.boolean().default(false)
+    });
     app.post("/api/agents", async (request, reply) => {
-        const body = z
-            .object({
-            handle: z.string().min(3),
-            displayName: z.string().min(2),
-            ownerWalletAddress: z.string().min(4).optional().nullable(),
-            walletProvider: z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]).optional().nullable(),
-            preferredChain: z.string().optional(),
-            autoBuyEnabled: z.boolean().default(false)
-        })
-            .parse(request.body);
+        let body;
+        try {
+            body = agentSchema.parse(request.body);
+        }
+        catch (e) {
+            if (e instanceof ZodError)
+                return reply.code(400).send({ error: 'Validation error', details: e.issues });
+            throw e;
+        }
         const ownerWalletAddress = body.ownerWalletAddress ?? null;
         const walletProvider = body.walletProvider ?? null;
         // Resolve chain if wallet provided

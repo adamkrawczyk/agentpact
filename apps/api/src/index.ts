@@ -1234,12 +1234,14 @@ app.addHook("preHandler", async (request, reply) => {
 }
 
 app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message?: string; name?: string; code?: string; issues?: unknown }, _request, reply) => {
-  app.log.error(error);
   const err = error as Record<string, unknown>;
-  const isZod = error instanceof ZodError || err.validation || err.name === "ZodError" || err.constructor?.name === "ZodError" || Array.isArray(err.issues);
+  // ZodError detection: duck-typing (instanceof fails with ESM dual packages)
+  const issues = err.issues;
+  const isZod = Array.isArray(issues) && issues.length > 0 && typeof (issues[0] as any)?.path !== 'undefined'
+    || err.name === 'ZodError' || err.validation;
   if (isZod) {
-    const details = err.issues ?? err.validation;
-    return reply.code(400).send({ error: 'Validation error', details });
+    app.log.warn({ err: { name: err.name, message: err.message } }, 'validation error');
+    return reply.code(400).send({ error: 'Validation error', details: issues ?? err.validation });
   }
   if (typeof error.code === "string" && (error.code.startsWith("23") || error.code.startsWith("22"))) {
     return reply.code(400).send({ error: error.message ?? "Invalid request" });
