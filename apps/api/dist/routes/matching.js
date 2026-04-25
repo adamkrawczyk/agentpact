@@ -36,8 +36,6 @@ export async function recomputeMatches(app, sql) {
     const needs = await sql `SELECT * FROM needs WHERE status = 'open'`;
     let writes = 0;
     let semanticEnabled = isSemanticMatchingEnabled();
-    const offerTexts = new Map();
-    const needTexts = new Map();
     // Build embedding maps from stored DB embeddings; generate only for missing ones
     const offerEmbeddings = new Map();
     const needEmbeddings = new Map();
@@ -47,7 +45,6 @@ export async function recomputeMatches(app, sql) {
             const missingRefs = [];
             for (const offer of offers) {
                 const text = buildSemanticText(offer);
-                offerTexts.set(String(offer.id), text);
                 const stored = extractEmbedding(offer.description_embedding);
                 if (stored) {
                     offerEmbeddings.set(String(offer.id), stored);
@@ -55,12 +52,11 @@ export async function recomputeMatches(app, sql) {
                 }
                 else {
                     missingTexts.push(text);
-                    missingRefs.push({ type: 'offer', id: String(offer.id) });
+                    missingRefs.push({ type: 'offer', id: String(offer.id), text });
                 }
             }
             for (const need of needs) {
                 const text = buildSemanticText(need);
-                needTexts.set(String(need.id), text);
                 const stored = extractEmbedding(need.description_embedding);
                 if (stored) {
                     needEmbeddings.set(String(need.id), stored);
@@ -68,25 +64,29 @@ export async function recomputeMatches(app, sql) {
                 }
                 else {
                     missingTexts.push(text);
-                    missingRefs.push({ type: 'need', id: String(need.id) });
+                    missingRefs.push({ type: 'need', id: String(need.id), text });
                 }
             }
             if (missingTexts.length > 0) {
                 const newEmbeddings = await generateEmbeddings(missingTexts);
+                // Batch write back new embeddings to DB (awaited, not fire-and-forget)
+                const embeddingUpdates = [];
                 for (let i = 0; i < missingRefs.length; i += 1) {
                     const ref = missingRefs[i];
                     const emb = newEmbeddings[i];
                     if (ref.type === 'offer') {
                         offerEmbeddings.set(ref.id, emb);
-                        // Store back to DB
-                        sql `UPDATE offers SET description_embedding = ${JSON.stringify(emb)}::jsonb WHERE id = ${ref.id}`.catch(() => { });
                     }
                     else {
                         needEmbeddings.set(ref.id, emb);
-                        sql `UPDATE needs SET description_embedding = ${JSON.stringify(emb)}::jsonb WHERE id = ${ref.id}`.catch(() => { });
                     }
-                    cacheEmbedding(missingTexts[i], emb);
+                    cacheEmbedding(ref.text, emb);
+                    const table = ref.type === 'offer' ? 'offers' : 'needs';
+                    embeddingUpdates.push(sql.unsafe(`UPDATE ${table} SET description_embedding = $1::jsonb WHERE id = $2`, [JSON.stringify(emb), ref.id])
+                        .then(() => { })
+                        .catch((err) => { app.log.warn({ err, id: ref.id, type: ref.type }, 'Failed to store embedding'); }));
                 }
+                await Promise.all(embeddingUpdates);
             }
         }
         catch (error) {
@@ -94,8 +94,23 @@ export async function recomputeMatches(app, sql) {
             semanticEnabled = false;
         }
     }
-    // Collect match results for batch insert
-    const matchResults = [];
+    // Flush batch helper to keep memory bounded during large N×M runs
+    const BATCH_SIZE = 200;
+    let batchBuffer = [];
+    async function flushBatch() {
+        if (batchBuffer.length === 0)
+            return 0;
+        const params = [];
+        const placeholders = batchBuffer.map((m, idx) => {
+            const base = idx * 4;
+            params.push(m.offer_id, m.need_id, m.score, m.reason_json);
+            return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}::jsonb)`;
+        }).join(', ');
+        await sql.unsafe(`INSERT INTO matches (offer_id, need_id, score, reason_json) VALUES ${placeholders} ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json`, params);
+        const count = batchBuffer.length;
+        batchBuffer = [];
+        return count;
+    }
     for (const offer of offers) {
         for (const need of needs) {
             const overlap = offer.tags.filter((t) => need.tags.includes(t));
@@ -136,27 +151,20 @@ export async function recomputeMatches(app, sql) {
                     score = Number((0.6 * tagScore + 0.2 * budgetFit + 0.1 * skillBoost + 0.1 * repScore).toFixed(3));
                 }
             }
-            matchResults.push({
+            // Push to batch buffer, flush when full
+            batchBuffer.push({
                 offer_id: String(offer.id),
                 need_id: String(need.id),
                 score,
                 reason_json: JSON.stringify({ overlap, budgetFit, tagScore, skillBoost, repScore, semanticScore }),
             });
+            if (batchBuffer.length >= BATCH_SIZE) {
+                writes += await flushBatch();
+            }
         }
     }
-    // Batch INSERT in chunks of 200
-    const BATCH_SIZE = 200;
-    for (let i = 0; i < matchResults.length; i += BATCH_SIZE) {
-        const chunk = matchResults.slice(i, i + BATCH_SIZE);
-        const params = [];
-        const placeholders = chunk.map((m, idx) => {
-            const base = idx * 4;
-            params.push(m.offer_id, m.need_id, m.score, m.reason_json);
-            return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}::jsonb)`;
-        }).join(', ');
-        await sql.unsafe(`INSERT INTO matches (offer_id, need_id, score, reason_json) VALUES ${placeholders} ON CONFLICT (offer_id, need_id) DO UPDATE SET score = EXCLUDED.score, reason_json = EXCLUDED.reason_json`, params);
-        writes += chunk.length;
-    }
+    // Flush remaining
+    writes += await flushBatch();
     return writes;
 }
 export function createRecomputeMatchesQueue(run, opts = {}) {

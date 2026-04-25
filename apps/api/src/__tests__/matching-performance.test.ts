@@ -167,11 +167,16 @@ describe("matching performance", () => {
 
   // 5. Default debounce is 60s
   it("createRecomputeMatchesQueue defaults to 60s debounce", () => {
-    const queue = createRecomputeMatchesQueue(async () => 0);
-    // scheduleRecompute should not fire immediately
+    vi.useFakeTimers();
     let called = false;
-    const q2 = createRecomputeMatchesQueue(async () => { called = true; return 0; });
-    q2.scheduleRecompute();
+    const q = createRecomputeMatchesQueue(async () => { called = true; return 0; });
+    q.scheduleRecompute();
+    // Should NOT have fired after 59s
+    vi.advanceTimersByTime(59_000);
     expect(called).toBe(false);
+    // Should fire at 60s
+    vi.advanceTimersByTime(1_000);
+    expect(called).toBe(true);
+    vi.useRealTimers();
   });
 });

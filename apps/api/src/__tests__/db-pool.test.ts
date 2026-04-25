@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { fileURLToPath } from "url";
 
 // We can't import `sql` directly without connecting, so test the config by reading the source.
 // Instead, we'll verify the module exports the correct config by importing and checking.
@@ -8,7 +9,7 @@ describe("db.ts pool config", () => {
     const fs = await import("fs");
     const path = await import("path");
     const source = fs.readFileSync(
-      path.resolve(import.meta.dirname, "../db.ts"),
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../db.ts"),
       "utf-8",
     );
     // Verify max: 10 in the postgres config
