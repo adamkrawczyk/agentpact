@@ -10,7 +10,7 @@ function normalizeText(text) {
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
-function cosineSimilarity(a, b) {
+export function cosineSimilarity(a, b) {
     if (a.length === 0 || b.length === 0 || a.length !== b.length)
         return 0;
     let dot = 0;
