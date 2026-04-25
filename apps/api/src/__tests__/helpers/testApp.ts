@@ -34,7 +34,7 @@ export function generateTestAgent(overrides: Partial<{ handle: string; displayNa
   return {
     handle: `test-agent-${randomUUID().slice(0, 8)}`,
     displayName: "Test Agent",
-    ownerWalletAddress: `0x${randomUUID().replace(/-/g, "")}`.slice(0, 42),
+    ownerWalletAddress: `0x${randomUUID().replace(/-/g, "")}${randomUUID().slice(0, 8)}`.slice(0, 42),
     walletProvider: "metamask" as const,
     autoBuyEnabled: false,
     ...overrides,
