@@ -224,6 +224,7 @@ describe("Deals API", () => {
         url: "/api/payments/create-intent",
         headers: buyerHeaders,
         payload: {
+          provider: "usdc",
           milestoneId: milestone.id,
           buyerAgentId: buyerId,
           walletProvider: "metamask",

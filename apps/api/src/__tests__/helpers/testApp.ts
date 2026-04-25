@@ -72,9 +72,12 @@ export function generateTestNeed(agentId: string) {
 export async function cleanDatabase() {
   await sql`TRUNCATE TABLE
     notification_log, agent_webhooks,
-    deal_fulfillment,
+    deal_fulfillment, consultation_responses,
     disputes, feedback, deliveries, payment_intents,
     negotiation_events, milestones, deals, matches,
-    needs, offers, alert_subscriptions, agent_credentials, agents, audit_log
+    needs, offers, alert_subscriptions, agent_credentials, agents, audit_log,
+    api_usage, credential_access_log, credential_vault,
+    endorsements, skill_verifications, skill_challenges,
+    concierge_messages, concierge_relay_log
     RESTART IDENTITY CASCADE`;
 }
