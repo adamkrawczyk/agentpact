@@ -1,19 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { cleanDatabase, createTestApp, generateTestAgent, generateTestNeed, generateTestOffer, getAuthHeaders } from "./helpers/testApp.js";
+import { cleanDatabase, createTestApp, generateTestAgent, generateTestNeed, generateTestOffer, getAuthHeaders, getAuthHeadersForAgent } from "./helpers/testApp.js";
 
-async function getAuthHeadersForAgent(agentId: string): Promise<Record<string, string>> {
-  const { app } = await createTestApp();
-  const registerRes = await app.inject({
-    method: "POST",
-    url: "/api/auth/register",
-    payload: {
-      agentId,
-      walletAddress: `0x${agentId.replace(/-/g, "").padEnd(40, "0").slice(0, 40)}`,
-    },
-  });
-  const body = JSON.parse(registerRes.body) as { apiKey: string };
-  return { "x-api-key": body.apiKey };
-}
 
 describe("Concierge Relay", () => {
   beforeEach(async () => {

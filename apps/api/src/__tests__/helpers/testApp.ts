@@ -11,7 +11,12 @@ export async function getAuthHeaders() {
   return getAuthHeadersForAgent(TEST_AGENT_ID);
 }
 
+const authHeadersCache = new Map<string, { "x-api-key": string }>();
+
 export async function getAuthHeadersForAgent(agentId: string, options?: { walletAddress?: string | null }) {
+  const cached = authHeadersCache.get(agentId);
+  if (cached) return cached;
+
   const payload: { agentId: string; walletAddress?: string | null } = {
     agentId
   };
@@ -27,8 +32,12 @@ export async function getAuthHeadersForAgent(agentId: string, options?: { wallet
     payload
   });
   const { apiKey } = JSON.parse(registerRes.body) as { apiKey: string };
-  return { "x-api-key": apiKey };
+  const headers = { "x-api-key": apiKey };
+  authHeadersCache.set(agentId, headers);
+  return headers;
 }
+
+export function clearAuthHeadersCache() { authHeadersCache.clear(); }
 
 export function generateTestAgent(overrides: Partial<{ handle: string; displayName: string; ownerWalletAddress: string; walletProvider: "metamask"; autoBuyEnabled: boolean }> = {}) {
   return {
@@ -70,6 +79,7 @@ export function generateTestNeed(agentId: string) {
 }
 
 export async function cleanDatabase() {
+  authHeadersCache.clear();
   await sql`TRUNCATE TABLE
     notification_log, agent_webhooks,
     deal_fulfillment, consultation_responses,
