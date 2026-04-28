@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
-import { createOfferSchema, updateOfferSchema, autopilotSettingsSchema } from "./schemas.js";
+import { createOfferSchema, updateOfferSchema, autopilotSettingsSchema, parseAndValidateTags, validateAndTruncateQuery } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, enrichOfferRow, parseBooleanish, withBrowseStatementTimeout } from "./utils.js";
 
 /** Maximum active offers an agent may have at one time (anti-spam). */
@@ -289,27 +289,19 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     return offer;
   });
 
-  app.get("/api/offers", async (request) => {
+  app.get("/api/offers", async (request, reply) => {
     const startedAt = process.hrtime.bigint();
-    const q = z.object({
-      query: z.string().optional(),
-      tags: z.string().optional(),
-      minPrice: z.string().optional(),
-      maxPrice: z.string().optional(),
-      verifiedOnly: z.string().optional(),
-      free_only: z.string().optional(),
-      limit: z.string().optional(),
-      offset: z.string().optional(),
-    }).parse(request.query ?? {});
-    const tags = q.tags ? q.tags.split(",").filter(Boolean) : [];
-    const search = q.query?.trim() ?? "";
+    const raw = request.query as Record<string, string | undefined> ?? {};
+    const { tags, error: tagsError } = parseAndValidateTags(raw.tags);
+    if (tagsError) return reply.code(400).send({ error: tagsError });
+    const search = validateAndTruncateQuery(raw.query);
     const query = `%${search}%`;
-    const min = q.minPrice ? Number(q.minPrice) : 0;
-    const max = q.maxPrice ? Number(q.maxPrice) : Number.MAX_SAFE_INTEGER;
-    const verifiedOnly = parseBooleanish(q.verifiedOnly);
-    const freeOnly = parseBooleanish(q.free_only);
-    const limit = boundedInteger(q.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
-    const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
+    const min = raw.minPrice ? Number(raw.minPrice) : 0;
+    const max = raw.maxPrice ? Number(raw.maxPrice) : Number.MAX_SAFE_INTEGER;
+    const verifiedOnly = parseBooleanish(raw.verifiedOnly);
+    const freeOnly = parseBooleanish(raw.free_only);
+    const limit = boundedInteger(raw.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
+    const offset = boundedInteger(raw.offset, 0, 0, MAX_BROWSE_OFFSET);
 
     const rows = await withBrowseStatementTimeout(sql, async (querySql) => search
       ? await querySql`
@@ -441,16 +433,12 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
    */
   app.get("/api/offers/grouped", async (request) => {
     const startedAt = process.hrtime.bigint();
-    const q = z.object({
-      query: z.string().optional(),
-      limit: z.string().optional(),
-      offset: z.string().optional(),
-    }).parse(request.query ?? {});
+    const raw = request.query as Record<string, string | undefined> ?? {};
 
-    const search = q.query?.trim() ?? "";
+    const search = validateAndTruncateQuery(raw.query);
     const queryFilter = `%${search}%`;
-    const limit = boundedInteger(q.limit, DEFAULT_GROUPED_LIMIT, 1, MAX_GROUPED_LIMIT);
-    const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
+    const limit = boundedInteger(raw.limit, DEFAULT_GROUPED_LIMIT, 1, MAX_GROUPED_LIMIT);
+    const offset = boundedInteger(raw.offset, 0, 0, MAX_BROWSE_OFFSET);
 
     const rows = await withBrowseStatementTimeout(sql, async (querySql) => search
       ? await querySql`

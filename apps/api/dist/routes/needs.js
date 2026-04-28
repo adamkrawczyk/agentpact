@@ -1,5 +1,4 @@
-import { z } from "zod";
-import { createNeedSchema } from "./schemas.js";
+import { createNeedSchema, parseAndValidateTags, validateAndTruncateQuery } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, withBrowseStatementTimeout } from "./utils.js";
 const DEFAULT_BROWSE_LIMIT = 200;
 const MAX_BROWSE_LIMIT = 200;
@@ -106,19 +105,16 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
         const [need] = await sql `UPDATE needs SET status = 'archived', updated_at = NOW() WHERE id = ${id} RETURNING *`;
         return need;
     });
-    app.get("/api/needs", async (request) => {
+    app.get("/api/needs", async (request, reply) => {
         const startedAt = process.hrtime.bigint();
-        const q = z.object({
-            query: z.string().optional(),
-            tags: z.string().optional(),
-            limit: z.string().optional(),
-            offset: z.string().optional(),
-        }).parse(request.query ?? {});
-        const tags = q.tags ? q.tags.split(",").filter(Boolean) : [];
-        const search = q.query?.trim() ?? "";
+        const raw = request.query ?? {};
+        const { tags, error: tagsError } = parseAndValidateTags(raw.tags);
+        if (tagsError)
+            return reply.code(400).send({ error: tagsError });
+        const search = validateAndTruncateQuery(raw.query);
         const query = `%${search}%`;
-        const limit = boundedInteger(q.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
-        const offset = boundedInteger(q.offset, 0, 0, MAX_BROWSE_OFFSET);
+        const limit = boundedInteger(raw.limit, DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
+        const offset = boundedInteger(raw.offset, 0, 0, MAX_BROWSE_OFFSET);
         const rows = await withBrowseStatementTimeout(sql, async (querySql) => search
             ? await querySql `
       SELECT * FROM needs

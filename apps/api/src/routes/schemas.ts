@@ -269,3 +269,41 @@ export const confirmFundingSchema = z.object({
   paymentIntentId: z.string().uuid(),
   txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
 });
+
+/**
+ * Browse query limits (WIS-256): prevent pathological planner cost
+ * from unbounded tags/query parameters.
+ */
+export const MAX_TAGS_COUNT = 20;
+export const MAX_TAG_LENGTH = 64;
+export const MAX_QUERY_LENGTH = 200;
+
+/**
+ * Validate and parse tags from a comma-separated string.
+ * Returns { tags: string[], error: string | null }
+ */
+export function parseAndValidateTags(tagsStr: string | undefined): { tags: string[]; error: string | null } {
+  if (!tagsStr) return { tags: [], error: null };
+  const tagsRaw = tagsStr.split(",").filter(Boolean);
+  if (tagsRaw.length > MAX_TAGS_COUNT) {
+    return { tags: [], error: `tags must contain at most ${MAX_TAGS_COUNT} items (got ${tagsRaw.length})` };
+  }
+  for (const tag of tagsRaw) {
+    if (tag.length > MAX_TAG_LENGTH) {
+      return { tags: [], error: `each tag must be at most ${MAX_TAG_LENGTH} characters (got ${tag.length}: "${tag.slice(0, 20)}...")` };
+    }
+  }
+  return { tags: tagsRaw, error: null };
+}
+
+/**
+ * Validate query length. Returns truncated query or throws.
+ */
+export function validateAndTruncateQuery(query: string | undefined): string {
+  if (!query) return "";
+  const trimmed = query.trim();
+  if (trimmed.length > MAX_QUERY_LENGTH) {
+    throw new Error(`query must be at most ${MAX_QUERY_LENGTH} characters (got ${trimmed.length})`);
+  }
+  return trimmed;
+}
