@@ -94,7 +94,8 @@ export const sql = postgres(DATABASE_URL, {
   idle_timeout: 30,  // Release idle connections after 30s to avoid Supabase connection cap
   connect_timeout: 10, // Fail fast if pool can't get a connection in 10s
   max_lifetime: 1800,  // Recycle connections every 30 min to avoid stale sockets
-});
+  ...(process.env.NODE_ENV ? { acquire_timeout: 15000 } : {}), // WIS-985: fail fast on pool saturation (available in postgres.js runtime even if not in types)
+} as postgres.Options<Record<string, postgres.PostgresType>>);
 export const app = Fastify({ logger: true });
 const vaultSql = sql as unknown as Sql<Record<string, unknown>>;
 const credentialEncryptionKey = getCredentialEncryptionKey();

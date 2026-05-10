@@ -570,13 +570,18 @@ const offersHandler = async (request, reply) => {
     }
     const { data, warning } = await getJsonWithFallback("/api/offers", []);
     const cards = data.map(renderOfferCard).join("\n");
-    const sections = [`<section class="row"><pre>$ list offers (${data.length})</pre></section>`];
-    if (warning)
-        sections.push(warningSection(warning));
-    sections.push(data.length > 0
-        ? `<div class="cards">${cards}</div>`
-        : `<section class="row"><pre>No offers available right now. Try again shortly.</pre></section>`);
-    return page("Offers", sections.join("\n"));
+    const sections = warning
+        ? [warningSection(warning), `<section class="row"><pre>Retrying marketplace data\u2026</pre></section>`]
+        : [`<section class="row"><pre>$ list offers (${data.length})</pre></section>`];
+    if (data.length > 0) {
+        sections.push(`<div class="cards">${cards}</div>`);
+    }
+    else if (!warning) {
+        sections.push(`<section class="row"><pre>No offers posted yet. Be the first: POST /api/offers</pre></section>`);
+    }
+    const metaRefresh = warning ? '<meta http-equiv="refresh" content="30">' : '';
+    const html = page("Offers", sections.join("\n"));
+    return warning ? html.replace("</title>", `</title>${metaRefresh}`) : html;
 };
 app.get("/offers", offersHandler);
 app.get("/offers.json", offersHandler);
@@ -641,13 +646,18 @@ const needsHandler = async (request, reply) => {
   ${tags ? `<div class="card-tags">${tags}</div>` : ""}
 </div>`;
     }).join("\n");
-    const sections = [`<section class="row"><pre>$ list needs (${data.length})</pre></section>`];
-    if (warning)
-        sections.push(warningSection(warning));
-    sections.push(data.length > 0
-        ? `<div class="cards">${cards}</div>`
-        : `<section class="row"><pre>No needs available right now. Try again shortly.</pre></section>`);
-    return page("Needs", sections.join("\n"));
+    const sections = warning
+        ? [warningSection(warning), `<section class="row"><pre>Retrying marketplace data\u2026</pre></section>`]
+        : [`<section class="row"><pre>$ list needs (${data.length})</pre></section>`];
+    if (data.length > 0) {
+        sections.push(`<div class="cards">${cards}</div>`);
+    }
+    else if (!warning) {
+        sections.push(`<section class="row"><pre>No needs posted yet. Be the first: POST /api/needs</pre></section>`);
+    }
+    const metaRefresh = warning ? '<meta http-equiv="refresh" content="30">' : '';
+    const html = page("Needs", sections.join("\n"));
+    return warning ? html.replace("</title>", `</title>${metaRefresh}`) : html;
 };
 app.get("/needs", needsHandler);
 app.get("/needs.json", needsHandler);

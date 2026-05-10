@@ -547,28 +547,35 @@ export async function registerRoutes(
       generateEmbeddings(needTexts),
     ]);
 
-    await sql.begin(async (txn) => {
-      for (let i = 0; i < offers.length; i += 1) {
-        await txn.unsafe(
-          `
-            UPDATE offers
-            SET description_embedding = $1::jsonb
-            WHERE id = $2
-          `,
-          [JSON.stringify(offerEmbeddings[i]), offers[i].id]
-        );
-      }
-      for (let i = 0; i < needs.length; i += 1) {
-        await txn.unsafe(
-          `
-            UPDATE needs
-            SET description_embedding = $1::jsonb
-            WHERE id = $2
-          `,
-          [JSON.stringify(needEmbeddings[i]), needs[i].id]
-        );
-      }
-    });
+    // ── WIS-985: Batch the DB writes in chunks instead of one giant transaction ──
+    // Embeddings are generated outside any transaction (good).
+    // Writes are batched to avoid holding a single transaction open for hundreds of rows.
+    const EMBED_BATCH_SIZE = 50;
+    let totalUpdated = 0;
+    for (let i = 0; i < offers.length; i += EMBED_BATCH_SIZE) {
+      const batch = offers.slice(i, i + EMBED_BATCH_SIZE);
+      await sql.begin(async (txn) => {
+        for (let j = 0; j < batch.length; j += 1) {
+          await txn.unsafe(
+            `UPDATE offers SET description_embedding = $1::jsonb WHERE id = $2`,
+            [JSON.stringify(offerEmbeddings[i + j]), batch[j].id],
+          );
+        }
+      });
+      totalUpdated += batch.length;
+    }
+    for (let i = 0; i < needs.length; i += EMBED_BATCH_SIZE) {
+      const batch = needs.slice(i, i + EMBED_BATCH_SIZE);
+      await sql.begin(async (txn) => {
+        for (let j = 0; j < batch.length; j += 1) {
+          await txn.unsafe(
+            `UPDATE needs SET description_embedding = $1::jsonb WHERE id = $2`,
+            [JSON.stringify(needEmbeddings[i + j]), batch[j].id],
+          );
+        }
+      });
+      totalUpdated += batch.length;
+    }
 
     return {
       offersUpdated: offers.length,
