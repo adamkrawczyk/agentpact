@@ -5,9 +5,15 @@
  * unresolvable viem/pino deps). The validation functions are pure
  * and small enough to duplicate here for testing.
  *
- * Run with: npx tsx --test src/__tests__/browse-validation.test.ts
+ * Originally written against `node:test`; converted to vitest-compatible
+ * imports so it runs alongside the rest of the api test suite via
+ * `npm test`. The vitest globals (describe/it/expect) are enabled in
+ * apps/api/vitest.config.ts (`globals: true`), so importing from "vitest"
+ * here is equivalent and keeps the file IDE-friendly. Both `node:assert`
+ * and vitest's `expect` are available; we keep `node:assert/strict`
+ * because the assertions below are already written against it.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 // ── Constants & functions duplicated from schemas.ts ────────────────────
