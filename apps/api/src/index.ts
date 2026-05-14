@@ -94,7 +94,23 @@ export const sql = postgres(DATABASE_URL, {
   idle_timeout: 30,  // Release idle connections after 30s to avoid Supabase connection cap
   connect_timeout: 10, // Fail fast if pool can't get a connection in 10s
   max_lifetime: 1800,  // Recycle connections every 30 min to avoid stale sockets
-  ...(process.env.NODE_ENV ? { acquire_timeout: 15000 } : {}), // WIS-985: fail fast on pool saturation (available in postgres.js runtime even if not in types)
+  // ── Pool-exhaustion defense (WIS-985, defense-in-depth) ──
+  // Layer 1 (Chef, 2026-05-10): acquire_timeout=15s — when the pool is full,
+  // new requests fail fast instead of queuing indefinitely. Pairs with the
+  // matching-engine refactor (batched inserts, HTTP-before-txn) that fixed
+  // the original leak source.
+  ...(process.env.NODE_ENV ? { acquire_timeout: 15000 } : {}), // available in postgres.js runtime even if not in types
+  // Layer 2 (Tori, 2026-05-14): Postgres-side statement_timeout slightly BELOW
+  // Fastify's 30s onRequest timeout so that any query the server is forced to
+  // abandon is also cancelled at the DB layer, returning the connection to
+  // the pool instead of leaking it. Catches future leak sources from any
+  // code path, not just the matching engine. idle_in_transaction safety net
+  // bounds stuck txns; application_name makes pg_stat_activity grep-able.
+  connection: {
+    statement_timeout: 25_000,             // ms — must be < REQUEST_TIMEOUT_MS (30_000)
+    idle_in_transaction_session_timeout: 60_000, // ms — safety net for stuck txns
+    application_name: 'agentpact-api',     // makes pg_stat_activity rows easy to grep
+  },
 } as postgres.Options<Record<string, postgres.PostgresType>>);
 export const app = Fastify({ logger: true });
 const vaultSql = sql as unknown as Sql<Record<string, unknown>>;
@@ -1121,21 +1137,33 @@ app.addHook('onRequest', async (_request, reply) => {
 });
 
 // ── Connection pool health endpoint ──
-app.get('/health/pool', async () => {
+app.get('/health/pool', async (_request, reply) => {
   // postgres.js exposes pool stats via the tagged-template function object
   const pool = sql as unknown as Record<string, unknown>;
-  return {
+  // 3-second bounded canary so this endpoint can NEVER hang — the whole point
+  // of /health/pool is to give an external watchdog a deterministic signal,
+  // even when the pool is exhausted. Without this race, the endpoint inherits
+  // the 30s onRequest timeout and 503s along with everything else.
+  const canary = await Promise.race([
+    sql`SELECT 1 AS ok`.then(() => 'ok' as const).catch((e: Error) => `error: ${e.message}` as string),
+    new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 3_000)),
+  ]);
+  const payload = {
     maxConnections: 20,
     note: 'postgres.js does not expose live pool stats via public API; check Supabase dashboard for active connections',
     timestamp: new Date().toISOString(),
-    // Canary query to verify pool is not exhausted
-    canary: await sql`SELECT 1 AS ok`.then(() => 'ok').catch((e: Error) => `error: ${e.message}`),
+    // Canary query to verify pool is not exhausted (bounded to 3s)
+    canary,
     ...(typeof pool.totalCount === 'number' ? {
       total: pool.totalCount,
       idle: pool.idleCount,
       waiting: pool.waitingCount,
     } : {}),
   };
+  if (canary !== 'ok') {
+    return reply.code(503).send(payload);
+  }
+  return payload;
 });
 
 await initAuth(app);
