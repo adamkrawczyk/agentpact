@@ -1,9 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import fastifyJWT from "@fastify/jwt";
+import postgres from "postgres";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { sql as sharedSql } from "./shared/pool.js";
 
+const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:***@localhost:5432/agentpact";
 const JWT_SECRET=process.env.JWT_SECRET ?? "dev_secret_change_in_production";
 
 // Default events for auto-created webhooks at registration
@@ -64,11 +65,7 @@ export async function initAuth(
   app: FastifyInstance,
   injectedDb?: AuthSqlClient
 ): Promise<void> {
-  // protocol_1605/A — was: `postgres(DATABASE_URL, { max: 3 })` — a THIRD
-  // independent pool fighting the main one for Supabase's connection cap.
-  // Now funnels through the single shared pool. The `injectedDb` override is
-  // retained for tests that want to swap in a mock.
-  const db = injectedDb ?? (sharedSql as unknown as AuthSqlClient);
+  const db = injectedDb ?? (postgres(DATABASE_URL, { max: 3 }) as unknown as AuthSqlClient);
 
   await app.register(fastifyJWT, { secret: JWT_SECRET });
 
