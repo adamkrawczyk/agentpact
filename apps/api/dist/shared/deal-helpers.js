@@ -207,25 +207,8 @@ export async function completeDealMilestones(dealId, opts = {}) {
     `;
         const hasOnChainFundedIntent = intents.some((row) => row.tx_hash && !String(row.tx_hash).startsWith("sim_"));
         if (hasOnChainFundedIntent) {
-            // protocol_1605/A0 — DO NOT mark DB rows released until on-chain release
-            // is confirmed. The previous version wrote `deals.status='completed'` and
-            // `payment_intents.status='released'` UNCONDITIONALLY after the on-chain
-            // call, even when the call threw. Result: DB says paid, contract still
-            // holds the funds → latent money-loss event.
-            //
-            // ALLOW_ONCHAIN_RELEASE=false flips off on-chain release attempts entirely
-            // (defers every release to the buyer-sign path) until the dedicated
-            // release() function ships in Phase C.
-            const allowOnChainRelease = (process.env.ALLOW_ONCHAIN_RELEASE ?? "true").toLowerCase() !== "false";
             const releaseResults = [];
             for (const milestone of milestones) {
-                if (!allowOnChainRelease) {
-                    releaseResults.push({
-                        milestoneId: String(milestone.id),
-                        error: "on-chain release disabled by ALLOW_ONCHAIN_RELEASE=false (A0 kill switch)",
-                    });
-                    continue;
-                }
                 try {
                     const result = await resolveDisputeOnChain(String(milestone.id), false);
                     releaseResults.push({ milestoneId: String(milestone.id), txHash: result.txHash });
@@ -236,48 +219,13 @@ export async function completeDealMilestones(dealId, opts = {}) {
                     releaseResults.push({ milestoneId: String(milestone.id), error: message });
                 }
             }
+            await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
+            await sql `UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
+            await sql `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW() WHERE milestone_id = ANY(${milestones.map((m) => String(m.id))}) AND status = 'funded'`;
             const allReleased = releaseResults.every((r) => r.txHash);
-            if (allReleased) {
-                // Happy path — on-chain release succeeded for every milestone, safe to
-                // converge DB state.
-                await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-                await sql `UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
-                await sql `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW() WHERE milestone_id = ANY(${milestones.map((m) => String(m.id))}) AND status = 'funded'`;
-                return {
-                    mode,
-                    action: "released",
-                    onChainReleaseResults: releaseResults,
-                };
-            }
-            // Failure path — at least one milestone did NOT release on-chain. Keep
-            // payment_intents at 'funded' (do NOT mark released), keep milestones at
-            // their pre-release status, and put the deal in 'release_pending_chain'
-            // so the buyer-sign or admin-retry path can converge later. Funds stay
-            // in escrow on-chain; DB state matches.
-            console.error(`[completeDealMilestones] On-chain release deferred for deal ${dealId}: ${releaseResults.filter((r) => !r.txHash).length}/${releaseResults.length} milestones failed on-chain. DB state held at release_pending_chain.`);
-            await sql `UPDATE deals SET status = 'release_pending_chain', updated_at = NOW() WHERE id = ${dealId}`;
-            // Fire-and-forget audit row so monitors / agents see this state.
-            try {
-                await sql `
-          INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
-          VALUES (
-            NULL,
-            'chain.release_failed',
-            'deal',
-            ${dealId},
-            ${`chain-release-failed-${dealId}-${Date.now()}`},
-            ${JSON.stringify({ dealId, results: releaseResults, allowOnChainRelease })}::jsonb
-          )
-        `;
-            }
-            catch (auditErr) {
-                // Audit logging is best-effort; if the schema differs we don't want to
-                // mask the underlying release failure.
-                console.error(`[completeDealMilestones] audit_log insert failed for ${dealId}: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`);
-            }
             return {
                 mode,
-                action: "buyer_sign_required",
+                action: allReleased ? "released" : "buyer_sign_required",
                 txData: releaseResults
                     .filter((r) => !r.txHash)
                     .map((r) => {
