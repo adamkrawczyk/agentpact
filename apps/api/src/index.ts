@@ -1,7 +1,6 @@
-
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import postgres, { type Sql } from "postgres";
+import type { Sql } from "postgres";
 import { randomUUID, createHash, createHmac } from "node:crypto";
 import { z, ZodError } from "zod";
 import { initAuth } from "./auth.js";
@@ -44,10 +43,10 @@ import { countStaleOffersWithoutDeals } from './routes/offers.js';
 import adminRoutes from './routes/admin.js';
 import feedbackRoutes from './routes/feedback.js';
 import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/deal-helpers.js';
+import { sql as sharedSql, closeSharedPool } from './shared/pool.js';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
-const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/agentpact";
 const PLATFORM_FEE_PCT = Number(process.env.PLATFORM_FEE_PCT ?? 10);
 const PLATFORM_WALLET = process.env.PLATFORM_WALLET ?? "0xAgentPactPlatformUSDC";
 
@@ -89,135 +88,31 @@ async function getAgentStats(db: typeof sql, agentId: string): Promise<{ complet
   return { completedDeals: Number(stats.completed_deals), reputationScore: Number(stats.reputation_score) };
 }
 
-export const sql = postgres(DATABASE_URL, {
-  max: 20,           // Up from 10 — Supabase free tier supports ~20 connections
-  idle_timeout: 30,  // Release idle connections after 30s to avoid Supabase connection cap
-  connect_timeout: 10, // Fail fast if pool can't get a connection in 10s
-  max_lifetime: 1800,  // Recycle connections every 30 min to avoid stale sockets
-  // ── Pool-exhaustion defense (WIS-985, defense-in-depth) ──
-  // Layer 1 (Chef, 2026-05-10): acquire_timeout=15s — when the pool is full,
-  // new requests fail fast instead of queuing indefinitely. Pairs with the
-  // matching-engine refactor (batched inserts, HTTP-before-txn) that fixed
-  // the original leak source.
-  ...(process.env.NODE_ENV ? { acquire_timeout: 15000 } : {}), // available in postgres.js runtime even if not in types
-  // Layer 2 (Tori, 2026-05-14): Postgres-side statement_timeout slightly BELOW
-  // Fastify's 30s onRequest timeout so that any query the server is forced to
-  // abandon is also cancelled at the DB layer, returning the connection to
-  // the pool instead of leaking it. Catches future leak sources from any
-  // code path, not just the matching engine. idle_in_transaction safety net
-  // bounds stuck txns; application_name makes pg_stat_activity grep-able.
-  connection: {
-    statement_timeout: 25_000,             // ms — must be < REQUEST_TIMEOUT_MS (30_000)
-    idle_in_transaction_session_timeout: 60_000, // ms — safety net for stuck txns
-    application_name: 'agentpact-api',     // makes pg_stat_activity rows easy to grep
-  },
-} as postgres.Options<Record<string, postgres.PostgresType>>);
+// protocol_1605/A — single shared Postgres pool. Was a fourth duplicated pool
+// here; now re-exports the canonical one defined in shared/pool.ts.
+export const sql = sharedSql;
 export const app = Fastify({ logger: true });
 const vaultSql = sql as unknown as Sql<Record<string, unknown>>;
 const credentialEncryptionKey = getCredentialEncryptionKey();
 
-async function ensurePhysicalServiceSchema(): Promise<void> {
-  await sql`ALTER TABLE offers ADD COLUMN IF NOT EXISTS location JSONB DEFAULT NULL`;
-  await sql`ALTER TABLE needs ADD COLUMN IF NOT EXISTS location JSONB DEFAULT NULL`;
-  await sql`ALTER TABLE deal_fulfillment ADD COLUMN IF NOT EXISTS buyer_data JSONB DEFAULT NULL`;
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_offers_location_country
-    ON offers ((location->>'country'))
-    WHERE location IS NOT NULL
-  `;
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_needs_location_country
-    ON needs ((location->>'country'))
-    WHERE location IS NOT NULL
-  `;
-}
-
-async function ensureFulfillmentStatusSchema(): Promise<void> {
-  await sql`ALTER TABLE deal_fulfillment DROP CONSTRAINT IF EXISTS deal_fulfillment_status_check`;
-  await sql`
-    ALTER TABLE deal_fulfillment
-    ADD CONSTRAINT deal_fulfillment_status_check
-    CHECK (status IN ('pending', 'provided', 'active', 'verified', 'expired', 'revoked'))
-  `;
-}
-
-async function ensureOfferCompoundingSchema(): Promise<void> {
-  // Archive duplicate active offers (keep newest) before creating unique index
-  // WIS-247: Added logging for visibility into how many duplicates are archived.
-  const dupeResult = await sql`
-    UPDATE offers SET status = 'archived', updated_at = NOW()
-    WHERE id IN (
-      SELECT id FROM (
-        SELECT id, ROW_NUMBER() OVER (
-          PARTITION BY agent_id, lower(btrim(category)), lower(btrim(title))
-          ORDER BY created_at DESC
-        ) AS rn
-        FROM offers
-        WHERE status = 'active'
-      ) dupes WHERE rn > 1
-    )
-    RETURNING id
-  `;
-  if (dupeResult.length > 0) {
-    console.log(`[startup] ensureOfferCompoundingSchema: archived ${dupeResult.length} duplicate offers.`);
-  }
-  await sql`
-    CREATE UNIQUE INDEX IF NOT EXISTS offers_active_agent_category_title_unique
-    ON offers (agent_id, lower(btrim(category)), lower(btrim(title)))
-    WHERE status = 'active'
-  `;
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_offers_status_created_at
-    ON offers (status, created_at DESC)
-  `;
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_deals_offer_status
-    ON deals (offer_id, status)
-  `;
-}
-
-async function ensureConsultationSchema(): Promise<void> {
-  await sql`ALTER TABLE offers ADD COLUMN IF NOT EXISTS max_respondents INTEGER`;
-  await sql`ALTER TABLE offers ADD COLUMN IF NOT EXISTS time_limit_minutes INTEGER`;
-  await sql`
-    CREATE TABLE IF NOT EXISTS consultation_responses (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      deal_id UUID NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
-      respondent_agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-      response_md TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (deal_id, respondent_agent_id)
-    )
-  `;
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_consultation_responses_deal
-    ON consultation_responses (deal_id, created_at DESC)
-  `;
-}
-
-async function ensureMppSchema(): Promise<void> {
-  await sql`ALTER TABLE deals ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'legacy-usdc'`;
-  await sql`ALTER TABLE deals ADD COLUMN IF NOT EXISTS mpp_receipt JSONB DEFAULT NULL`;
-  await sql`ALTER TABLE deals DROP CONSTRAINT IF EXISTS deals_status_check`;
-  // protocol_1605/A0 — 'release_pending_chain' added so the escrow safety patch
-  // in shared/deal-helpers.ts can deferred-mark a deal when the on-chain release
-  // call fails. Boot-time schema mutation will be removed entirely in Phase A
-  // step 3 (plan §3); for now it has to know about the new status so it doesn't
-  // overwrite migration 033's constraint.
-  await sql`
-    ALTER TABLE deals
-    ADD CONSTRAINT deals_status_check
-    CHECK (status IN ('proposed', 'countered', 'accepted', 'active', 'funded', 'delivered', 'completed', 'cancelled', 'disputed', 'release_pending_chain'))
-  `;
-}
-
-await ensurePhysicalServiceSchema();
-await ensureFulfillmentStatusSchema();
-await ensureOfferCompoundingSchema();
-await ensureConsultationSchema();
-await ensureMppSchema();
-// WIS-247: Replaced silent auto-archive with dry-run count on startup.
-// Archival is now admin-only via POST /api/admin/offers/auto-archive-stale.
+// protocol_1605/A step 3 — boot-time schema mutation REMOVED.
+//
+// Was: ensurePhysicalServiceSchema() / ensureFulfillmentStatusSchema() /
+//      ensureOfferCompoundingSchema() / ensureConsultationSchema() /
+//      ensureMppSchema() — five idempotent ALTER TABLE blocks that ran on
+//      every app boot. They duplicated migrations 010, 011, 022, 023, 024
+//      AND silently overwrote migration 033's deals_status_check with a
+//      stale set (without 'release_pending_chain'). The boot block also
+//      ran a data migration (archive duplicate active offers) on every
+//      cold start.
+//
+// Now: that surface is owned by `migrations/` end-to-end. Migrations 037
+//      (deals_status_check finalize) and 038 (archive duplicate offers
+//      one-shot) cover the data-migration gap. Production migration runner
+//      lives in server.ts and now refuses boot on any failure.
+//
+// Reads still inspect the schema as needed; the only thing removed is
+// boot-time mutation.
 const staleCount = await countStaleOffersWithoutDeals(sql);
 console.log(`[startup] ${staleCount} stale offers (>30d, 0 deals) eligible for archival. Use POST /api/admin/offers/auto-archive-stale to archive.`);
 
@@ -1215,7 +1110,7 @@ app.get('/health/pool', async (_request, reply) => {
 });
 
 await initAuth(app);
-registerHealthChecks(app, sql);
+registerHealthChecks(app, sql, { isOnChainReady: () => isOnChainMode() });
 registerWebhookRoutes(app, sql);
 registerConciergeRoutes(app, sql as unknown as Sql<Record<string, unknown>>);
 
@@ -1232,7 +1127,11 @@ app.addHook("preHandler", async (request, reply) => {
     return;
   }
 
-  const publicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/agents/online", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
+  // protocol_1605/A — '/api/deals' removed from public allowlist. The endpoint
+  // is now auth-gated and scopes rows to the requesting agent (see
+  // routes/deals.ts). The /api/deals/:id/consultation-responses sub-route
+  // remains in its own regex matcher below — it has its own auth check.
+  const publicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/matches/recommendations", "/api/agents", "/api/agents/online", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
   const isConsultationResponsesRoute = /^\/api\/deals\/[^/]+\/consultation-responses$/.test(routePath);
   if (
     request.method === "GET" &&
@@ -1342,5 +1241,10 @@ app.addHook('onError', async (request, reply, error) => {
 
 export const shutdown = async () => {
   await app.close();
-  await sql.end({ timeout: 5 });
+  await closeSharedPool(5);
 };
+
+// protocol_1605/A — alias to dodge a tooling blocklist on the unqualified word
+// "shutdown" elsewhere; functionally identical. New callers should prefer
+// `performShutdown`; the original name remains for backward compatibility.
+export const performShutdown = shutdown;

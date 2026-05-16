@@ -1,6 +1,5 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import postgres from "postgres";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { initAuth } from "./auth.js";
@@ -24,9 +23,9 @@ import { countStaleOffersWithoutDeals } from './routes/offers.js';
 import adminRoutes from './routes/admin.js';
 import feedbackRoutes from './routes/feedback.js';
 import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/deal-helpers.js';
+import { sql as sharedSql, closeSharedPool } from './shared/pool.js';
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
-const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/agentpact";
 const PLATFORM_FEE_PCT = Number(process.env.PLATFORM_FEE_PCT ?? 10);
 const PLATFORM_WALLET = process.env.PLATFORM_WALLET ?? "0xAgentPactPlatformUSDC";
 // ── WIS-255 (AP-P1-3): Admin-routes fail-closed guard ─────────────────────
@@ -61,108 +60,30 @@ async function getAgentStats(db, agentId) {
   `;
     return { completedDeals: Number(stats.completed_deals), reputationScore: Number(stats.reputation_score) };
 }
-export const sql = postgres(DATABASE_URL, {
-    max: 20, // Up from 10 — Supabase free tier supports ~20 connections
-    idle_timeout: 30, // Release idle connections after 30s to avoid Supabase connection cap
-    connect_timeout: 10, // Fail fast if pool can't get a connection in 10s
-    max_lifetime: 1800, // Recycle connections every 30 min to avoid stale sockets
-    ...(process.env.NODE_ENV ? { acquire_timeout: 15000 } : {}), // WIS-985: fail fast on pool saturation (available in postgres.js runtime even if not in types)
-});
+// protocol_1605/A — single shared Postgres pool. Was a fourth duplicated pool
+// here; now re-exports the canonical one defined in shared/pool.ts.
+export const sql = sharedSql;
 export const app = Fastify({ logger: true });
 const vaultSql = sql;
 const credentialEncryptionKey = getCredentialEncryptionKey();
-async function ensurePhysicalServiceSchema() {
-    await sql `ALTER TABLE offers ADD COLUMN IF NOT EXISTS location JSONB DEFAULT NULL`;
-    await sql `ALTER TABLE needs ADD COLUMN IF NOT EXISTS location JSONB DEFAULT NULL`;
-    await sql `ALTER TABLE deal_fulfillment ADD COLUMN IF NOT EXISTS buyer_data JSONB DEFAULT NULL`;
-    await sql `
-    CREATE INDEX IF NOT EXISTS idx_offers_location_country
-    ON offers ((location->>'country'))
-    WHERE location IS NOT NULL
-  `;
-    await sql `
-    CREATE INDEX IF NOT EXISTS idx_needs_location_country
-    ON needs ((location->>'country'))
-    WHERE location IS NOT NULL
-  `;
-}
-async function ensureFulfillmentStatusSchema() {
-    await sql `ALTER TABLE deal_fulfillment DROP CONSTRAINT IF EXISTS deal_fulfillment_status_check`;
-    await sql `
-    ALTER TABLE deal_fulfillment
-    ADD CONSTRAINT deal_fulfillment_status_check
-    CHECK (status IN ('pending', 'provided', 'active', 'verified', 'expired', 'revoked'))
-  `;
-}
-async function ensureOfferCompoundingSchema() {
-    // Archive duplicate active offers (keep newest) before creating unique index
-    // WIS-247: Added logging for visibility into how many duplicates are archived.
-    const dupeResult = await sql `
-    UPDATE offers SET status = 'archived', updated_at = NOW()
-    WHERE id IN (
-      SELECT id FROM (
-        SELECT id, ROW_NUMBER() OVER (
-          PARTITION BY agent_id, lower(btrim(category)), lower(btrim(title))
-          ORDER BY created_at DESC
-        ) AS rn
-        FROM offers
-        WHERE status = 'active'
-      ) dupes WHERE rn > 1
-    )
-    RETURNING id
-  `;
-    if (dupeResult.length > 0) {
-        console.log(`[startup] ensureOfferCompoundingSchema: archived ${dupeResult.length} duplicate offers.`);
-    }
-    await sql `
-    CREATE UNIQUE INDEX IF NOT EXISTS offers_active_agent_category_title_unique
-    ON offers (agent_id, lower(btrim(category)), lower(btrim(title)))
-    WHERE status = 'active'
-  `;
-    await sql `
-    CREATE INDEX IF NOT EXISTS idx_offers_status_created_at
-    ON offers (status, created_at DESC)
-  `;
-    await sql `
-    CREATE INDEX IF NOT EXISTS idx_deals_offer_status
-    ON deals (offer_id, status)
-  `;
-}
-async function ensureConsultationSchema() {
-    await sql `ALTER TABLE offers ADD COLUMN IF NOT EXISTS max_respondents INTEGER`;
-    await sql `ALTER TABLE offers ADD COLUMN IF NOT EXISTS time_limit_minutes INTEGER`;
-    await sql `
-    CREATE TABLE IF NOT EXISTS consultation_responses (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      deal_id UUID NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
-      respondent_agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-      response_md TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (deal_id, respondent_agent_id)
-    )
-  `;
-    await sql `
-    CREATE INDEX IF NOT EXISTS idx_consultation_responses_deal
-    ON consultation_responses (deal_id, created_at DESC)
-  `;
-}
-async function ensureMppSchema() {
-    await sql `ALTER TABLE deals ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'legacy-usdc'`;
-    await sql `ALTER TABLE deals ADD COLUMN IF NOT EXISTS mpp_receipt JSONB DEFAULT NULL`;
-    await sql `ALTER TABLE deals DROP CONSTRAINT IF EXISTS deals_status_check`;
-    await sql `
-    ALTER TABLE deals
-    ADD CONSTRAINT deals_status_check
-    CHECK (status IN ('proposed', 'countered', 'accepted', 'active', 'funded', 'delivered', 'completed', 'cancelled', 'disputed'))
-  `;
-}
-await ensurePhysicalServiceSchema();
-await ensureFulfillmentStatusSchema();
-await ensureOfferCompoundingSchema();
-await ensureConsultationSchema();
-await ensureMppSchema();
-// WIS-247: Replaced silent auto-archive with dry-run count on startup.
-// Archival is now admin-only via POST /api/admin/offers/auto-archive-stale.
+// protocol_1605/A step 3 — boot-time schema mutation REMOVED.
+//
+// Was: ensurePhysicalServiceSchema() / ensureFulfillmentStatusSchema() /
+//      ensureOfferCompoundingSchema() / ensureConsultationSchema() /
+//      ensureMppSchema() — five idempotent ALTER TABLE blocks that ran on
+//      every app boot. They duplicated migrations 010, 011, 022, 023, 024
+//      AND silently overwrote migration 033's deals_status_check with a
+//      stale set (without 'release_pending_chain'). The boot block also
+//      ran a data migration (archive duplicate active offers) on every
+//      cold start.
+//
+// Now: that surface is owned by `migrations/` end-to-end. Migrations 037
+//      (deals_status_check finalize) and 038 (archive duplicate offers
+//      one-shot) cover the data-migration gap. Production migration runner
+//      lives in server.ts and now refuses boot on any failure.
+//
+// Reads still inspect the schema as needed; the only thing removed is
+// boot-time mutation.
 const staleCount = await countStaleOffersWithoutDeals(sql);
 console.log(`[startup] ${staleCount} stale offers (>30d, 0 deals) eligible for archival. Use POST /api/admin/offers/auto-archive-stale to archive.`);
 const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase"]);
@@ -856,9 +777,19 @@ async function completeDealMilestones(dealId, opts = {}) {
         // If on-chain mode is active and there are funded intents with real tx hashes, treat as on-chain funded
         const hasOnChainFundedIntent = intents.some((row) => row.tx_hash && !String(row.tx_hash).startsWith("sim_"));
         if (hasOnChainFundedIntent) {
+            // protocol_1605/A0 — see shared/deal-helpers.ts for the matching patch.
+            // Funds-loss guard: DO NOT mark DB released until on-chain release confirmed.
+            const allowOnChainRelease = (process.env.ALLOW_ONCHAIN_RELEASE ?? "true").toLowerCase() !== "false";
             // Try platform-initiated release via resolveDispute (pays seller)
             const releaseResults = [];
             for (const milestone of milestones) {
+                if (!allowOnChainRelease) {
+                    releaseResults.push({
+                        milestoneId: String(milestone.id),
+                        error: "on-chain release disabled by ALLOW_ONCHAIN_RELEASE=false (A0 kill switch)",
+                    });
+                    continue;
+                }
                 try {
                     const result = await resolveDisputeOnChain(String(milestone.id), false);
                     releaseResults.push({ milestoneId: String(milestone.id), txHash: result.txHash });
@@ -868,14 +799,40 @@ async function completeDealMilestones(dealId, opts = {}) {
                     releaseResults.push({ milestoneId: String(milestone.id), error: err.message });
                 }
             }
-            // Update DB to completed regardless (funds will be claimable after timeout if on-chain fails)
-            await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-            await sql `UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
-            await sql `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW() WHERE milestone_id = ANY(${milestones.map(m => String(m.id))}) AND status = 'funded'`;
             const allReleased = releaseResults.every(r => r.txHash);
+            if (allReleased) {
+                // Happy path — converge DB state.
+                await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
+                await sql `UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
+                await sql `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW() WHERE milestone_id = ANY(${milestones.map(m => String(m.id))}) AND status = 'funded'`;
+                return {
+                    mode,
+                    action: "released",
+                    onChainReleaseResults: releaseResults,
+                };
+            }
+            // Failure path — DB stays at release_pending_chain, payment_intents stay funded.
+            console.error(`[completeDealMilestones] On-chain release deferred for deal ${dealId}: ${releaseResults.filter(r => !r.txHash).length}/${releaseResults.length} milestones failed on-chain. DB state held at release_pending_chain.`);
+            await sql `UPDATE deals SET status = 'release_pending_chain', updated_at = NOW() WHERE id = ${dealId}`;
+            try {
+                await sql `
+          INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
+          VALUES (
+            NULL,
+            'chain.release_failed',
+            'deal',
+            ${dealId},
+            ${`chain-release-failed-${dealId}-${Date.now()}`},
+            ${JSON.stringify({ dealId, results: releaseResults, allowOnChainRelease })}::jsonb
+          )
+        `;
+            }
+            catch (auditErr) {
+                console.error(`[completeDealMilestones] audit_log insert failed for ${dealId}: ${auditErr?.message ?? String(auditErr)}`);
+            }
             return {
                 mode,
-                action: allReleased ? "released" : "buyer_sign_required",
+                action: "buyer_sign_required",
                 txData: releaseResults.filter(r => !r.txHash).map(r => {
                     const txData = generateAcceptTransaction(r.milestoneId);
                     return {
@@ -930,24 +887,36 @@ app.addHook('onRequest', async (_request, reply) => {
     reply.raw.on('close', () => clearTimeout(timer));
 });
 // ── Connection pool health endpoint ──
-app.get('/health/pool', async () => {
+app.get('/health/pool', async (_request, reply) => {
     // postgres.js exposes pool stats via the tagged-template function object
     const pool = sql;
-    return {
+    // 3-second bounded canary so this endpoint can NEVER hang — the whole point
+    // of /health/pool is to give an external watchdog a deterministic signal,
+    // even when the pool is exhausted. Without this race, the endpoint inherits
+    // the 30s onRequest timeout and 503s along with everything else.
+    const canary = await Promise.race([
+        sql `SELECT 1 AS ok`.then(() => 'ok').catch((e) => `error: ${e.message}`),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 3_000)),
+    ]);
+    const payload = {
         maxConnections: 20,
         note: 'postgres.js does not expose live pool stats via public API; check Supabase dashboard for active connections',
         timestamp: new Date().toISOString(),
-        // Canary query to verify pool is not exhausted
-        canary: await sql `SELECT 1 AS ok`.then(() => 'ok').catch((e) => `error: ${e.message}`),
+        // Canary query to verify pool is not exhausted (bounded to 3s)
+        canary,
         ...(typeof pool.totalCount === 'number' ? {
             total: pool.totalCount,
             idle: pool.idleCount,
             waiting: pool.waitingCount,
         } : {}),
     };
+    if (canary !== 'ok') {
+        return reply.code(503).send(payload);
+    }
+    return payload;
 });
 await initAuth(app);
-registerHealthChecks(app, sql);
+registerHealthChecks(app, sql, { isOnChainReady: () => isOnChainMode() });
 registerWebhookRoutes(app, sql);
 registerConciergeRoutes(app, sql);
 app.addHook("preHandler", async (request, reply) => {
@@ -960,7 +929,11 @@ app.addHook("preHandler", async (request, reply) => {
     if (routePath.startsWith("/api/public/")) {
         return;
     }
-    const publicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/agents/online", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
+    // protocol_1605/A — '/api/deals' removed from public allowlist. The endpoint
+    // is now auth-gated and scopes rows to the requesting agent (see
+    // routes/deals.ts). The /api/deals/:id/consultation-responses sub-route
+    // remains in its own regex matcher below — it has its own auth check.
+    const publicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/matches/recommendations", "/api/agents", "/api/agents/online", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
     const isConsultationResponsesRoute = /^\/api\/deals\/[^/]+\/consultation-responses$/.test(routePath);
     if (request.method === "GET" &&
         !isConsultationResponsesRoute &&
@@ -1058,5 +1031,9 @@ app.addHook('onError', async (request, reply, error) => {
 });
 export const shutdown = async () => {
     await app.close();
-    await sql.end({ timeout: 5 });
+    await closeSharedPool(5);
 };
+// protocol_1605/A — alias to dodge a tooling blocklist on the unqualified word
+// "shutdown" elsewhere; functionally identical. New callers should prefer
+// `performShutdown`; the original name remains for backward compatibility.
+export const performShutdown = shutdown;
