@@ -1,13 +1,15 @@
-import postgres from "postgres";
+/**
+ * protocol_1605/A — single-pool re-export.
+ *
+ * Prior to Phase A this file owned a SECOND Postgres pool with its own
+ * connection budget, fighting the index.ts pool for Supabase's cap. The
+ * historical reason was that admin/feedback/shared/deal-helpers were written
+ * against a local `sql` import instead of taking it as a parameter — too
+ * disruptive to refactor right now.
+ *
+ * Compromise: keep the local-import surface but funnel it to the ONE pool
+ * defined in shared/pool.ts. Future cleanup can rewrite call sites to take
+ * sql as a dep and delete this file entirely.
+ */
 
-const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres:***@localhost:5432/agentpact";
-
-export const sql = postgres(DATABASE_URL, {
-  max: 10,
-  idle_timeout: 20,
-  connect_timeout: 10,
-  max_lifetime: 1800,
-  // WIS-985: acquire_timeout is available at runtime but not in postgres.js v3.4.8 types
-  // Use spread to avoid TS2353
-  ...(process.env.NODE_ENV ? { acquire_timeout: 15_000 } : {}),
-} as postgres.Options<Record<string, postgres.PostgresType>>);
+export { sql, closeSharedPool } from "./shared/pool.js";
