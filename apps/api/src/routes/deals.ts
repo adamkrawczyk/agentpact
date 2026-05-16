@@ -465,14 +465,26 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     return { ok: true };
   });
 
-  app.get("/api/deals", async (request) => {
+  // protocol_1605/A — gate /api/deals behind agent auth and scope rows to the
+  // requester (buyer OR seller). Pre-A this endpoint was public-readable with
+  // arbitrary filtering — a privacy leak surface (any caller could browse
+  // every deal in the platform).
+  app.get("/api/deals", async (request, reply) => {
+    const requesterAgentId = getRequesterAgentId(request, reply);
+    if (!requesterAgentId) return;
     const q = request.query as { buyerAgentId?: string; sellerAgentId?: string; status?: string };
+    // Filter to deals where the requester is a participant. We honor the
+    // optional buyerAgentId/sellerAgentId filters but only when they match
+    // the caller's own ID — preventing query-string-based identity probes.
+    const buyerFilter = q.buyerAgentId && q.buyerAgentId !== requesterAgentId ? null : (q.buyerAgentId ?? null);
+    const sellerFilter = q.sellerAgentId && q.sellerAgentId !== requesterAgentId ? null : (q.sellerAgentId ?? null);
     const rows = await sql`
       SELECT d.*,
         (SELECT json_agg(m ORDER BY m.idx) FROM milestones m WHERE m.deal_id = d.id) AS milestones
       FROM deals d
-      WHERE (${q.buyerAgentId ?? null}::uuid IS NULL OR d.buyer_agent_id = ${q.buyerAgentId ?? null}::uuid)
-        AND (${q.sellerAgentId ?? null}::uuid IS NULL OR d.seller_agent_id = ${q.sellerAgentId ?? null}::uuid)
+      WHERE (d.buyer_agent_id = ${requesterAgentId}::uuid OR d.seller_agent_id = ${requesterAgentId}::uuid)
+        AND (${buyerFilter}::uuid IS NULL OR d.buyer_agent_id = ${buyerFilter}::uuid)
+        AND (${sellerFilter}::uuid IS NULL OR d.seller_agent_id = ${sellerFilter}::uuid)
         AND (${q.status ?? null}::text IS NULL OR d.status = ${q.status ?? null}::text)
       ORDER BY d.created_at DESC
       LIMIT 200
@@ -480,11 +492,25 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     return rows;
   });
 
+  // protocol_1605/A — gate /api/deals/:id behind auth + participant-only scope.
   app.get("/api/deals/:id", async (request, reply) => {
+    const requesterAgentId = getRequesterAgentId(request, reply);
+    if (!requesterAgentId) return;
     const { id } = request.params as { id: string };
-    await maybeAutoCompleteConsultationDeal(sql, deps, id);
+    // protocol_1605/A — read path no longer mutates state. The previous
+    // implementation called maybeAutoCompleteConsultationDeal(sql, deps, id)
+    // here, meaning every GET could lazily flip a deal to 'completed' and
+    // touch payment_intents under the request's DB connection. That broke
+    // both performance (heavy work on read) and correctness (state changes
+    // on what is supposed to be a pure GET). Consultation deals are now
+    // converged by the cron-friendly POST /api/deals/:id/fulfillment/auto-complete
+    // endpoint (already plumbed and rate-limited).
     const [deal] = await sql`SELECT * FROM deals WHERE id = ${id}`;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
+    if (deal.buyer_agent_id !== requesterAgentId && deal.seller_agent_id !== requesterAgentId) {
+      // 404 instead of 403 to avoid leaking deal existence to non-participants.
+      return reply.code(404).send({ error: "Deal not found" });
+    }
     const milestones = await sql`SELECT * FROM milestones WHERE deal_id = ${id} ORDER BY idx`;
     const events = await sql`SELECT * FROM negotiation_events WHERE deal_id = ${id} ORDER BY created_at`;
     return { ...deal, milestones, events };
