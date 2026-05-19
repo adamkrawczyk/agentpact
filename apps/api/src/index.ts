@@ -1215,7 +1215,6 @@ app.get('/health/pool', async (_request, reply) => {
 });
 
 await initAuth(app);
-registerHealthChecks(app, sql);
 registerWebhookRoutes(app, sql);
 registerConciergeRoutes(app, sql as unknown as Sql<Record<string, unknown>>);
 
@@ -1223,7 +1222,7 @@ app.addHook("preHandler", async (request, reply) => {
   const routePath = (request.url.split("?")[0] ?? request.url);
   const publicRoutes = new Set(["/health", "/api/health", "/api/config", "/api/auth/register", "/api/auth/verify", "/api/auth/nonce"]);
 
-  if (publicRoutes.has(routePath)) {
+  if (publicRoutes.has(routePath) || routePath.startsWith("/api/health")) {
     return;
   }
 
@@ -1232,12 +1231,13 @@ app.addHook("preHandler", async (request, reply) => {
     return;
   }
 
-  const publicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/agents/online", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
+  const exactPublicGetRoutes = new Set(["/api/matches/recommendations", "/api/agents/online", "/api/fulfillment/types"]);
+  const prefixPublicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills", "/api/reputation"];
   const isConsultationResponsesRoute = /^\/api\/deals\/[^/]+\/consultation-responses$/.test(routePath);
   if (
     request.method === "GET" &&
     !isConsultationResponsesRoute &&
-    publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))
+    (exactPublicGetRoutes.has(routePath) || prefixPublicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/")))
   ) {
     return;
   }
@@ -1295,12 +1295,14 @@ app.addHook("preHandler", async (request, reply) => {
   };
   const _recomputeMatches = createRecomputeMatchesQueue(() => recomputeMatchesFn(app, _sql), {
     onError: (err) => app.log.error({ err }, "scheduled recomputeMatches failed"),
+    onEvent: (event, details) => app.log.info({ event, ...details }, "matching queue event"),
   });
+  registerHealthChecks(app, sql, { matchingQueueStatus: _recomputeMatches.status });
 
   await registerAgentRoutes(app, _sql, deps);
   await registerOffersRoutes(app, _sql, deps, _recomputeMatches.scheduleRecompute);
   await registerNeedsRoutes(app, _sql, deps, _recomputeMatches.scheduleRecompute);
-  await registerMatchingRoutes(app, _sql, deps, _recomputeMatches.recomputeNow);
+  await registerMatchingRoutes(app, _sql, deps, _recomputeMatches);
   await registerDealsRoutes(app, _sql, deps);
   await registerFulfillmentRoutes(app, _sql, deps);
   await registerDisputesRoutes(app, _sql, deps, _releaseMilestonePayment);

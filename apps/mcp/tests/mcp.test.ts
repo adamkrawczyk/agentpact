@@ -89,4 +89,20 @@ describe('@agentpact/mcp', () => {
     assert.ok(source.includes('StdioServerTransport'), 'Should support stdio');
     assert.ok(source.includes('StreamableHTTPServerTransport'), 'Should support HTTP');
   });
+
+  it('supports explicit transport mode and keeps logs off stdout', () => {
+    assert.ok(source.includes('MCP_TRANSPORT'), 'Should read explicit MCP_TRANSPORT mode');
+    assert.ok(source.includes('console.error'), 'Operational logs should use stderr');
+    assert.equal(/console\.log\(/.test(source), false, 'stdout must remain MCP protocol-only');
+  });
+
+  it('includes current enum values from the API', () => {
+    assert.ok(source.includes('"phantom"'), 'walletProvider should include phantom');
+    assert.ok(source.includes('"other"'), 'walletProvider should include other');
+    assert.ok(source.includes('"consultation"'), 'fulfillmentType should include consultation');
+  });
+
+  it('strips path-only fields from path-param tool bodies', () => {
+    assert.ok(source.includes('stripFields(args, ["dealId"])'), 'dealId should be stripped from path-param request bodies');
+  });
 });

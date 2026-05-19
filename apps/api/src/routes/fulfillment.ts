@@ -581,7 +581,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       WHERE deal_id = ${id}
     `;
 
-    const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: body.skipOnChainRelease });
+    const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: false });
 
     if (deal.offer_id) {
       await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
@@ -686,7 +686,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')
       `;
 
-      const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: body.skipOnChainRelease });
+      const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: false });
 
       if (deal.offer_id) {
         await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;

@@ -286,10 +286,7 @@ export async function registerRoutes(app, sql, deps) {
     `;
         if (!deal)
             return reply.code(404).send({ error: "Deal not found" });
-        if (deal.status === 'active') {
-            return { ok: true, note: "Deal already accepted" };
-        }
-        if (deal.status !== 'proposed' && deal.status !== 'countered') {
+        if (!["proposed", "countered"].includes(String(deal.status))) {
             return reply.code(409).send({ error: `Cannot accept deal in status '${deal.status}'` });
         }
         if (body.actorAgentId !== deal.seller_agent_id) {
@@ -299,7 +296,9 @@ export async function registerRoutes(app, sql, deps) {
             await sql.begin(async (txn) => {
                 const [updated] = await txn.unsafe("UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = $1 AND status IN ('proposed', 'countered') RETURNING id", [id]);
                 if (!updated) {
-                    throw new Error(`Deal ${id} status changed concurrently — accept aborted`);
+                    const conflictError = new Error(`Deal ${id} status changed concurrently — accept aborted`);
+                    conflictError.name = "DealAcceptConflictError";
+                    throw conflictError;
                 }
                 await txn.unsafe("UPDATE milestones SET status = 'in_progress' WHERE deal_id = $1 AND status = 'pending'", [id]);
                 await txn.unsafe(`
@@ -315,6 +314,9 @@ export async function registerRoutes(app, sql, deps) {
         }
         catch (err) {
             app.log.error({ err, dealId: id }, "deal.accept transaction failed — deal status NOT changed");
+            if (err instanceof Error && err.name === "DealAcceptConflictError") {
+                return reply.code(409).send({ error: "Deal status changed concurrently; retry with the current deal state" });
+            }
             return reply.code(500).send({ error: "Failed to accept deal — please retry" });
         }
         deps.notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.accepted", {
@@ -323,7 +325,8 @@ export async function registerRoutes(app, sql, deps) {
             fulfillmentType: deal.fulfillment_type,
             sellerActionRequired: "Provide fulfillment details via /api/deals/:id/fulfillment",
         });
-        return { ok: true };
+        const [updatedDeal] = await sql `SELECT * FROM deals WHERE id = ${id}`;
+        return { ok: true, ...updatedDeal };
     });
     app.post("/api/deals/:id/cancel", async (request, reply) => {
         const { id } = request.params;

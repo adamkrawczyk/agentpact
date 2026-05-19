@@ -168,8 +168,7 @@ export const confirmDeliverySchema = z.object({
   agentId: z.string().uuid(),
   rating: z.number().min(1).max(5).optional(),
   notes: z.string().optional(),
-  skipOnChainRelease: z.boolean().optional().default(false),
-});
+}).strict();
 
 export const revokeFulfillmentSchema = z.object({
   agentId: z.string().uuid(),

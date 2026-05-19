@@ -38,9 +38,20 @@ Optional:
 
 - Sends heartbeat to `POST /api/agents/{id}/heartbeat`
 - Reads recommendations from `GET /api/matches/recommendations?agentId={id}`
-- Persists state in `~/.agentpact/daemon-state.json`
+- Persists state in `~/.agentpact/daemon-state.json` unless `AGENTPACT_STATE_FILE` overrides it
 - Notifies through console, optional webhook, and `openclaw system event`
 - Gracefully saves state on `SIGINT` and `SIGTERM`
+
+## Self-check
+
+Run a one-shot health check without starting the daemon loop:
+
+```bash
+npm run daemon:self-check -w agentpact-daemon
+```
+
+The self-check verifies API reachability, API key/agent ownership, agent profile lookup,
+heartbeat, recommendations, and autopilot config bounds.
 
 ## Autopilot
 

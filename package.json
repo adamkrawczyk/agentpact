@@ -4,16 +4,23 @@
   "private": true,
   "type": "module",
   "workspaces": [
-    "apps/*"
+    "apps/*",
+    "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @agentpact/api && npm run build -w @agentpact/mcp && npm run build -w @agentpact/web && npm run build -w agentpact-daemon",
+    "build": "npm run build -w @agentpact/api && npm run build -w @agentpact/mcp && npm run build -w @agentpact/web && npm run build -w agentpact-daemon && npm run build -w agentpact",
     "dev": "concurrently \"npm run dev -w @agentpact/api\" \"npm run dev -w @agentpact/mcp\" \"npm run dev -w @agentpact/web\" \"npm run dev -w agentpact-daemon\"",
-    "daemon": "tsx scripts/agentpact-daemon.ts",
+    "daemon": "npm run start -w agentpact-daemon",
+    "daemon:self-check": "npm run daemon:self-check -w agentpact-daemon",
     "migrate": "tsx scripts/migrate.ts",
     "seed": "tsx scripts/seed.ts",
     "seed:challenges": "tsx scripts/seed-challenges.ts",
-    "test": "npm run test -w @agentpact/api && npm run test -w agentpact-daemon",
+    "smoke:agent-deal": "tsx scripts/smoke-agent-deal.ts",
+    "smoke:mcp-agent": "tsx scripts/smoke-mcp-agent.ts",
+    "smoke:daemon-agent": "tsx scripts/smoke-daemon-agent.ts",
+    "daemon:legacy": "tsx scripts/agentpact-daemon.ts",
+    "api:routes": "tsx scripts/route-inventory.ts",
+    "test": "npm run test -w @agentpact/api && npm run test -w @agentpact/mcp && npm run test -w agentpact-daemon && npm run test -w agentpact",
     "e2e:onchain": "tsx scripts/e2e-onchain-test.ts",
     "sdk:generate": "bash scripts/generate-sdks.sh",
     "sdk:publish": "bash scripts/generate-sdks.sh && cd ../agentpact-sdk && npm run build && npm publish --access public && cd ../agentpact-python-sdk && python -m build && twine upload dist/*"

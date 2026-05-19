@@ -494,7 +494,7 @@ export async function registerRoutes(app, sql, deps) {
       SET status = 'verified', updated_at = NOW()
       WHERE deal_id = ${id}
     `;
-            const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: body.skipOnChainRelease });
+            const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: false });
             if (deal.offer_id) {
                 await sql `UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
             }
@@ -586,7 +586,7 @@ export async function registerRoutes(app, sql, deps) {
         UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW()
         WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')
       `;
-            const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: body.skipOnChainRelease });
+            const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: false });
             if (deal.offer_id) {
                 await sql `UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
             }

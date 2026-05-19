@@ -18,34 +18,54 @@ describe("matching recompute queue", () => {
     });
 
     const first = queue.recomputeNow();
-    const second = queue.recomputeNow();
-    const third = queue.recomputeNow();
+    const rest = Array.from({ length: 99 }, () => queue.recomputeNow());
 
     expect(runs).toBe(1);
+    expect(queue.status()).toMatchObject({ inFlight: true, dirty: true });
     releaseFirstRun();
 
-    await expect(Promise.all([first, second, third])).resolves.toEqual([3, 3, 3]);
+    await expect(Promise.all([first, ...rest])).resolves.toEqual([3, ...Array(99).fill(2)]);
     expect(runs).toBe(2);
+    expect(queue.status()).toMatchObject({ inFlight: false, dirty: false, lastError: undefined });
+    expect(queue.status().lastStartedAt).toEqual(expect.any(String));
+    expect(queue.status().lastFinishedAt).toEqual(expect.any(String));
   });
 
-  it("schedules dirty recomputes without starting duplicate timers", async () => {
-    let runs = 0;
-    let resolveRun!: () => void;
+  it("exposes observable queue status and emits lifecycle events", async () => {
+    const events: string[] = [];
+    const queue = createRecomputeMatchesQueue(async () => 7, {
+      onEvent: (event) => events.push(event),
+    });
 
+    expect(queue.status()).toMatchObject({ dirty: false, inFlight: false });
+    await expect(queue.recomputeNow()).resolves.toBe(7);
+
+    expect(events).toEqual(["matching.started", "matching.finished"]);
+    expect(queue.status()).toMatchObject({
+      dirty: false,
+      inFlight: false,
+      lastError: undefined,
+      lastStartedAt: expect.any(String),
+      lastFinishedAt: expect.any(String),
+    });
+  });
+
+  it("records last errors and emits error events", async () => {
+    const events: string[] = [];
     const queue = createRecomputeMatchesQueue(async () => {
-      runs += 1;
-      await new Promise<void>((resolve) => {
-        resolveRun = resolve;
-      });
-      return 1;
-    }, { delayMs: 0 });
+      throw new Error("boom");
+    }, {
+      onEvent: (event) => events.push(event),
+    });
 
-    queue.scheduleRecompute();
-    queue.scheduleRecompute();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(runs).toBe(1);
-    resolveRun();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(queue.recomputeNow()).rejects.toThrow("boom");
+    expect(events).toEqual(["matching.started", "matching.error"]);
+    expect(queue.status()).toMatchObject({
+      dirty: false,
+      inFlight: false,
+      lastError: "boom",
+      lastStartedAt: expect.any(String),
+      lastFinishedAt: expect.any(String),
+    });
   });
 });

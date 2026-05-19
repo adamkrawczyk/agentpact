@@ -4,6 +4,7 @@ import { buildDealProposal, proposeDeal, selectAutopilotMatches } from "./autopi
 import { loadConfig } from "./config.js";
 import { sendHeartbeat } from "./heartbeat.js";
 import { createNotifier } from "./notifier.js";
+import { runSelfCheck } from "./self-check.js";
 import { loadState, pruneAutopilotDeals, saveState } from "./state.js";
 import { watchMarket } from "./watcher.js";
 export async function runDaemon(config, deps = {}) {
@@ -107,6 +108,13 @@ export async function runDaemon(config, deps = {}) {
 }
 export async function main(argv = process.argv.slice(2), env = process.env) {
     const config = loadConfig({ env, argv, homeDir: homedir() });
+    if (argv.includes("self-check") || argv.includes("--self-check")) {
+        const results = await runSelfCheck({ config });
+        if (results.some((result) => !result.ok)) {
+            process.exitCode = 1;
+        }
+        return;
+    }
     const shutdown = await runDaemon(config);
     const handleSignal = (signal) => {
         console.log(`[agentpact-daemon] received ${signal}, shutting down`);

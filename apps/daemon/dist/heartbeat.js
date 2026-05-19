@@ -6,6 +6,7 @@ export async function sendHeartbeat(input) {
             "content-type": "application/json",
             "x-api-key": input.config.apiKey,
         },
+        body: JSON.stringify({}),
     });
     if (!response.ok) {
         throw new Error(`POST /api/agents/${input.config.agentId}/heartbeat failed with ${response.status}`);
