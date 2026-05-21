@@ -635,11 +635,16 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   app.post("/api/deals/:id/close", async (request, reply) => {
     const body = parseOrReply(
       reply,
+      // ── §3.3 (Tori, 2026-05-21): public close endpoint MUST NOT accept
+      // skipOnChainRelease. Only admin/maintenance routes may bypass the
+      // on-chain release; buyer-facing close always goes through the full
+      // release path. Body field removed from schema so payloads with it
+      // are rejected by zod.passthrough — silent acceptance with hardcoded
+      // false was a latent foot-gun.
       z.object({
         agentId: z.string().uuid(),
         rating: z.number().min(1).max(5).optional(),
         notes: z.string().optional(),
-        skipOnChainRelease: z.boolean().optional().default(false),
       }),
       request.body,
     );
