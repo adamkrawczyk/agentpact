@@ -23,6 +23,7 @@ const envSchema = z.object({
   AGENTPACT_HEARTBEAT_INTERVAL: numberish(60_000).pipe(z.number().int().positive()),
   AGENTPACT_WATCH_INTERVAL: numberish(300_000).pipe(z.number().int().positive()),
   AGENTPACT_NOTIFY_WEBHOOK: z.string().url().optional(),
+  AGENTPACT_STATE_FILE: z.string().min(1).optional(),
   AGENTPACT_AUTOPILOT: booleanish.default(false),
   AGENTPACT_AUTOPILOT_THRESHOLD: numberish(0.85).pipe(z.number().min(0).max(1)),
   AGENTPACT_AUTOPILOT_MAX_PRICE: numberish(100).pipe(z.number().positive()),
@@ -66,7 +67,7 @@ export function loadConfig(input: {
     heartbeatIntervalMs: env.AGENTPACT_HEARTBEAT_INTERVAL,
     watchIntervalMs: env.AGENTPACT_WATCH_INTERVAL,
     webhookUrl: env.AGENTPACT_NOTIFY_WEBHOOK,
-    stateFilePath: join(input.homeDir, ".agentpact", "daemon-state.json"),
+    stateFilePath: env.AGENTPACT_STATE_FILE ?? join(input.homeDir, ".agentpact", "daemon-state.json"),
     autopilot: {
       enabled: env.AGENTPACT_AUTOPILOT,
       threshold: env.AGENTPACT_AUTOPILOT_THRESHOLD,

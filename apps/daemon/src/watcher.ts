@@ -85,7 +85,8 @@ function toAcceptanceCriteria(raw: unknown, needId: string): string[] {
 function buildSummary(recommendation: RecommendationRecord, offer: OfferRecord, need: NeedRecord): string {
   const offerTitle = offer.title ?? recommendation.offer_title ?? recommendation.offer_id;
   const needTitle = need.title ?? recommendation.need_title ?? recommendation.need_id;
-  return `${offerTitle} -> ${needTitle} (${recommendation.score.toFixed(2)})`;
+  const score = Number(recommendation.score);
+  return `${offerTitle} -> ${needTitle} (${Number.isFinite(score) ? score.toFixed(2) : "n/a"})`;
 }
 
 export async function watchMarket(input: {
@@ -113,7 +114,7 @@ export async function watchMarket(input: {
     return {
       fingerprint: buildMatchFingerprint(recommendation.offer_id, recommendation.need_id),
       summary: buildSummary(recommendation, offer, need),
-      score: recommendation.score,
+      score: Number(recommendation.score),
       offerId: recommendation.offer_id,
       needId: recommendation.need_id,
       offerTitle: offer.title ?? recommendation.offer_title ?? recommendation.offer_id,

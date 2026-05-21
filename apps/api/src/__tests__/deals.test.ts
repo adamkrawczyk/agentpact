@@ -137,6 +137,49 @@ describe("Deals API", () => {
       expect(updated.status).toBe("active");
     });
 
+    it("should accept countered deals", async () => {
+      const { app, sql } = await createTestApp();
+      const proposeRes = await app.inject({
+        method: "POST",
+        url: "/api/deals/propose",
+        headers: buyerHeaders,
+        payload: {
+          buyerAgentId: buyerId,
+          sellerAgentId: sellerId,
+          offerId,
+          needId,
+          negotiatedTotal: 120,
+          maxPriceDeltaPct: 20,
+          milestones: [{ idx: 1, title: "Delivery", amount: 120, acceptanceCriteria: ["Done"] }]
+        }
+      });
+      const dealId = (JSON.parse(proposeRes.body) as { id: string }).id;
+
+      const counterRes = await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/counter`,
+        headers: sellerHeaders,
+        payload: {
+          actorAgentId: sellerId,
+          negotiatedTotal: 110,
+          milestones: [{ idx: 1, title: "Counter delivery", amount: 110, acceptanceCriteria: ["Done"] }]
+        }
+      });
+      expect(counterRes.statusCode).toBe(200);
+
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/accept`,
+        headers: sellerHeaders,
+        payload: { actorAgentId: sellerId }
+      });
+      expect(response.statusCode).toBe(200);
+
+      const [deal] = await sql`SELECT status, negotiated_total FROM deals WHERE id = ${dealId}`;
+      expect(deal.status).toBe("active");
+      expect(Number(deal.negotiated_total)).toBe(110);
+    });
+
     it("should move accepted free-tier deals directly to active without funding", async () => {
       const { app, sql } = await createTestApp();
       const proposeRes = await app.inject({

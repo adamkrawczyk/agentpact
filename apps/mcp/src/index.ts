@@ -13,8 +13,21 @@ const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
 const MCP_PORT = Number(process.env.PORT ?? process.env.MCP_PORT ?? 5000);
 const MCP_HOST = process.env.MCP_HOST ?? "0.0.0.0";
 const MCP_API_KEY = process.env.MCP_API_KEY ?? "";
+const MCP_TRANSPORT = (process.env.MCP_TRANSPORT ?? "http").toLowerCase();
+const ENABLE_STDIO = MCP_TRANSPORT === "stdio" || MCP_TRANSPORT === "both";
+const ENABLE_HTTP = MCP_TRANSPORT === "http" || MCP_TRANSPORT === "both";
 
 type Json = Record<string, unknown>;
+
+function log(message: string, ...args: unknown[]) {
+  console.error(message, ...args);
+}
+
+function stripFields<T extends Json>(input: T, fields: string[]): Json {
+  const next: Json = { ...input };
+  for (const field of fields) delete next[field];
+  return next;
+}
 
 // ── API helper ───────────────────────────────────────────────────────
 
@@ -113,7 +126,7 @@ const tools: Tool[] = [
         },
         walletProvider: {
           type: "string",
-          enum: ["metamask", "walletconnect", "coinbase"],
+          enum: ["metamask", "walletconnect", "coinbase", "phantom", "other"],
           description:
             "The wallet provider used by this agent for signing transactions",
         },
@@ -222,6 +235,7 @@ const tools: Tool[] = [
             "data-delivery",
             "compute-access",
             "consulting",
+            "consultation",
             "physical-service",
             "generic",
           ],
@@ -428,6 +442,7 @@ const tools: Tool[] = [
             "data-delivery",
             "compute-access",
             "consulting",
+            "consultation",
             "physical-service",
             "generic",
           ],
@@ -1121,7 +1136,7 @@ const tools: Tool[] = [
         },
         walletProvider: {
           type: "string",
-          enum: ["metamask", "walletconnect", "coinbase"],
+          enum: ["metamask", "walletconnect", "coinbase", "phantom", "other"],
           description:
             "The wallet provider the buyer will use to sign the funding transaction",
         },
@@ -1831,7 +1846,7 @@ function handleToolCall(name: string, rawArgs: Json) {
         api(
           `/api/deals/${String(args.dealId)}/counter`,
           "POST",
-          args,
+          stripFields(args, ["dealId"]),
           apiKey,
         ),
       );
@@ -1840,7 +1855,7 @@ function handleToolCall(name: string, rawArgs: Json) {
         api(
           `/api/deals/${String(args.dealId)}/accept`,
           "POST",
-          args,
+          stripFields(args, ["dealId"]),
           apiKey,
         ),
       );
@@ -1849,7 +1864,7 @@ function handleToolCall(name: string, rawArgs: Json) {
         api(
           `/api/deals/${String(args.dealId)}/cancel`,
           "POST",
-          args,
+          stripFields(args, ["dealId"]),
           apiKey,
         ),
       );
@@ -1857,11 +1872,11 @@ function handleToolCall(name: string, rawArgs: Json) {
       return textResult(api("/api/fulfillment/types", "GET", undefined, apiKey));
     case "agentpact.provide_fulfillment":
       return textResult(
-        api(`/api/deals/${String(args.dealId)}/fulfillment`, "POST", args, apiKey),
+        api(`/api/deals/${String(args.dealId)}/fulfillment`, "POST", stripFields(args, ["dealId"]), apiKey),
       );
     case "agentpact.provide_buyer_context":
       return textResult(
-        api(`/api/deals/${String(args.dealId)}/fulfillment/buyer`, "POST", args, apiKey),
+        api(`/api/deals/${String(args.dealId)}/fulfillment/buyer`, "POST", stripFields(args, ["dealId"]), apiKey),
       );
     case "agentpact.get_fulfillment":
       {
@@ -1883,7 +1898,7 @@ function handleToolCall(name: string, rawArgs: Json) {
         api(
           `/api/deals/${String(args.dealId)}/fulfillment/rotate`,
           "POST",
-          args,
+          stripFields(args, ["dealId"]),
           apiKey,
         ),
       );
@@ -1892,17 +1907,17 @@ function handleToolCall(name: string, rawArgs: Json) {
         api(
           `/api/deals/${String(args.dealId)}/fulfillment/request-rotation`,
           "POST",
-          args,
+          stripFields(args, ["dealId"]),
           apiKey,
         ),
       );
     case "agentpact.verify_fulfillment":
       return textResult(
-        api(`/api/deals/${String(args.dealId)}/fulfillment/verify`, "POST", args, apiKey),
+        api(`/api/deals/${String(args.dealId)}/fulfillment/verify`, "POST", stripFields(args, ["dealId"]), apiKey),
       );
     case "agentpact.revoke_fulfillment":
       return textResult(
-        api(`/api/deals/${String(args.dealId)}/fulfillment/revoke`, "POST", args, apiKey),
+        api(`/api/deals/${String(args.dealId)}/fulfillment/revoke`, "POST", stripFields(args, ["dealId"]), apiKey),
       );
 
     // Payments
@@ -1942,11 +1957,11 @@ function handleToolCall(name: string, rawArgs: Json) {
       );
     case "agentpact.confirm_delivery":
       return textResult(
-        api(`/api/deals/${String(args.dealId)}/confirm-delivery`, "POST", args, apiKey),
+        api(`/api/deals/${String(args.dealId)}/confirm-delivery`, "POST", stripFields(args, ["dealId"]), apiKey),
       );
     case "agentpact.close_deal":
       return textResult(
-        api(`/api/deals/${String(args.dealId)}/close`, "POST", args, apiKey),
+        api(`/api/deals/${String(args.dealId)}/close`, "POST", stripFields(args, ["dealId"]), apiKey),
       );
 
     // Disputes
@@ -2021,13 +2036,14 @@ function createMcpServer(): Server {
   return server;
 }
 
-// ── Streamable HTTP transport (Express) ──────────────────────────────
-
-const app = express();
-app.use(express.json());
-
 // Session store for active transports
 const transports: Record<string, StreamableHTTPServerTransport> = {};
+
+// ── Streamable HTTP transport (Express) ──────────────────────────────
+
+function createHttpApp() {
+const app = express();
+app.use(express.json());
 
 // Health check endpoints
 app.get("/health", (_req, res) => {
@@ -2082,7 +2098,7 @@ app.post("/mcp", async (req, res) => {
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         onsessioninitialized: (sid) => {
-          console.log(`Session initialized: ${sid}`);
+          log(`Session initialized: ${sid}`);
           transports[sid] = transport;
         },
       });
@@ -2090,7 +2106,7 @@ app.post("/mcp", async (req, res) => {
       transport.onclose = () => {
         const sid = transport.sessionId;
         if (sid && transports[sid]) {
-          console.log(`Session closed: ${sid}`);
+          log(`Session closed: ${sid}`);
           delete transports[sid];
         }
       };
@@ -2113,7 +2129,7 @@ app.post("/mcp", async (req, res) => {
 
     await transport.handleRequest(req, res, req.body);
   } catch (error) {
-    console.error("Error handling MCP POST:", error);
+    log("Error handling MCP POST:", error);
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: "2.0",
@@ -2144,7 +2160,7 @@ app.delete("/mcp", async (req, res) => {
   try {
     await transports[sessionId].handleRequest(req, res);
   } catch (error) {
-    console.error("Error handling session termination:", error);
+    log("Error handling session termination:", error);
     if (!res.headersSent) {
       res.status(500).send("Error processing session termination");
     }
@@ -2153,32 +2169,42 @@ app.delete("/mcp", async (req, res) => {
 
 // ── Start server ─────────────────────────────────────────────────────
 
-app.listen(MCP_PORT, MCP_HOST, () => {
-  console.log(
-    `AgentPact MCP server listening on ${MCP_HOST}:${MCP_PORT} (Streamable HTTP at /mcp)`,
-  );
-});
+return app;
+}
 
-// Optionally start stdio transport for local dev
-if (!process.stdin.isTTY && process.stdin.readable) {
+if (!ENABLE_HTTP && !ENABLE_STDIO) {
+  throw new Error("MCP_TRANSPORT must be one of: stdio, http, both");
+}
+
+async function startStdio() {
   try {
     const stdioServer = createMcpServer();
     const transport = new StdioServerTransport();
     await stdioServer.connect(transport);
-    console.log("MCP stdio transport connected");
+    log("MCP stdio transport connected");
   } catch (err) {
-    console.warn(
-      "MCP stdio transport unavailable (running in HTTP-only mode):",
+    log(
+      "MCP stdio transport unavailable:",
       err,
     );
   }
-} else {
-  console.log("MCP running in HTTP-only mode (no stdin detected)");
+}
+
+if (ENABLE_HTTP) {
+  createHttpApp().listen(MCP_PORT, MCP_HOST, () => {
+    log(
+      `AgentPact MCP server listening on ${MCP_HOST}:${MCP_PORT} (Streamable HTTP at /mcp)`,
+    );
+  });
+}
+
+if (ENABLE_STDIO) {
+  void startStdio();
 }
 
 // Graceful shutdown
 const shutdown = async () => {
-  console.log("Shutting down...");
+  log("Shutting down...");
   for (const sessionId of Object.keys(transports)) {
     try {
       await transports[sessionId].close();

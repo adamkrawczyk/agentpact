@@ -77,19 +77,41 @@ async function runMigrations(databaseUrl: string): Promise<void> {
   await sql.end();
 }
 
+function isContainerRuntimeError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /container runtime|docker|colima|podman|Could not find a working container runtime strategy/i.test(message);
+}
+
 export default async function globalSetup() {
-  console.log("[globalSetup] Starting Postgres test container...");
+  const configuredDatabaseUrl = process.env.TEST_DATABASE_URL;
+  let databaseUrl: string;
 
-  pgContainer = await new PostgreSqlContainer("postgres:16-alpine")
-    .withDatabase("agentpact_test")
-    .withUsername("postgres")
-    .withPassword("postgres")
-    .start();
+  if (configuredDatabaseUrl) {
+    databaseUrl = configuredDatabaseUrl;
+    process.env.DATABASE_URL = databaseUrl;
+    console.log("[globalSetup] Using TEST_DATABASE_URL; skipping Testcontainers.");
+  } else {
+    console.log("[globalSetup] Starting Postgres test container...");
+    try {
+      pgContainer = await new PostgreSqlContainer("postgres:16-alpine")
+        .withDatabase("agentpact_test")
+        .withUsername("postgres")
+        .withPassword("postgres")
+        .start();
+    } catch (error) {
+      if (isContainerRuntimeError(error)) {
+        throw new Error(
+          "No container runtime found. Start Docker/Colima or set TEST_DATABASE_URL=postgres://...",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
 
-  const databaseUrl = pgContainer.getConnectionUri();
-  process.env.DATABASE_URL = databaseUrl;
-
-  console.log(`[globalSetup] Postgres ready at ${databaseUrl}`);
+    databaseUrl = pgContainer.getConnectionUri();
+    process.env.DATABASE_URL = databaseUrl;
+    console.log(`[globalSetup] Postgres ready at ${databaseUrl}`);
+  }
 
   await runMigrations(databaseUrl);
 

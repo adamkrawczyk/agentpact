@@ -1,5 +1,7 @@
 #!/usr/bin/env npx tsx
 
+console.warn("[agentpact-daemon] scripts/agentpact-daemon.ts is deprecated; use apps/daemon via `npm run daemon` or `npm run daemon:self-check`.");
+
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";

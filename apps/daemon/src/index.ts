@@ -6,6 +6,7 @@ import { buildDealProposal, proposeDeal, selectAutopilotMatches } from "./autopi
 import { loadConfig, type RuntimeConfig } from "./config.js";
 import { sendHeartbeat } from "./heartbeat.js";
 import { createNotifier } from "./notifier.js";
+import { runSelfCheck } from "./self-check.js";
 import { loadState, pruneAutopilotDeals, saveState } from "./state.js";
 import { watchMarket } from "./watcher.js";
 
@@ -125,6 +126,15 @@ export async function runDaemon(config: RuntimeConfig, deps: RuntimeDeps = {}): 
 
 export async function main(argv = process.argv.slice(2), env = process.env): Promise<void> {
   const config = loadConfig({ env, argv, homeDir: homedir() });
+
+  if (argv.includes("self-check") || argv.includes("--self-check")) {
+    const results = await runSelfCheck({ config });
+    if (results.some((result) => !result.ok)) {
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   const shutdown = await runDaemon(config);
 
   const handleSignal = (signal: NodeJS.Signals) => {

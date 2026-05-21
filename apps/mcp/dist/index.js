@@ -7,6 +7,18 @@ const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
 const MCP_PORT = Number(process.env.PORT ?? process.env.MCP_PORT ?? 5000);
 const MCP_HOST = process.env.MCP_HOST ?? "0.0.0.0";
 const MCP_API_KEY = process.env.MCP_API_KEY ?? "";
+const MCP_TRANSPORT = (process.env.MCP_TRANSPORT ?? "http").toLowerCase();
+const ENABLE_STDIO = MCP_TRANSPORT === "stdio" || MCP_TRANSPORT === "both";
+const ENABLE_HTTP = MCP_TRANSPORT === "http" || MCP_TRANSPORT === "both";
+function log(message, ...args) {
+    console.error(message, ...args);
+}
+function stripFields(input, fields) {
+    const next = { ...input };
+    for (const field of fields)
+        delete next[field];
+    return next;
+}
 // ── API helper ───────────────────────────────────────────────────────
 async function api(path, method, body, apiKey) {
     const headers = {
@@ -86,7 +98,7 @@ const tools = [
                 },
                 walletProvider: {
                     type: "string",
-                    enum: ["metamask", "walletconnect", "coinbase"],
+                    enum: ["metamask", "walletconnect", "coinbase", "phantom", "other"],
                     description: "The wallet provider used by this agent for signing transactions",
                 },
                 autoBuyEnabled: {
@@ -182,6 +194,7 @@ const tools = [
                         "data-delivery",
                         "compute-access",
                         "consulting",
+                        "consultation",
                         "physical-service",
                         "generic",
                     ],
@@ -369,6 +382,7 @@ const tools = [
                         "data-delivery",
                         "compute-access",
                         "consulting",
+                        "consultation",
                         "physical-service",
                         "generic",
                     ],
@@ -1001,7 +1015,7 @@ const tools = [
                 },
                 walletProvider: {
                     type: "string",
-                    enum: ["metamask", "walletconnect", "coinbase"],
+                    enum: ["metamask", "walletconnect", "coinbase", "phantom", "other"],
                     description: "The wallet provider the buyer will use to sign the funding transaction",
                 },
                 buyerWalletAddress: {
@@ -1606,17 +1620,17 @@ function handleToolCall(name, rawArgs) {
         case "agentpact.propose_deal":
             return textResult(api("/api/deals/propose", "POST", args, apiKey));
         case "agentpact.counter_deal":
-            return textResult(api(`/api/deals/${String(args.dealId)}/counter`, "POST", args, apiKey));
+            return textResult(api(`/api/deals/${String(args.dealId)}/counter`, "POST", stripFields(args, ["dealId"]), apiKey));
         case "agentpact.accept_deal":
-            return textResult(api(`/api/deals/${String(args.dealId)}/accept`, "POST", args, apiKey));
+            return textResult(api(`/api/deals/${String(args.dealId)}/accept`, "POST", stripFields(args, ["dealId"]), apiKey));
         case "agentpact.cancel_deal":
-            return textResult(api(`/api/deals/${String(args.dealId)}/cancel`, "POST", args, apiKey));
+            return textResult(api(`/api/deals/${String(args.dealId)}/cancel`, "POST", stripFields(args, ["dealId"]), apiKey));
         case "agentpact.list_fulfillment_types":
             return textResult(api("/api/fulfillment/types", "GET", undefined, apiKey));
         case "agentpact.provide_fulfillment":
-            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment`, "POST", args, apiKey));
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment`, "POST", stripFields(args, ["dealId"]), apiKey));
         case "agentpact.provide_buyer_context":
-            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/buyer`, "POST", args, apiKey));
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/buyer`, "POST", stripFields(args, ["dealId"]), apiKey));
         case "agentpact.get_fulfillment":
             {
                 const query = new URLSearchParams({
@@ -1626,13 +1640,13 @@ function handleToolCall(name, rawArgs) {
                 return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment?${query}`, "GET", undefined, apiKey));
             }
         case "agentpact.rotate_credential":
-            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/rotate`, "POST", args, apiKey));
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/rotate`, "POST", stripFields(args, ["dealId"]), apiKey));
         case "agentpact.request_rotation":
-            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/request-rotation`, "POST", args, apiKey));
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/request-rotation`, "POST", stripFields(args, ["dealId"]), apiKey));
         case "agentpact.verify_fulfillment":
-            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/verify`, "POST", args, apiKey));
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/verify`, "POST", stripFields(args, ["dealId"]), apiKey));
         case "agentpact.revoke_fulfillment":
-            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/revoke`, "POST", args, apiKey));
+            return textResult(api(`/api/deals/${String(args.dealId)}/fulfillment/revoke`, "POST", stripFields(args, ["dealId"]), apiKey));
         // Payments
         case "agentpact.create_payment_intent":
             return textResult(api("/api/payments/create-intent", "POST", args, apiKey));
@@ -1652,9 +1666,9 @@ function handleToolCall(name, rawArgs) {
         case "agentpact.verify_delivery":
             return textResult(api("/api/deliveries/verify", "POST", args, apiKey));
         case "agentpact.confirm_delivery":
-            return textResult(api(`/api/deals/${String(args.dealId)}/confirm-delivery`, "POST", args, apiKey));
+            return textResult(api(`/api/deals/${String(args.dealId)}/confirm-delivery`, "POST", stripFields(args, ["dealId"]), apiKey));
         case "agentpact.close_deal":
-            return textResult(api(`/api/deals/${String(args.dealId)}/close`, "POST", args, apiKey));
+            return textResult(api(`/api/deals/${String(args.dealId)}/close`, "POST", stripFields(args, ["dealId"]), apiKey));
         // Disputes
         case "agentpact.open_dispute":
             return textResult(api("/api/disputes/open", "POST", args, apiKey));
@@ -1699,148 +1713,155 @@ function createMcpServer() {
     });
     return server;
 }
-// ── Streamable HTTP transport (Express) ──────────────────────────────
-const app = express();
-app.use(express.json());
 // Session store for active transports
 const transports = {};
-// Health check endpoints
-app.get("/health", (_req, res) => {
-    res.json({
-        ok: true,
-        service: "agentpact-mcp",
-        timestamp: new Date().toISOString(),
+// ── Streamable HTTP transport (Express) ──────────────────────────────
+function createHttpApp() {
+    const app = express();
+    app.use(express.json());
+    // Health check endpoints
+    app.get("/health", (_req, res) => {
+        res.json({
+            ok: true,
+            service: "agentpact-mcp",
+            timestamp: new Date().toISOString(),
+        });
     });
-});
-// Well-known MCP server card for directory scanners (Smithery, etc.)
-app.get("/.well-known/mcp/server-card.json", (_req, res) => {
-    res.json({
-        serverInfo: {
-            name: "AgentPact",
+    // Well-known MCP server card for directory scanners (Smithery, etc.)
+    app.get("/.well-known/mcp/server-card.json", (_req, res) => {
+        res.json({
+            serverInfo: {
+                name: "AgentPact",
+                version: "0.1.0",
+            },
+            description: "Autonomous agent-to-agent marketplace built on the Model Context Protocol. Agents can register, create public offers and needs, discover matches, propose and negotiate deals with milestone-based escrow, and settle payments in USDC on Base. Includes reputation tracking, dispute resolution, and webhook-based event notifications.",
+            authentication: {
+                required: false,
+                schemes: [],
+            },
+            tools,
+            resources: [],
+            prompts: [],
+        });
+    });
+    app.get("/", (_req, res) => {
+        res.json({
+            ok: true,
+            service: "agentpact-mcp",
             version: "0.1.0",
-        },
-        description: "Autonomous agent-to-agent marketplace built on the Model Context Protocol. Agents can register, create public offers and needs, discover matches, propose and negotiate deals with milestone-based escrow, and settle payments in USDC on Base. Includes reputation tracking, dispute resolution, and webhook-based event notifications.",
-        authentication: {
-            required: false,
-            schemes: [],
-        },
-        tools,
-        resources: [],
-        prompts: [],
+            transport: "streamable-http",
+            endpoint: "/mcp",
+            timestamp: new Date().toISOString(),
+        });
     });
-});
-app.get("/", (_req, res) => {
-    res.json({
-        ok: true,
-        service: "agentpact-mcp",
-        version: "0.1.0",
-        transport: "streamable-http",
-        endpoint: "/mcp",
-        timestamp: new Date().toISOString(),
-    });
-});
-// POST /mcp — handles MCP JSON-RPC messages
-app.post("/mcp", async (req, res) => {
-    const sessionId = req.headers["mcp-session-id"];
-    try {
-        let transport;
-        if (sessionId && transports[sessionId]) {
-            // Reuse existing transport
-            transport = transports[sessionId];
-        }
-        else if (!sessionId && isInitializeRequest(req.body)) {
-            // New session — create transport & MCP server
-            transport = new StreamableHTTPServerTransport({
-                sessionIdGenerator: () => crypto.randomUUID(),
-                onsessioninitialized: (sid) => {
-                    console.log(`Session initialized: ${sid}`);
-                    transports[sid] = transport;
-                },
-            });
-            transport.onclose = () => {
-                const sid = transport.sessionId;
-                if (sid && transports[sid]) {
-                    console.log(`Session closed: ${sid}`);
-                    delete transports[sid];
-                }
-            };
-            const server = createMcpServer();
-            await server.connect(transport);
+    // POST /mcp — handles MCP JSON-RPC messages
+    app.post("/mcp", async (req, res) => {
+        const sessionId = req.headers["mcp-session-id"];
+        try {
+            let transport;
+            if (sessionId && transports[sessionId]) {
+                // Reuse existing transport
+                transport = transports[sessionId];
+            }
+            else if (!sessionId && isInitializeRequest(req.body)) {
+                // New session — create transport & MCP server
+                transport = new StreamableHTTPServerTransport({
+                    sessionIdGenerator: () => crypto.randomUUID(),
+                    onsessioninitialized: (sid) => {
+                        log(`Session initialized: ${sid}`);
+                        transports[sid] = transport;
+                    },
+                });
+                transport.onclose = () => {
+                    const sid = transport.sessionId;
+                    if (sid && transports[sid]) {
+                        log(`Session closed: ${sid}`);
+                        delete transports[sid];
+                    }
+                };
+                const server = createMcpServer();
+                await server.connect(transport);
+                await transport.handleRequest(req, res, req.body);
+                return;
+            }
+            else {
+                res.status(400).json({
+                    jsonrpc: "2.0",
+                    error: {
+                        code: -32000,
+                        message: "Bad Request: No valid session ID provided",
+                    },
+                    id: null,
+                });
+                return;
+            }
             await transport.handleRequest(req, res, req.body);
+        }
+        catch (error) {
+            log("Error handling MCP POST:", error);
+            if (!res.headersSent) {
+                res.status(500).json({
+                    jsonrpc: "2.0",
+                    error: { code: -32603, message: "Internal server error" },
+                    id: null,
+                });
+            }
+        }
+    });
+    // GET /mcp — SSE stream for server-to-client notifications
+    app.get("/mcp", async (req, res) => {
+        const sessionId = req.headers["mcp-session-id"];
+        if (!sessionId || !transports[sessionId]) {
+            res.status(400).send("Invalid or missing session ID");
             return;
         }
-        else {
-            res.status(400).json({
-                jsonrpc: "2.0",
-                error: {
-                    code: -32000,
-                    message: "Bad Request: No valid session ID provided",
-                },
-                id: null,
-            });
-            return;
-        }
-        await transport.handleRequest(req, res, req.body);
-    }
-    catch (error) {
-        console.error("Error handling MCP POST:", error);
-        if (!res.headersSent) {
-            res.status(500).json({
-                jsonrpc: "2.0",
-                error: { code: -32603, message: "Internal server error" },
-                id: null,
-            });
-        }
-    }
-});
-// GET /mcp — SSE stream for server-to-client notifications
-app.get("/mcp", async (req, res) => {
-    const sessionId = req.headers["mcp-session-id"];
-    if (!sessionId || !transports[sessionId]) {
-        res.status(400).send("Invalid or missing session ID");
-        return;
-    }
-    await transports[sessionId].handleRequest(req, res);
-});
-// DELETE /mcp — session termination
-app.delete("/mcp", async (req, res) => {
-    const sessionId = req.headers["mcp-session-id"];
-    if (!sessionId || !transports[sessionId]) {
-        res.status(400).send("Invalid or missing session ID");
-        return;
-    }
-    try {
         await transports[sessionId].handleRequest(req, res);
-    }
-    catch (error) {
-        console.error("Error handling session termination:", error);
-        if (!res.headersSent) {
-            res.status(500).send("Error processing session termination");
+    });
+    // DELETE /mcp — session termination
+    app.delete("/mcp", async (req, res) => {
+        const sessionId = req.headers["mcp-session-id"];
+        if (!sessionId || !transports[sessionId]) {
+            res.status(400).send("Invalid or missing session ID");
+            return;
         }
-    }
-});
-// ── Start server ─────────────────────────────────────────────────────
-app.listen(MCP_PORT, MCP_HOST, () => {
-    console.log(`AgentPact MCP server listening on ${MCP_HOST}:${MCP_PORT} (Streamable HTTP at /mcp)`);
-});
-// Optionally start stdio transport for local dev
-if (!process.stdin.isTTY && process.stdin.readable) {
+        try {
+            await transports[sessionId].handleRequest(req, res);
+        }
+        catch (error) {
+            log("Error handling session termination:", error);
+            if (!res.headersSent) {
+                res.status(500).send("Error processing session termination");
+            }
+        }
+    });
+    // ── Start server ─────────────────────────────────────────────────────
+    return app;
+}
+if (!ENABLE_HTTP && !ENABLE_STDIO) {
+    throw new Error("MCP_TRANSPORT must be one of: stdio, http, both");
+}
+async function startStdio() {
     try {
         const stdioServer = createMcpServer();
         const transport = new StdioServerTransport();
         await stdioServer.connect(transport);
-        console.log("MCP stdio transport connected");
+        log("MCP stdio transport connected");
     }
     catch (err) {
-        console.warn("MCP stdio transport unavailable (running in HTTP-only mode):", err);
+        log("MCP stdio transport unavailable:", err);
     }
 }
-else {
-    console.log("MCP running in HTTP-only mode (no stdin detected)");
+if (ENABLE_HTTP) {
+    createHttpApp().listen(MCP_PORT, MCP_HOST, () => {
+        log(`AgentPact MCP server listening on ${MCP_HOST}:${MCP_PORT} (Streamable HTTP at /mcp)`);
+    });
+}
+if (ENABLE_STDIO) {
+    void startStdio();
 }
 // Graceful shutdown
 const shutdown = async () => {
-    console.log("Shutting down...");
+    log("Shutting down...");
     for (const sessionId of Object.keys(transports)) {
         try {
             await transports[sessionId].close();

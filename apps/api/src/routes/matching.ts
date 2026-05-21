@@ -182,27 +182,75 @@ export async function recomputeMatches(app: FastifyInstance, sql: Sql<Record<str
   return writes;
 }
 
+export type MatchingQueueStatus = {
+  dirty: boolean;
+  inFlight: boolean;
+  lastStartedAt?: string;
+  lastFinishedAt?: string;
+  lastError?: string;
+};
+
+export type MatchingQueue = {
+  recomputeNow: () => Promise<number>;
+  scheduleRecompute: () => void;
+  enqueue: (reason?: string) => void;
+  status: () => MatchingQueueStatus;
+};
+
 export function createRecomputeMatchesQueue(
   run: () => Promise<number>,
   opts: {
     delayMs?: number;
     onError?: (error: unknown) => void;
+    onEvent?: (event: string, details: Record<string, unknown>) => void;
   } = {},
-): {
-  recomputeNow: () => Promise<number>;
-  scheduleRecompute: () => void;
-} {
+): MatchingQueue {
   let inFlight: Promise<number> | null = null;
   let pending = false;
   let scheduled: ReturnType<typeof setTimeout> | null = null;
+  let lastStartedAt: string | undefined;
+  let lastFinishedAt: string | undefined;
+  let lastError: string | undefined;
+  let nextPassWaiters: Array<{ resolve: (writes: number) => void; reject: (error: unknown) => void }> = [];
   const delayMs = opts.delayMs ?? 60000;
   const onError = opts.onError ?? (() => undefined);
+  const onEvent = opts.onEvent ?? (() => undefined);
 
   const drain = async () => {
     let writes = 0;
     do {
       pending = false;
-      writes += await run();
+      const waitersForThisPass = nextPassWaiters;
+      nextPassWaiters = [];
+      const started = Date.now();
+      lastStartedAt = new Date(started).toISOString();
+      lastError = undefined;
+      onEvent("matching.started", { startedAt: lastStartedAt });
+      try {
+        const passWrites = await run();
+        writes += passWrites;
+        lastFinishedAt = new Date().toISOString();
+        onEvent("matching.finished", {
+          startedAt: lastStartedAt,
+          finishedAt: lastFinishedAt,
+          durationMs: Date.now() - started,
+          writes: passWrites,
+        });
+        waitersForThisPass.forEach(({ resolve }) => resolve(passWrites));
+      } catch (error) {
+        lastFinishedAt = new Date().toISOString();
+        lastError = error instanceof Error ? error.message : String(error);
+        onEvent("matching.error", {
+          startedAt: lastStartedAt,
+          finishedAt: lastFinishedAt,
+          durationMs: Date.now() - started,
+          error: lastError,
+        });
+        const waiters = [...waitersForThisPass, ...nextPassWaiters];
+        nextPassWaiters = [];
+        waiters.forEach(({ reject }) => reject(error));
+        throw error;
+      }
     } while (pending);
     return writes;
   };
@@ -210,7 +258,9 @@ export function createRecomputeMatchesQueue(
   const recomputeNow = () => {
     if (inFlight) {
       pending = true;
-      return inFlight;
+      return new Promise<number>((resolve, reject) => {
+        nextPassWaiters.push({ resolve, reject });
+      });
     }
     if (scheduled) {
       clearTimeout(scheduled);
@@ -224,8 +274,9 @@ export function createRecomputeMatchesQueue(
     return inFlight;
   };
 
-  const scheduleRecompute = () => {
+  const enqueue = (reason = "unspecified") => {
     pending = true;
+    onEvent("matching.enqueued", { reason, inFlight: Boolean(inFlight), scheduled: Boolean(scheduled) });
     if (inFlight || scheduled) return;
     scheduled = setTimeout(() => {
       scheduled = null;
@@ -234,7 +285,15 @@ export function createRecomputeMatchesQueue(
     scheduled.unref?.();
   };
 
-  return { recomputeNow, scheduleRecompute };
+  const status = (): MatchingQueueStatus => ({
+    dirty: pending,
+    inFlight: Boolean(inFlight),
+    lastStartedAt,
+    lastFinishedAt,
+    lastError,
+  });
+
+  return { recomputeNow, scheduleRecompute: () => enqueue("scheduleRecompute"), enqueue, status };
 }
 
 async function createDealProposal(
@@ -325,8 +384,14 @@ export async function registerRoutes(
   app: FastifyInstance,
   sql: Sql<Record<string, unknown>>,
   deps: Deps,
-  recomputeMatchesFn = createRecomputeMatchesQueue(() => recomputeMatches(app, sql)).recomputeNow,
+  recomputeMatchesInput: MatchingQueue | (() => Promise<number>) = createRecomputeMatchesQueue(() => recomputeMatches(app, sql)),
 ): Promise<void> {
+  const recomputeMatchesFn = typeof recomputeMatchesInput === "function"
+    ? recomputeMatchesInput
+    : recomputeMatchesInput.recomputeNow;
+  const recomputeQueueStatus = typeof recomputeMatchesInput === "function"
+    ? undefined
+    : recomputeMatchesInput.status;
 
   app.get("/api/matches/recommendations", async (request) => {
     const q = z.object({
@@ -364,6 +429,13 @@ export async function registerRoutes(
   app.post("/api/matches/recompute", async () => {
     const writes = await recomputeMatchesFn();
     return { matchesUpserted: writes };
+  });
+
+  app.get("/api/matches/recompute/status", async () => {
+    if (!recomputeQueueStatus) {
+      return { observable: false };
+    }
+    return { observable: true, ...recomputeQueueStatus() };
   });
 
   app.post("/api/autopilot/run", async (request, reply) => {

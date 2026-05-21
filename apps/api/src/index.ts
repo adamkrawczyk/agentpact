@@ -112,7 +112,29 @@ export const sql = postgres(DATABASE_URL, {
     application_name: 'agentpact-api',     // makes pg_stat_activity rows easy to grep
   },
 } as postgres.Options<Record<string, postgres.PostgresType>>);
-export const app = Fastify({ logger: true });
+export const app = Fastify({
+  logger: true,
+  // ── §5.1 (Tori, 2026-05-21): correlation IDs + structured error responses.
+  // Fastify already generates per-request reqIds; we just (a) honour an inbound
+  // X-Request-Id header so callers can stitch their own traces, and (b) echo
+  // the id back as a response header for client-side correlation.
+  genReqId: (req) => {
+    const inbound = (req.headers["x-request-id"] ?? req.headers["X-Request-Id"]) as string | undefined;
+    if (inbound && typeof inbound === "string" && inbound.length <= 128) {
+      return inbound;
+    }
+    return randomUUID();
+  },
+  requestIdHeader: "x-request-id",
+  requestIdLogLabel: "requestId",
+});
+
+// Echo the request id back on every response so clients can include it in
+// support tickets / bug reports. Cheap, idempotent, never fails.
+app.addHook("onSend", async (request, reply, payload) => {
+  reply.header("x-request-id", request.id);
+  return payload;
+});
 const vaultSql = sql as unknown as Sql<Record<string, unknown>>;
 const credentialEncryptionKey = getCredentialEncryptionKey();
 
@@ -1215,7 +1237,6 @@ app.get('/health/pool', async (_request, reply) => {
 });
 
 await initAuth(app);
-registerHealthChecks(app, sql);
 registerWebhookRoutes(app, sql);
 registerConciergeRoutes(app, sql as unknown as Sql<Record<string, unknown>>);
 
@@ -1223,7 +1244,7 @@ app.addHook("preHandler", async (request, reply) => {
   const routePath = (request.url.split("?")[0] ?? request.url);
   const publicRoutes = new Set(["/health", "/api/health", "/api/config", "/api/auth/register", "/api/auth/verify", "/api/auth/nonce"]);
 
-  if (publicRoutes.has(routePath)) {
+  if (publicRoutes.has(routePath) || routePath.startsWith("/api/health")) {
     return;
   }
 
@@ -1232,12 +1253,13 @@ app.addHook("preHandler", async (request, reply) => {
     return;
   }
 
-  const publicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/agents/online", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
+  const exactPublicGetRoutes = new Set(["/api/matches/recommendations", "/api/agents/online", "/api/fulfillment/types"]);
+  const prefixPublicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills", "/api/reputation"];
   const isConsultationResponsesRoute = /^\/api\/deals\/[^/]+\/consultation-responses$/.test(routePath);
   if (
     request.method === "GET" &&
     !isConsultationResponsesRoute &&
-    publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))
+    (exactPublicGetRoutes.has(routePath) || prefixPublicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/")))
   ) {
     return;
   }
@@ -1295,12 +1317,14 @@ app.addHook("preHandler", async (request, reply) => {
   };
   const _recomputeMatches = createRecomputeMatchesQueue(() => recomputeMatchesFn(app, _sql), {
     onError: (err) => app.log.error({ err }, "scheduled recomputeMatches failed"),
+    onEvent: (event, details) => app.log.info({ event, ...details }, "matching queue event"),
   });
+  registerHealthChecks(app, sql, { matchingQueueStatus: _recomputeMatches.status });
 
   await registerAgentRoutes(app, _sql, deps);
   await registerOffersRoutes(app, _sql, deps, _recomputeMatches.scheduleRecompute);
   await registerNeedsRoutes(app, _sql, deps, _recomputeMatches.scheduleRecompute);
-  await registerMatchingRoutes(app, _sql, deps, _recomputeMatches.recomputeNow);
+  await registerMatchingRoutes(app, _sql, deps, _recomputeMatches);
   await registerDealsRoutes(app, _sql, deps);
   await registerFulfillmentRoutes(app, _sql, deps);
   await registerDisputesRoutes(app, _sql, deps, _releaseMilestonePayment);
@@ -1310,32 +1334,76 @@ app.addHook("preHandler", async (request, reply) => {
   await app.register(feedbackRoutes);
 }
 
-app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message?: string; name?: string; code?: string; issues?: unknown }, _request, reply) => {
+// ── §5.1 (Tori, 2026-05-21): structured error responses. Every error response
+// carries { error, code, requestId } so agent-side log analysis / retry logic
+// can branch on a stable machine-readable code instead of regex-matching the
+// message string. Codes intentionally namespaced (VALIDATION_*, DB_*, CHAIN_*,
+// HTTP_*) so we can grow the taxonomy without breaking clients.
+app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message?: string; name?: string; code?: string; issues?: unknown }, request, reply) => {
   const err = error as Record<string, unknown>;
+  const requestId = request.id;
   // ZodError detection: duck-typing (instanceof fails with ESM dual packages)
   const issues = err.issues;
   const isZod = Array.isArray(issues) && issues.length > 0 && typeof (issues[0] as any)?.path !== 'undefined'
     || err.name === 'ZodError' || err.validation;
   if (isZod) {
-    app.log.warn({ err: { name: err.name, message: err.message } }, 'validation error');
-    return reply.code(400).send({ error: 'Validation error', details: issues ?? err.validation });
+    app.log.warn({ err: { name: err.name, message: err.message }, requestId }, 'validation error');
+    return reply.code(400).send({
+      error: 'Validation error',
+      code: 'VALIDATION_FAILED',
+      details: issues ?? err.validation,
+      requestId,
+    });
   }
-  if (typeof error.code === "string" && (error.code.startsWith("23") || error.code.startsWith("22"))) {
-    return reply.code(400).send({ error: error.message ?? "Invalid request" });
+  if (typeof error.code === "string" && error.code.startsWith("23")) {
+    // 23xxx — Postgres integrity constraint violation (unique, FK, NOT NULL, check)
+    return reply.code(400).send({
+      error: error.message ?? "Invalid request",
+      code: 'DB_CONSTRAINT_VIOLATION',
+      requestId,
+    });
+  }
+  if (typeof error.code === "string" && error.code.startsWith("22")) {
+    // 22xxx — Postgres data exception (numeric overflow, invalid text repr, etc.)
+    return reply.code(400).send({
+      error: error.message ?? "Invalid request",
+      code: 'DB_DATA_EXCEPTION',
+      requestId,
+    });
   }
   if (error.code === "57014") {
-    return reply.code(504).send({ error: "Query timed out, please retry" });
+    // Postgres statement_timeout — pairs with the 25s connection-level limit
+    return reply.code(504).send({
+      error: "Query timed out, please retry",
+      code: 'DB_STATEMENT_TIMEOUT',
+      requestId,
+    });
   }
   const statusCode = error.statusCode ?? 500;
   const message = statusCode < 500 ? (error.message ?? 'Unknown error') : 'Internal server error';
-  reply.code(statusCode).send({ error: message });
+  const code = statusCode === 401 ? 'AUTH_REQUIRED'
+    : statusCode === 403 ? 'AUTH_FORBIDDEN'
+    : statusCode === 404 ? 'NOT_FOUND'
+    : statusCode === 409 ? 'CONFLICT'
+    : statusCode === 429 ? 'RATE_LIMITED'
+    : statusCode >= 500 ? 'INTERNAL_ERROR'
+    : 'BAD_REQUEST';
+  if (statusCode >= 500) {
+    app.log.error({ err: error, requestId }, 'unhandled server error');
+  }
+  reply.code(statusCode).send({ error: message, code, requestId });
 });
 
 // Fallback: catch ZodErrors that slip through setErrorHandler
 app.addHook('onError', async (request, reply, error) => {
   const err = error as unknown as Record<string, unknown>;
   if (Array.isArray(err.issues) || err.name === 'ZodError') {
-    void reply.code(400).send({ error: 'Validation error', details: err.issues });
+    void reply.code(400).send({
+      error: 'Validation error',
+      code: 'VALIDATION_FAILED',
+      details: err.issues,
+      requestId: request.id,
+    });
     return;
   }
 });

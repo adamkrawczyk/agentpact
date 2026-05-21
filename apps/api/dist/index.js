@@ -66,9 +66,46 @@ export const sql = postgres(DATABASE_URL, {
     idle_timeout: 30, // Release idle connections after 30s to avoid Supabase connection cap
     connect_timeout: 10, // Fail fast if pool can't get a connection in 10s
     max_lifetime: 1800, // Recycle connections every 30 min to avoid stale sockets
-    ...(process.env.NODE_ENV ? { acquire_timeout: 15000 } : {}), // WIS-985: fail fast on pool saturation (available in postgres.js runtime even if not in types)
+    // ── Pool-exhaustion defense (WIS-985, defense-in-depth) ──
+    // Layer 1 (Chef, 2026-05-10): acquire_timeout=15s — when the pool is full,
+    // new requests fail fast instead of queuing indefinitely. Pairs with the
+    // matching-engine refactor (batched inserts, HTTP-before-txn) that fixed
+    // the original leak source.
+    ...(process.env.NODE_ENV ? { acquire_timeout: 15000 } : {}), // available in postgres.js runtime even if not in types
+    // Layer 2 (Tori, 2026-05-14): Postgres-side statement_timeout slightly BELOW
+    // Fastify's 30s onRequest timeout so that any query the server is forced to
+    // abandon is also cancelled at the DB layer, returning the connection to
+    // the pool instead of leaking it. Catches future leak sources from any
+    // code path, not just the matching engine. idle_in_transaction safety net
+    // bounds stuck txns; application_name makes pg_stat_activity grep-able.
+    connection: {
+        statement_timeout: 25_000, // ms — must be < REQUEST_TIMEOUT_MS (30_000)
+        idle_in_transaction_session_timeout: 60_000, // ms — safety net for stuck txns
+        application_name: 'agentpact-api', // makes pg_stat_activity rows easy to grep
+    },
 });
-export const app = Fastify({ logger: true });
+export const app = Fastify({
+    logger: true,
+    // ── §5.1 (Tori, 2026-05-21): correlation IDs + structured error responses.
+    // Fastify already generates per-request reqIds; we just (a) honour an inbound
+    // X-Request-Id header so callers can stitch their own traces, and (b) echo
+    // the id back as a response header for client-side correlation.
+    genReqId: (req) => {
+        const inbound = (req.headers["x-request-id"] ?? req.headers["X-Request-Id"]);
+        if (inbound && typeof inbound === "string" && inbound.length <= 128) {
+            return inbound;
+        }
+        return randomUUID();
+    },
+    requestIdHeader: "x-request-id",
+    requestIdLogLabel: "requestId",
+});
+// Echo the request id back on every response so clients can include it in
+// support tickets / bug reports. Cheap, idempotent, never fails.
+app.addHook("onSend", async (request, reply, payload) => {
+    reply.header("x-request-id", request.id);
+    return payload;
+});
 const vaultSql = sql;
 const credentialEncryptionKey = getCredentialEncryptionKey();
 async function ensurePhysicalServiceSchema() {
@@ -150,10 +187,15 @@ async function ensureMppSchema() {
     await sql `ALTER TABLE deals ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'legacy-usdc'`;
     await sql `ALTER TABLE deals ADD COLUMN IF NOT EXISTS mpp_receipt JSONB DEFAULT NULL`;
     await sql `ALTER TABLE deals DROP CONSTRAINT IF EXISTS deals_status_check`;
+    // protocol_1605/A0 — 'release_pending_chain' added so the escrow safety patch
+    // in shared/deal-helpers.ts can deferred-mark a deal when the on-chain release
+    // call fails. Boot-time schema mutation will be removed entirely in Phase A
+    // step 3 (plan §3); for now it has to know about the new status so it doesn't
+    // overwrite migration 033's constraint.
     await sql `
     ALTER TABLE deals
     ADD CONSTRAINT deals_status_check
-    CHECK (status IN ('proposed', 'countered', 'accepted', 'active', 'funded', 'delivered', 'completed', 'cancelled', 'disputed'))
+    CHECK (status IN ('proposed', 'countered', 'accepted', 'active', 'funded', 'delivered', 'completed', 'cancelled', 'disputed', 'release_pending_chain'))
   `;
 }
 await ensurePhysicalServiceSchema();
@@ -856,9 +898,19 @@ async function completeDealMilestones(dealId, opts = {}) {
         // If on-chain mode is active and there are funded intents with real tx hashes, treat as on-chain funded
         const hasOnChainFundedIntent = intents.some((row) => row.tx_hash && !String(row.tx_hash).startsWith("sim_"));
         if (hasOnChainFundedIntent) {
+            // protocol_1605/A0 — see shared/deal-helpers.ts for the matching patch.
+            // Funds-loss guard: DO NOT mark DB released until on-chain release confirmed.
+            const allowOnChainRelease = (process.env.ALLOW_ONCHAIN_RELEASE ?? "true").toLowerCase() !== "false";
             // Try platform-initiated release via resolveDispute (pays seller)
             const releaseResults = [];
             for (const milestone of milestones) {
+                if (!allowOnChainRelease) {
+                    releaseResults.push({
+                        milestoneId: String(milestone.id),
+                        error: "on-chain release disabled by ALLOW_ONCHAIN_RELEASE=false (A0 kill switch)",
+                    });
+                    continue;
+                }
                 try {
                     const result = await resolveDisputeOnChain(String(milestone.id), false);
                     releaseResults.push({ milestoneId: String(milestone.id), txHash: result.txHash });
@@ -868,14 +920,40 @@ async function completeDealMilestones(dealId, opts = {}) {
                     releaseResults.push({ milestoneId: String(milestone.id), error: err.message });
                 }
             }
-            // Update DB to completed regardless (funds will be claimable after timeout if on-chain fails)
-            await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-            await sql `UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
-            await sql `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW() WHERE milestone_id = ANY(${milestones.map(m => String(m.id))}) AND status = 'funded'`;
             const allReleased = releaseResults.every(r => r.txHash);
+            if (allReleased) {
+                // Happy path — converge DB state.
+                await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
+                await sql `UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
+                await sql `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW() WHERE milestone_id = ANY(${milestones.map(m => String(m.id))}) AND status = 'funded'`;
+                return {
+                    mode,
+                    action: "released",
+                    onChainReleaseResults: releaseResults,
+                };
+            }
+            // Failure path — DB stays at release_pending_chain, payment_intents stay funded.
+            console.error(`[completeDealMilestones] On-chain release deferred for deal ${dealId}: ${releaseResults.filter(r => !r.txHash).length}/${releaseResults.length} milestones failed on-chain. DB state held at release_pending_chain.`);
+            await sql `UPDATE deals SET status = 'release_pending_chain', updated_at = NOW() WHERE id = ${dealId}`;
+            try {
+                await sql `
+          INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
+          VALUES (
+            NULL,
+            'chain.release_failed',
+            'deal',
+            ${dealId},
+            ${`chain-release-failed-${dealId}-${Date.now()}`},
+            ${JSON.stringify({ dealId, results: releaseResults, allowOnChainRelease })}::jsonb
+          )
+        `;
+            }
+            catch (auditErr) {
+                console.error(`[completeDealMilestones] audit_log insert failed for ${dealId}: ${auditErr?.message ?? String(auditErr)}`);
+            }
             return {
                 mode,
-                action: allReleased ? "released" : "buyer_sign_required",
+                action: "buyer_sign_required",
                 txData: releaseResults.filter(r => !r.txHash).map(r => {
                     const txData = generateAcceptTransaction(r.milestoneId);
                     return {
@@ -930,41 +1008,53 @@ app.addHook('onRequest', async (_request, reply) => {
     reply.raw.on('close', () => clearTimeout(timer));
 });
 // ── Connection pool health endpoint ──
-app.get('/health/pool', async () => {
+app.get('/health/pool', async (_request, reply) => {
     // postgres.js exposes pool stats via the tagged-template function object
     const pool = sql;
-    return {
+    // 3-second bounded canary so this endpoint can NEVER hang — the whole point
+    // of /health/pool is to give an external watchdog a deterministic signal,
+    // even when the pool is exhausted. Without this race, the endpoint inherits
+    // the 30s onRequest timeout and 503s along with everything else.
+    const canary = await Promise.race([
+        sql `SELECT 1 AS ok`.then(() => 'ok').catch((e) => `error: ${e.message}`),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 3_000)),
+    ]);
+    const payload = {
         maxConnections: 20,
         note: 'postgres.js does not expose live pool stats via public API; check Supabase dashboard for active connections',
         timestamp: new Date().toISOString(),
-        // Canary query to verify pool is not exhausted
-        canary: await sql `SELECT 1 AS ok`.then(() => 'ok').catch((e) => `error: ${e.message}`),
+        // Canary query to verify pool is not exhausted (bounded to 3s)
+        canary,
         ...(typeof pool.totalCount === 'number' ? {
             total: pool.totalCount,
             idle: pool.idleCount,
             waiting: pool.waitingCount,
         } : {}),
     };
+    if (canary !== 'ok') {
+        return reply.code(503).send(payload);
+    }
+    return payload;
 });
 await initAuth(app);
-registerHealthChecks(app, sql);
 registerWebhookRoutes(app, sql);
 registerConciergeRoutes(app, sql);
 app.addHook("preHandler", async (request, reply) => {
     const routePath = (request.url.split("?")[0] ?? request.url);
     const publicRoutes = new Set(["/health", "/api/health", "/api/config", "/api/auth/register", "/api/auth/verify", "/api/auth/nonce"]);
-    if (publicRoutes.has(routePath)) {
+    if (publicRoutes.has(routePath) || routePath.startsWith("/api/health")) {
         return;
     }
     // Public read-only routes: anything under /api/public/ or GET requests to browsable endpoints
     if (routePath.startsWith("/api/public/")) {
         return;
     }
-    const publicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/matches/recommendations", "/api/deals", "/api/agents", "/api/agents/online", "/api/leaderboard", "/api/skills", "/api/fulfillment/types", "/api/reputation"];
+    const exactPublicGetRoutes = new Set(["/api/matches/recommendations", "/api/agents/online", "/api/fulfillment/types"]);
+    const prefixPublicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills", "/api/reputation"];
     const isConsultationResponsesRoute = /^\/api\/deals\/[^/]+\/consultation-responses$/.test(routePath);
     if (request.method === "GET" &&
         !isConsultationResponsesRoute &&
-        publicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/"))) {
+        (exactPublicGetRoutes.has(routePath) || prefixPublicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/")))) {
         return;
     }
     // Cron/admin endpoints use their own auth (X-Admin-Key) or are intentionally public
@@ -1015,11 +1105,13 @@ app.addHook("preHandler", async (request, reply) => {
     };
     const _recomputeMatches = createRecomputeMatchesQueue(() => recomputeMatchesFn(app, _sql), {
         onError: (err) => app.log.error({ err }, "scheduled recomputeMatches failed"),
+        onEvent: (event, details) => app.log.info({ event, ...details }, "matching queue event"),
     });
+    registerHealthChecks(app, sql, { matchingQueueStatus: _recomputeMatches.status });
     await registerAgentRoutes(app, _sql, deps);
     await registerOffersRoutes(app, _sql, deps, _recomputeMatches.scheduleRecompute);
     await registerNeedsRoutes(app, _sql, deps, _recomputeMatches.scheduleRecompute);
-    await registerMatchingRoutes(app, _sql, deps, _recomputeMatches.recomputeNow);
+    await registerMatchingRoutes(app, _sql, deps, _recomputeMatches);
     await registerDealsRoutes(app, _sql, deps);
     await registerFulfillmentRoutes(app, _sql, deps);
     await registerDisputesRoutes(app, _sql, deps, _releaseMilestonePayment);
@@ -1028,31 +1120,75 @@ app.addHook("preHandler", async (request, reply) => {
     await app.register(adminRoutes);
     await app.register(feedbackRoutes);
 }
-app.setErrorHandler((error, _request, reply) => {
+// ── §5.1 (Tori, 2026-05-21): structured error responses. Every error response
+// carries { error, code, requestId } so agent-side log analysis / retry logic
+// can branch on a stable machine-readable code instead of regex-matching the
+// message string. Codes intentionally namespaced (VALIDATION_*, DB_*, CHAIN_*,
+// HTTP_*) so we can grow the taxonomy without breaking clients.
+app.setErrorHandler((error, request, reply) => {
     const err = error;
+    const requestId = request.id;
     // ZodError detection: duck-typing (instanceof fails with ESM dual packages)
     const issues = err.issues;
     const isZod = Array.isArray(issues) && issues.length > 0 && typeof issues[0]?.path !== 'undefined'
         || err.name === 'ZodError' || err.validation;
     if (isZod) {
-        app.log.warn({ err: { name: err.name, message: err.message } }, 'validation error');
-        return reply.code(400).send({ error: 'Validation error', details: issues ?? err.validation });
+        app.log.warn({ err: { name: err.name, message: err.message }, requestId }, 'validation error');
+        return reply.code(400).send({
+            error: 'Validation error',
+            code: 'VALIDATION_FAILED',
+            details: issues ?? err.validation,
+            requestId,
+        });
     }
-    if (typeof error.code === "string" && (error.code.startsWith("23") || error.code.startsWith("22"))) {
-        return reply.code(400).send({ error: error.message ?? "Invalid request" });
+    if (typeof error.code === "string" && error.code.startsWith("23")) {
+        // 23xxx — Postgres integrity constraint violation (unique, FK, NOT NULL, check)
+        return reply.code(400).send({
+            error: error.message ?? "Invalid request",
+            code: 'DB_CONSTRAINT_VIOLATION',
+            requestId,
+        });
+    }
+    if (typeof error.code === "string" && error.code.startsWith("22")) {
+        // 22xxx — Postgres data exception (numeric overflow, invalid text repr, etc.)
+        return reply.code(400).send({
+            error: error.message ?? "Invalid request",
+            code: 'DB_DATA_EXCEPTION',
+            requestId,
+        });
     }
     if (error.code === "57014") {
-        return reply.code(504).send({ error: "Query timed out, please retry" });
+        // Postgres statement_timeout — pairs with the 25s connection-level limit
+        return reply.code(504).send({
+            error: "Query timed out, please retry",
+            code: 'DB_STATEMENT_TIMEOUT',
+            requestId,
+        });
     }
     const statusCode = error.statusCode ?? 500;
     const message = statusCode < 500 ? (error.message ?? 'Unknown error') : 'Internal server error';
-    reply.code(statusCode).send({ error: message });
+    const code = statusCode === 401 ? 'AUTH_REQUIRED'
+        : statusCode === 403 ? 'AUTH_FORBIDDEN'
+            : statusCode === 404 ? 'NOT_FOUND'
+                : statusCode === 409 ? 'CONFLICT'
+                    : statusCode === 429 ? 'RATE_LIMITED'
+                        : statusCode >= 500 ? 'INTERNAL_ERROR'
+                            : 'BAD_REQUEST';
+    if (statusCode >= 500) {
+        app.log.error({ err: error, requestId }, 'unhandled server error');
+    }
+    reply.code(statusCode).send({ error: message, code, requestId });
 });
 // Fallback: catch ZodErrors that slip through setErrorHandler
 app.addHook('onError', async (request, reply, error) => {
     const err = error;
     if (Array.isArray(err.issues) || err.name === 'ZodError') {
-        void reply.code(400).send({ error: 'Validation error', details: err.issues });
+        void reply.code(400).send({
+            error: 'Validation error',
+            code: 'VALIDATION_FAILED',
+            details: err.issues,
+            requestId: request.id,
+        });
         return;
     }
 });

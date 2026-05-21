@@ -373,10 +373,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       WHERE d.id = ${id}
     `;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
-    if (deal.status === 'active') {
-      return { ok: true, note: "Deal already accepted" };
-    }
-    if (deal.status !== 'proposed' && deal.status !== 'countered') {
+    if (!["proposed", "countered"].includes(String(deal.status))) {
       return reply.code(409).send({ error: `Cannot accept deal in status '${deal.status}'` });
     }
     if (body.actorAgentId !== deal.seller_agent_id) {
@@ -390,7 +387,9 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
           [id]
         );
         if (!updated) {
-          throw new Error(`Deal ${id} status changed concurrently — accept aborted`);
+          const conflictError = new Error(`Deal ${id} status changed concurrently — accept aborted`);
+          conflictError.name = "DealAcceptConflictError";
+          throw conflictError;
         }
         await txn.unsafe("UPDATE milestones SET status = 'in_progress' WHERE deal_id = $1 AND status = 'pending'", [id]);
         await txn.unsafe(
@@ -411,6 +410,9 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       });
     } catch (err) {
       app.log.error({ err, dealId: id }, "deal.accept transaction failed — deal status NOT changed");
+      if (err instanceof Error && err.name === "DealAcceptConflictError") {
+        return reply.code(409).send({ error: "Deal status changed concurrently; retry with the current deal state" });
+      }
       return reply.code(500).send({ error: "Failed to accept deal — please retry" });
     }
 
@@ -421,7 +423,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       sellerActionRequired: "Provide fulfillment details via /api/deals/:id/fulfillment",
     });
 
-    return { ok: true };
+    const [updatedDeal] = await sql`SELECT * FROM deals WHERE id = ${id}`;
+    return { ok: true, ...updatedDeal };
   });
 
   app.post("/api/deals/:id/cancel", async (request, reply) => {
