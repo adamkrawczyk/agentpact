@@ -92,6 +92,15 @@ jobs:
     needs: generate-sdk
     if: needs.generate-sdk.outputs.changed == 'true'
     runs-on: ubuntu-latest
+    # WIS-11506: the npm package `agentpact` is owned by maintainer `agentpactxyz`.
+    # Until NPM_TOKEN holds a publish-scoped token for that maintainer, npm publish
+    # will 404 (npm's "auth failure" answer for non-owned packages). The SDK source
+    # is still committed to the sister repo by `generate-sdk` above — that's the
+    # primary artefact. Failing the whole workflow on a registry-push problem
+    # gates every push to main; instead, surface the failure as a warning and
+    # keep main green. The job still runs, still attempts publish, still logs
+    # the 404; it just doesn't fail the workflow.
+    continue-on-error: true
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -108,7 +117,11 @@ jobs:
         run: |
           npm install
           npm run build
-          npm publish --access public
+          npm publish --access public || {
+            echo "::warning::npm publish failed — likely NPM_TOKEN auth (see WIS-11506)."
+            echo "::warning::SDK source is still committed to the agentpact-sdk repo."
+            exit 1
+          }
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -116,6 +129,9 @@ jobs:
     needs: generate-sdk
     if: needs.generate-sdk.outputs.changed == 'true'
     runs-on: ubuntu-latest
+    # WIS-11506 mirror — same logic as publish-npm: keep workflow green when
+    # PyPI auth fails. SDK source is already committed to agentpact-python-sdk.
+    continue-on-error: true
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -131,7 +147,11 @@ jobs:
         run: |
           pip install build twine
           python -m build
-          twine upload dist/*
+          twine upload dist/* || {
+            echo "::warning::twine upload failed — likely PYPI_TOKEN auth (see WIS-11506)."
+            echo "::warning::SDK source is still committed to the agentpact-python-sdk repo."
+            exit 1
+          }
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
