@@ -102,6 +102,7 @@ function nav(): string {
     `<span class="nav-chip">[<a href="/whitepaper">whitepaper</a>]</span>`,
     `<span class="nav-chip">[<a href="/mcp-setup">mcp-setup</a>]</span>`,
     `<span class="nav-chip">[<a href="/api-docs">api-docs</a>]</span>`,
+    `<span class="nav-chip">[<a href="/audit">audit</a>]</span>`,
   ].join("");
 }
 
@@ -1045,10 +1046,133 @@ app.get("/robots.txt", async (_req, reply) => {
 });
 
 app.get("/sitemap.xml", async (_req, reply) => {
-  const pages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/api-docs"];
+  const pages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/api-docs", "/audit"];
   const urls = pages.map(p => `  <url><loc>https://agentpact.xyz${p}</loc></url>`).join("\n");
   reply.header("content-type", "application/xml");
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>`;
+});
+
+// ── /audit landing page ────────────────────────────────────────────────────
+app.get("/audit", async (_req, reply) => {
+  const stripeLink = process.env.VITE_STRIPE_AUDIT_PAYMENT_LINK ?? process.env.STRIPE_AUDIT_PAYMENT_LINK ?? "";
+
+  const ctaHtml = stripeLink
+    ? `<a href="${escapeHtml(stripeLink)}" class="cta btn">Get Your Audit — $5</a>`
+    : `<button disabled class="btn" style="opacity:0.5;cursor:not-allowed;" data-stripe-link="placeholder">Coming soon</button>`;
+
+  const auditStyles = `
+    .audit-hero { text-align: center; padding: 64px 16px 48px; border-bottom: 1px solid var(--line); }
+    .audit-h1 { font-size: clamp(22px, 5vw, 40px); font-weight: 900; color: var(--fg); margin: 0 0 16px; letter-spacing: -0.5px; }
+    .audit-subhead { font-size: clamp(13px, 2vw, 16px); color: var(--dim); max-width: 600px; margin: 0 auto 36px; line-height: 1.6; }
+    .cta.btn { font-size: 15px; padding: 14px 32px; border-width: 2px; font-weight: 700; letter-spacing: 0.5px; }
+    .audit-section { padding: 40px 16px; border-bottom: 1px solid var(--line); max-width: 860px; margin: 0 auto; }
+    .audit-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 2px; color: var(--dim); margin: 0 0 20px; }
+    .audit-section h2 { font-size: clamp(16px, 3vw, 22px); color: var(--fg); margin: 0 0 16px; }
+    .audit-list { list-style: none; padding: 0; margin: 0; }
+    .audit-list li { padding: 8px 0; border-bottom: 1px solid var(--line); color: var(--dim); font-size: 14px; }
+    .audit-list li:last-child { border-bottom: none; }
+    .audit-list li::before { content: "→ "; color: var(--accent); }
+    .audit-footer { padding: 32px 16px; text-align: center; color: var(--dim); font-size: 12px; line-height: 1.8; border-top: 1px solid var(--line); max-width: 860px; margin: 0 auto; }
+    .audit-footer a { color: var(--dim); text-decoration: underline; }
+    .audit-footer a:hover { color: var(--fg); }
+  `;
+
+  const body = `
+<style>${auditStyles}</style>
+
+<!-- HERO -->
+<section class="audit-hero">
+  <h1 class="audit-h1">Smart-Contract Audit. $5. 60 minutes.</h1>
+  <p class="audit-subhead">Drop a Base mainnet contract address. Get a Slither + Claude audit in your inbox in 60 minutes. We take 10%.</p>
+  <div>${ctaHtml}</div>
+</section>
+
+<!-- WHAT YOU GET -->
+<section class="audit-section">
+  <div class="audit-section-title">01 / What you get</div>
+  <h2>A real audit, automated end-to-end.</h2>
+  <ul class="audit-list">
+    <li>Deterministic Slither static analysis — no cherry-picked results</li>
+    <li>Claude-summarized findings with context and remediation hints</li>
+    <li>PASS / CONDITIONAL / FAIL verdict based on severity counts</li>
+    <li>Delivered to your email in under 60 minutes</li>
+  </ul>
+</section>
+
+<!-- WHY US -->
+<section class="audit-section">
+  <div class="audit-section-title">02 / Why us</div>
+  <h2>No humans in the loop. No surprises.</h2>
+  <ul class="audit-list">
+    <li>Fully automated — no human reviewer delays or upsells</li>
+    <li>On-chain escrow — funds held in a verified Base contract until delivery</li>
+    <li>Transparent 10% platform take — you see exactly what we earn</li>
+  </ul>
+</section>
+
+<!-- THE DEAL -->
+<section class="audit-section">
+  <div class="audit-section-title">03 / The deal</div>
+  <h2>$5 total. We keep $0.50. Fair.</h2>
+  <ul class="audit-list">
+    <li>You pay $5 via Stripe</li>
+    <li>We run Slither + Claude on your contract</li>
+    <li>You get the full report in your inbox</li>
+    <li>We keep $0.50 (10%). No hidden fees.</li>
+  </ul>
+</section>
+
+<!-- FOOTER -->
+<footer class="audit-footer">
+  <p>Escrow contract: <a href="https://basescan.org/address/0x588168712bF758aFD747bF46471afa53f9599A64#code" target="_blank" rel="noopener">0x588168712bF758aFD747bF46471afa53f9599A64</a> on BaseScan</p>
+  <p>If your audit doesn't arrive in 60 min, mail <a href="mailto:adam@agentpact.xyz">adam@agentpact.xyz</a> — full refund, no questions.</p>
+</footer>
+`;
+
+  return page(
+    "Smart-Contract Audit — $5 | AgentPact",
+    body,
+    {
+      description: "Get a Slither + Claude smart-contract audit for $5, delivered to your inbox in 60 minutes. Base mainnet. PASS/CONDITIONAL/FAIL verdict.",
+      canonical: "https://agentpact.xyz/audit",
+    }
+  );
+});
+
+// ── /audit-thank-you ────────────────────────────────────────────────────────
+app.get("/audit-thank-you", async () => {
+  const thankYouStyles = `
+    .ty-hero { text-align: center; padding: 80px 16px 48px; border-bottom: 1px solid var(--line); }
+    .ty-emoji { font-size: 56px; margin-bottom: 20px; }
+    .ty-h1 { font-size: clamp(20px, 4vw, 32px); font-weight: 900; color: var(--fg); margin: 0 0 16px; }
+    .ty-sub { font-size: 14px; color: var(--dim); max-width: 480px; margin: 0 auto 32px; line-height: 1.6; }
+    .ty-footer { padding: 32px 16px; text-align: center; color: var(--dim); font-size: 12px; line-height: 1.8; max-width: 860px; margin: 0 auto; border-top: 1px solid var(--line); }
+    .ty-footer a { color: var(--dim); text-decoration: underline; }
+    .ty-footer a:hover { color: var(--fg); }
+  `;
+
+  const body = `
+<style>${thankYouStyles}</style>
+<section class="ty-hero">
+  <div class="ty-emoji">🎉</div>
+  <h1 class="ty-h1">Order received. Your audit will arrive within 60 minutes.</h1>
+  <p class="ty-sub">Check your inbox — we're running Slither + Claude on your contract now. You'll get a PASS, CONDITIONAL, or FAIL verdict with full findings.</p>
+  <a href="/audit" class="btn btn-secondary">← Back to Audit</a>
+</section>
+<footer class="ty-footer">
+  <p>Escrow contract: <a href="https://basescan.org/address/0x588168712bF758aFD747bF46471afa53f9599A64#code" target="_blank" rel="noopener">0x588168712bF758aFD747bF46471afa53f9599A64</a> on BaseScan</p>
+  <p>If your audit doesn't arrive in 60 min, mail <a href="mailto:adam@agentpact.xyz">adam@agentpact.xyz</a> — full refund, no questions.</p>
+</footer>
+`;
+
+  return page(
+    "Order Received — AgentPact Audit",
+    body,
+    {
+      description: "Your smart-contract audit order has been received. Expect your report in under 60 minutes.",
+      canonical: "https://agentpact.xyz/audit-thank-you",
+    }
+  );
 });
 
 app.listen({ port: PORT, host: HOST }).then(() => {

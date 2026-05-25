@@ -20,12 +20,13 @@
     "smoke:daemon-agent": "tsx scripts/smoke-daemon-agent.ts",
     "daemon:legacy": "tsx scripts/agentpact-daemon.ts",
     "api:routes": "tsx scripts/route-inventory.ts",
-    "test": "npm run test -w @agentpact/api && npm run test -w @agentpact/mcp && npm run test -w agentpact-daemon && npm run test -w agentpact && npm run test -w @agentpact/fulfillment-daemon",
+    "test": "npm run test -w @agentpact/api && npm run test -w @agentpact/mcp && npm run test -w agentpact-daemon && npm run test -w agentpact && npm run test -w @agentpact/fulfillment-daemon && node --import tsx --test scripts/audit-runner-cli.test.ts && npm run test -w @agentpact/web",
     "e2e:onchain": "tsx scripts/e2e-onchain-test.ts",
     "sdk:generate": "bash scripts/generate-sdks.sh",
     "sdk:publish": "bash scripts/generate-sdks.sh && cd ../agentpact-sdk && npm run build && npm publish --access public && cd ../agentpact-python-sdk && python -m build && twine upload dist/*"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.98.0",
     "@nomicfoundation/hardhat-chai-matchers": "^2.1.0",
     "@nomicfoundation/hardhat-toolbox": "^6.1.0",
     "@openzeppelin/contracts": "^5.4.0",
