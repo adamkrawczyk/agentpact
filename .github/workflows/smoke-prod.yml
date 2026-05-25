@@ -1,0 +1,34 @@
+name: smoke-prod
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # 06:00 UTC daily — runs after the consolidated agentpact-health cron (07:00 Warsaw)
+    # and writes its own GH Actions artefact so the 7-day green streak is auditable from CI.
+    - cron: '0 6 * * *'
+
+jobs:
+  smoke:
+    name: smoke-prod (api.agentpact.xyz)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Self-test smoke-prod.sh
+        # Verifies the smoke probe itself is healthy before pointing it at prod.
+        run: bash scripts/smoke-prod.test.sh
+
+      - name: Run smoke-prod against production
+        run: bash scripts/smoke-prod.sh
+
+      - name: Emit JSON artefact
+        if: always()
+        run: bash scripts/smoke-prod.sh --json > smoke-prod-result.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-prod-${{ github.run_id }}
+          path: smoke-prod-result.json
+          retention-days: 30
