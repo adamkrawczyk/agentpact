@@ -7,22 +7,38 @@ set -euo pipefail
 #   SDK_PYTHON_DIR — path to Python SDK repo     (default: ../agentpact-python-sdk)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-API_SRC="$SCRIPT_DIR/../apps/api/src/index.ts"
+API_ROOT="$SCRIPT_DIR/../apps/api/src"
 
 SDK_TS="${SDK_TS_DIR:-$SCRIPT_DIR/../../agentpact-sdk}"
 SDK_PY="${SDK_PYTHON_DIR:-$SCRIPT_DIR/../../agentpact-python-sdk}"
 
-if [ ! -f "$API_SRC" ]; then
-  echo "ERROR: API source not found at $API_SRC" >&2
+if [ ! -d "$API_ROOT" ]; then
+  echo "ERROR: API source root not found at $API_ROOT" >&2
   exit 1
 fi
 
 # ── Extract routes ────────────────────────────────────────────────────
+# History (2026-03 WIS-82): routes were split out of index.ts into routes/*.ts
+# modules. The old script only grepped index.ts and silently produced 0 routes,
+# which broke the Publish SDKs CI workflow on every push to main from then on
+# (run 26394464226 etc.). We now scan every .ts file under apps/api/src/ —
+# index.ts still holds a few legacy routes, health.ts has /health/pool, and
+# routes/*.ts holds the bulk. Both " and ' quoted route paths are accepted.
+#
 # Produces lines like: POST /api/agents
-ROUTES=$(grep -oP 'app\.(get|post|put|patch|delete)\("([^"]+)"' "$API_SRC" \
-  | sed 's/app\.\([a-z]*\)("\(.*\)"/\U\1\E \2/')
+ROUTES=$(grep -rhoE "app\.(get|post|put|patch|delete)\([\"']([^\"']+)[\"']" "$API_ROOT" \
+  --include='*.ts' \
+  | sed -E "s/app\\.([a-z]+)\\([\"']([^\"']+)[\"']/\\U\\1\\E \\2/" \
+  | sort -u)
 
-echo "Found $(echo "$ROUTES" | wc -l) routes"
+ROUTE_COUNT=$(echo "$ROUTES" | grep -c . || true)
+echo "Found $ROUTE_COUNT routes"
+
+if [ "$ROUTE_COUNT" -lt 1 ]; then
+  echo "ERROR: route discovery returned 0 entries — refusing to publish empty SDKs." >&2
+  echo "       Check that apps/api/src/**/*.ts still uses the app.METHOD(\"path\", …) shape." >&2
+  exit 1
+fi
 
 # ── Bump patch version in TS SDK ──────────────────────────────────────
 if [ -f "$SDK_TS/package.json" ]; then
