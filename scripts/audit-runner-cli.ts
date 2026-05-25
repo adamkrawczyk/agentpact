@@ -303,13 +303,13 @@ export async function runAudit(opts: {
   if (dryRun) {
     report_md = dryRunReport(severity_counts, verdict, contractAddress);
   } else {
+    // LLM routing:
+    //   - If OPENROUTER_API_KEY is set, route via OpenAI-compatible
+    //     /api/v1/chat/completions (so the runner works without a direct
+    //     Anthropic console key — useful when only OpenRouter is provisioned).
+    //   - Otherwise, fall back to the native Anthropic SDK.
+    const openrouterKey = process.env.OPENROUTER_API_KEY;
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
-    if (!anthropicKey) {
-      die("ANTHROPIC_API_KEY env var is required (not in --dry-run mode)");
-    }
-    const { default: Anthropic } = await import("@anthropic-ai/sdk");
-    const client = new Anthropic({ apiKey: anthropicKey });
-    const model = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
 
     const slitherJsonStr = JSON.stringify({ results: { detectors: slitherResults } });
     const truncated =
@@ -328,18 +328,50 @@ export async function runAudit(opts: {
       `Severity counts: high=${severity_counts.high} medium=${severity_counts.medium} low=${severity_counts.low} info=${severity_counts.info}\n\n` +
       `Slither JSON output:\n\`\`\`json\n${truncated}\n\`\`\``;
 
-    const message = await client.messages.create({
-      model,
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userMessage }],
-    });
+    if (openrouterKey) {
+      const model = process.env.OPENROUTER_MODEL ?? "anthropic/claude-sonnet-4.5";
+      const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${openrouterKey}`,
+          "content-type": "application/json",
+          "x-title": "agentpact-audit-runner",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 4096,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userMessage },
+          ],
+        }),
+      });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        die(`OpenRouter ${resp.status}: ${errText.slice(0, 200)}`);
+      }
+      const data = (await resp.json()) as { choices: Array<{ message: { content: string } }> };
+      report_md = data.choices?.[0]?.message?.content || "No report generated.";
+    } else if (anthropicKey) {
+      const { default: Anthropic } = await import("@anthropic-ai/sdk");
+      const client = new Anthropic({ apiKey: anthropicKey });
+      const model = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
 
-    report_md =
-      message.content
-        .filter((b): b is { type: "text"; text: string } => b.type === "text")
-        .map((b) => b.text)
-        .join("") || "No report generated.";
+      const message = await client.messages.create({
+        model,
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userMessage }],
+      });
+
+      report_md =
+        message.content
+          .filter((b): b is { type: "text"; text: string } => b.type === "text")
+          .map((b) => b.text)
+          .join("") || "No report generated.";
+    } else {
+      die("Neither OPENROUTER_API_KEY nor ANTHROPIC_API_KEY is set (required outside --dry-run mode)");
+    }
   }
 
   return {
