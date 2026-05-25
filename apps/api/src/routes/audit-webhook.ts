@@ -11,6 +11,7 @@
 
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
+import type Stripe from "stripe";
 import { constructWebhookEvent } from "../stripe.js";
 
 export async function registerAuditWebhookRoutes(
@@ -31,7 +32,7 @@ export async function registerAuditWebhookRoutes(
         (request as unknown as { rawBody?: Buffer | string }).rawBody ??
         JSON.stringify(request.body);
 
-      let event: { type: string; data: { object: Record<string, unknown> } };
+      let event: Stripe.Event;
       try {
         const secret = process.env.STRIPE_WEBHOOK_SECRET_AUDIT;
         event = constructWebhookEvent(rawBody, sig, secret);
@@ -47,7 +48,7 @@ export async function registerAuditWebhookRoutes(
       }
 
       // ── 3. Extract fields from session ────────────────────────────────────
-      const session = event.data.object;
+      const session = event.data.object as unknown as Record<string, unknown>;
 
       const stripe_session_id = session.id as string;
       const stripe_payment_intent_id =

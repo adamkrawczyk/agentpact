@@ -16,7 +16,7 @@ function getStripe(): Stripe {
   if (_stripe) return _stripe;
   const key = process.env.STRIPE_SECRET_KEY;
   if (!key) throw new Error("Stripe is not configured (STRIPE_SECRET_KEY missing)");
-  _stripe = new Stripe(key, { apiVersion: "2025-05-28.basil" });
+  _stripe = new Stripe(key, { apiVersion: "2023-10-16" });
   return _stripe;
 }
 

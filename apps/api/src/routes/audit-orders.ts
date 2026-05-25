@@ -55,7 +55,7 @@ function getStripe(): Stripe {
   if (_stripe) return _stripe;
   const key = process.env.STRIPE_SECRET_KEY;
   if (!key) throw new Error("STRIPE_SECRET_KEY not configured");
-  _stripe = new Stripe(key, { apiVersion: "2025-05-28.basil" });
+  _stripe = new Stripe(key, { apiVersion: "2023-10-16" });
   return _stripe;
 }
 
@@ -153,59 +153,60 @@ export async function registerAuditOrdersRoutes(
     let finalOrder: Record<string, unknown> | null = null;
     let fee_credited_minor = 0;
 
-    try {
-      await sql.begin(async (tx) => {
-        // SELECT FOR UPDATE
-        const [order] = await tx`
-          SELECT * FROM audit_orders WHERE id = ${id} FOR UPDATE
-        `;
-        if (!order) {
-          throw Object.assign(new Error("Not found"), { statusCode: 404 });
-        }
-        const currentStatus = order.status as string;
-        if (currentStatus === "completed" || currentStatus === "refunded") {
-          throw Object.assign(
-            new Error(`Order already ${currentStatus}`),
-            { statusCode: 409 },
-          );
-        }
-
-        // Determine new status
-        const newStatus =
-          failure_reason && verdict === "FAIL" ? "failed" : "completed";
-
-        const [updatedOrder] = await tx`
-          UPDATE audit_orders SET
-            status = ${newStatus},
-            report_md = ${report_md},
-            report_severity_counts = ${JSON.stringify(severity_counts)}::jsonb,
-            report_verdict = ${verdict},
-            failure_reason = ${failure_reason ?? null},
-            completed_at = NOW(),
-            updated_at = NOW()
-          WHERE id = ${id}
-          RETURNING *
-        `;
-
-        finalOrder = updatedOrder as Record<string, unknown>;
-
-        // Insert platform fee ledger if completed
-        if (newStatus === "completed") {
-          const amountCents = Number(order.amount_cents);
-          const feeCents = Math.floor(amountCents * 0.10);
-          fee_credited_minor = feeCents;
-
-          await tx`
-            INSERT INTO platform_fee_ledger
-              (audit_order_id, amount_minor, currency, fee_pct_at_close, source, stripe_payment_intent_id)
-            VALUES
-              (${id}, ${feeCents}, ${order.currency as string}, 10.00, 'stripe',
-               ${order.stripe_payment_intent_id as string | null})
-            ON CONFLICT DO NOTHING
+      try {
+        await sql.begin(async (tx) => {
+          // SELECT FOR UPDATE
+          const orderRows = await tx<Array<Record<string, unknown>>>`
+            SELECT * FROM audit_orders WHERE id = ${id} FOR UPDATE
           `;
-        }
-      });
-    } catch (err: unknown) {
+          const order = orderRows[0];
+          if (!order) {
+            throw Object.assign(new Error("Not found"), { statusCode: 404 });
+          }
+          const currentStatus = order.status as string;
+          if (currentStatus === "completed" || currentStatus === "refunded") {
+            throw Object.assign(
+              new Error(`Order already ${currentStatus}`),
+              { statusCode: 409 },
+            );
+          }
+
+          // Determine new status
+          const newStatus =
+            failure_reason && verdict === "FAIL" ? "failed" : "completed";
+
+          const updatedRows = await tx<Array<Record<string, unknown>>>`
+            UPDATE audit_orders SET
+              status = ${newStatus},
+              report_md = ${report_md},
+              report_severity_counts = ${JSON.stringify(severity_counts)}::jsonb,
+              report_verdict = ${verdict},
+              failure_reason = ${failure_reason ?? null},
+              completed_at = NOW(),
+              updated_at = NOW()
+            WHERE id = ${id}
+            RETURNING *
+          `;
+
+          finalOrder = updatedRows[0] ?? null;
+
+          // Insert platform fee ledger if completed
+          if (newStatus === "completed") {
+            const amountCents = Number(order.amount_cents);
+            const feeCents = Math.floor(amountCents * 0.10);
+            fee_credited_minor = feeCents;
+
+            await tx`
+              INSERT INTO platform_fee_ledger
+                (audit_order_id, amount_minor, currency, fee_pct_at_close, source, stripe_payment_intent_id)
+              VALUES
+                (${id}, ${feeCents}, ${order.currency as string}, 10.00, 'stripe',
+                 ${order.stripe_payment_intent_id as string | null})
+              ON CONFLICT DO NOTHING
+            `;
+          }
+        });
+      } catch (err: unknown) {
       const e = err as { statusCode?: number; message?: string };
       if (e.statusCode === 404) return reply.code(404).send({ error: "Order not found" });
       if (e.statusCode === 409) return reply.code(409).send({ error: e.message });
@@ -217,9 +218,12 @@ export async function registerAuditOrdersRoutes(
       return reply.code(500).send({ error: "Unexpected: no order after transaction" });
     }
 
+    // Cast to ensure TS doesn't narrow to never after closure assignment
+    const completedOrder = finalOrder as Record<string, unknown>;
+
     // Send email (non-blocking for response, but captured for email_sent_at)
-    const contractAddress = finalOrder.contract_address as string;
-    const buyerEmail = finalOrder.buyer_email as string;
+    const contractAddress = completedOrder.contract_address as string;
+    const buyerEmail = completedOrder.buyer_email as string;
     const emailSubject = `Your AgentPact audit for ${contractAddress.slice(0, 10)}...`;
     const emailBody = buildAuditEmailBody(contractAddress, report_md);
 
@@ -237,7 +241,7 @@ export async function registerAuditOrdersRoutes(
     }
 
     // Discord ping (non-fatal)
-    const amountCents = Number(finalOrder.amount_cents);
+    const amountCents = Number(completedOrder.amount_cents);
     discordPing(
       `✅ Order ${id} delivered — $${(amountCents / 100).toFixed(2)} → fee $${(amountCents * 0.10 / 100).toFixed(2)} (${verdict})`,
     );
@@ -245,7 +249,7 @@ export async function registerAuditOrdersRoutes(
     return reply.code(200).send({
       ok: true,
       order_id: id,
-      status: finalOrder.status,
+      status: completedOrder.status,
       fee_credited_minor,
       email_sent_at: emailSentAt,
     });
