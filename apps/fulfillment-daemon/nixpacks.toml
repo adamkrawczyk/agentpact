@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ['nodejs_20', 'python311', 'python311Packages.pip', 'solc']
+
+[phases.install]
+cmds = ['cd ../.. && npm install', 'pip3 install --break-system-packages slither-analyzer']
+
+[phases.build]
+cmds = ['cd ../.. && npm run build -w @agentpact/fulfillment-daemon']
+
+[start]
+cmd = 'cd ../.. && node apps/fulfillment-daemon/dist/index.js'
