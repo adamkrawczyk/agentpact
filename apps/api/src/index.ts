@@ -43,6 +43,7 @@ import { registerRoutes as registerReputationRoutes } from './routes/reputation.
 import { countStaleOffersWithoutDeals } from './routes/offers.js';
 import adminRoutes from './routes/admin.js';
 import feedbackRoutes from './routes/feedback.js';
+import configRoutes from './routes/config.js';
 import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/deal-helpers.js';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
@@ -1332,6 +1333,7 @@ app.addHook("preHandler", async (request, reply) => {
   await registerReputationRoutes(app, _sql, deps);
   await app.register(adminRoutes);
   await app.register(feedbackRoutes);
+  await app.register(configRoutes);
 }
 
 // ── §5.1 (Tori, 2026-05-21): structured error responses. Every error response
