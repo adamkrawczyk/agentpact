@@ -34,5 +34,31 @@ module.exports = {
       accounts: process.env.PLATFORM_PRIVATE_KEY ? [process.env.PLATFORM_PRIVATE_KEY] : [],
       chainId: 84532
     }
+  },
+  // Etherscan v2 unified API config for hardhat-verify v2. The single
+  // Etherscan-account API key (BaseScan-issued ones are Etherscan-account keys)
+  // works across all chains via the v2 endpoint. Token sourced from
+  // BASESCAN_API_KEY env (read from BW item `basescan-api-key(etherscan)`).
+  // See WIS-11504.
+  etherscan: {
+    apiKey: process.env.BASESCAN_API_KEY || "",
+    customChains: [
+      {
+        network: "base",
+        chainId: 8453,
+        urls: {
+          apiURL: "https://api.etherscan.io/v2/api?chainid=8453",
+          browserURL: "https://basescan.org"
+        }
+      },
+      {
+        network: "base-sepolia",
+        chainId: 84532,
+        urls: {
+          apiURL: "https://api.etherscan.io/v2/api?chainid=84532",
+          browserURL: "https://sepolia.basescan.org"
+        }
+      }
+    ]
   }
 };
