@@ -1,0 +1,88 @@
+name: slither
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'contracts/**'
+      - 'hardhat.config.cjs'
+      - '.github/workflows/slither.yml'
+  workflow_dispatch: {}
+  schedule:
+    # Daily 07:00 UTC — catches any contract drift independent of PR cadence
+    - cron: '0 7 * * *'
+
+jobs:
+  slither:
+    name: slither (0 high/medium gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write     # SARIF upload to GH security tab
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Slither + solc 0.8.20
+        run: |
+          pip install slither-analyzer==0.11.5
+          solc-select install 0.8.20
+          solc-select use 0.8.20
+
+      - name: Run Slither on AgentPactEscrow
+        # Hardhat-driven compilation (Slither shells out to `npx hardhat compile`).
+        # --filter-paths drops node_modules + test mocks so we only gate on
+        # production contract findings. SARIF goes to the Security tab.
+        run: |
+          slither . \
+            --filter-paths "node_modules|test|MockUSDC" \
+            --json slither-results.json \
+            --sarif slither-results.sarif \
+            --no-fail-pedantic \
+            || true   # never fail this step; gate is the next one
+          echo "--- Slither severity counts ---"
+          python3 -c "
+          import json, sys
+          with open('slither-results.json') as f:
+              data = json.load(f)
+          counts = {}
+          for d in data.get('results', {}).get('detectors', []):
+              counts[d['impact']] = counts.get(d['impact'], 0) + 1
+          for k in ('High', 'Medium', 'Low', 'Informational'):
+              print(f'  {k}: {counts.get(k, 0)}')
+          high = counts.get('High', 0)
+          medium = counts.get('Medium', 0)
+          if high or medium:
+              print(f'\\n FAIL: {high} HIGH + {medium} MEDIUM finding(s) — gate requires 0/0')
+              sys.exit(1)
+          print('\\n PASS: 0 high, 0 medium findings (gate met)')
+          "
+
+      - name: Upload Slither JSON artefact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slither-results-${{ github.run_id }}
+          path: |
+            slither-results.json
+            slither-results.sarif
+          retention-days: 30
+
+      - name: Upload SARIF to GH Security tab
+        if: always() && hashFiles('slither-results.sarif') != ''
+        continue-on-error: true   # GH Security tab requires GHAS on private repos; non-blocking
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: slither-results.sarif
+          category: slither
