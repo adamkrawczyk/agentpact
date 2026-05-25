@@ -81,6 +81,7 @@ jobs:
 
       - name: Upload SARIF to GH Security tab
         if: always() && hashFiles('slither-results.sarif') != ''
+        continue-on-error: true   # GH Security tab requires GHAS on private repos; non-blocking
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: slither-results.sarif
