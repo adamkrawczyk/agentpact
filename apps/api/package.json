@@ -20,10 +20,12 @@
     "jsonwebtoken": "^9.0.3",
     "mppx": "^0.4.7",
     "postgres": "^3.4.5",
+    "stripe": "^14.25.0",
     "viem": "^2.45.3",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@testcontainers/postgresql": "^11.14.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.19.10",

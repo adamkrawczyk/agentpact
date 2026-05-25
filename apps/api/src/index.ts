@@ -45,6 +45,8 @@ import adminRoutes from './routes/admin.js';
 import feedbackRoutes from './routes/feedback.js';
 import configRoutes from './routes/config.js';
 import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/deal-helpers.js';
+import { registerAuditWebhookRoutes } from './routes/audit-webhook.js';
+import { registerAuditOrdersRoutes } from './routes/audit-orders.js';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -1293,6 +1295,12 @@ app.addHook("preHandler", async (request, reply) => {
     return;
   }
 
+  // ── levels_2505: audit vertical — public Stripe webhook + admin-keyed order routes
+  // Both handle their own auth internally (sig verify / ADMIN_API_KEY).
+  if (routePath.startsWith("/api/audit/")) {
+    return;
+  }
+
   if (routePath.startsWith("/api/")) {
     await app.authenticate(request, reply);
   }
@@ -1334,6 +1342,8 @@ app.addHook("preHandler", async (request, reply) => {
   await app.register(adminRoutes);
   await app.register(feedbackRoutes);
   await app.register(configRoutes);
+  await registerAuditWebhookRoutes(app, _sql);
+  await registerAuditOrdersRoutes(app, _sql);
 }
 
 // ── §5.1 (Tori, 2026-05-21): structured error responses. Every error response
