@@ -22,10 +22,16 @@ RUN npm run build -w @agentpact/fulfillment-daemon
 # ─── runtime ─────────────────────────────────────────────────────────────────
 FROM node:20-slim AS runtime
 
-# Install slither dependencies
+# Install slither dependencies.
+# Note: 'solc' is not a Debian bookworm apt package; we install solc-select via pip
+# and download a recent solc binary at image-build time. solc-select lets the runtime
+# switch between solc versions if a contract pins a specific pragma — slither will
+# trigger this automatically when needed.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip solc && \
-    pip3 install slither-analyzer --break-system-packages && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv ca-certificates && \
+    pip3 install --break-system-packages slither-analyzer solc-select && \
+    solc-select install 0.8.20 && \
+    solc-select use 0.8.20 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
