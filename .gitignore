@@ -30,3 +30,4 @@ contracts/typechain-types/
 # Generated tests output
 apps/api/dist/__tests__/
 .gitnexus/
+/scripts/.smoke-agent-deal-state.json
