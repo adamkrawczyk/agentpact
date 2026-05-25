@@ -1,0 +1,19 @@
+{
+  "name": "@agentpact/fulfillment-daemon",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agentpact-fulfillment-daemon": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "self-check": "tsx src/self-check.ts",
+    "test": "node --import tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "zod": "^3.24.2"
+  }
+}
