@@ -44,13 +44,64 @@ export async function registerRoutes(
       RETURNING *
     `;
 
+    // ── Task-contract auto-verification (data-delivery-v1) ────────────
+    // If the deal has a task_contract with a verifier, run it against the
+    // deliverable's download_url from the artifact manifest.
+    const [dealRow] = await sql`
+      SELECT d.task_contract
+      FROM milestones m
+      JOIN deals d ON d.id = m.deal_id
+      WHERE m.id = ${body.milestoneId}
+    `;
+    const taskContract = dealRow?.task_contract as Record<string, unknown> | null;
+    let autoVerifyResult: { success: boolean; details: string } | null = null;
+
+    if (taskContract && typeof taskContract.verifier === "string") {
+      // Extract download_url from the first artifact's url field
+      const firstArtifact = Array.isArray(body.artifacts) && body.artifacts.length > 0
+        ? body.artifacts[0] as Record<string, unknown>
+        : {};
+      // Merge spec from contract + download_url from deliverable for the verifier
+      const verifierData = {
+        download_url: firstArtifact.url ?? "",
+        ...firstArtifact,
+        spec: taskContract.spec ?? {},
+      };
+      try {
+        autoVerifyResult = await deps.autoVerify(taskContract.verifier, verifierData);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        autoVerifyResult = { success: false, details: `Verifier error: ${msg}` };
+      }
+
+      if (autoVerifyResult.success) {
+        await sql`
+          UPDATE deliveries
+          SET status = 'auto-verified',
+              auto_verify_result = ${JSON.stringify({ ...autoVerifyResult, verifier: taskContract.verifier })}::jsonb,
+              verified_at = NOW(),
+              verification_notes = COALESCE(${notes}, '') || ' [auto-verified: ' || ${autoVerifyResult.details} || ']'
+          WHERE id = ${delivery.id}
+        `;
+      } else {
+        await sql`
+          UPDATE deliveries
+          SET auto_verify_result = ${JSON.stringify({ ...autoVerifyResult, verifier: taskContract.verifier })}::jsonb,
+              verification_notes = COALESCE(${notes}, '') || ' [auto-verify FAILED: ' || ${autoVerifyResult.details} || ']'
+          WHERE id = ${delivery.id}
+        `;
+      }
+    }
+
     await sql`UPDATE milestones SET status = 'delivered' WHERE id = ${body.milestoneId}`;
     await sql`
       UPDATE deals SET status = 'delivered', updated_at = NOW()
       WHERE id = (SELECT deal_id FROM milestones WHERE id = ${body.milestoneId})
     `;
 
-    return reply.code(201).send(delivery);
+    // Re-fetch delivery with updated status/result
+    const [updatedDelivery] = await sql`SELECT * FROM deliveries WHERE id = ${delivery.id}`;
+    return reply.code(201).send({ ...updatedDelivery, auto_verify_result: autoVerifyResult });
   });
 
   app.post("/api/deliveries/verify", async (request, reply) => {
