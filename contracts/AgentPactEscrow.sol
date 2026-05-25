@@ -50,8 +50,11 @@ contract AgentPactEscrow is ReentrancyGuard {
         require(seller != address(0), "Invalid seller");
         require(amount > 0, "Invalid amount");
 
-        require(usdc.transferFrom(msg.sender, address(this), amount), "Transfer failed");
-
+        // Checks-effects-interactions: write state BEFORE external call so a
+        // hostile or upgraded USDC implementation cannot observe a half-initialized
+        // milestone via a cross-function callback. nonReentrant guards same-function
+        // re-entry; CEI ordering guards cross-function re-entry through
+        // `milestones` reads in other functions (e.g. openDispute).
         milestones[milestoneId] = Milestone({
             dealId: dealId,
             buyer: msg.sender,
@@ -60,6 +63,8 @@ contract AgentPactEscrow is ReentrancyGuard {
             status: MilestoneStatus.Funded,
             createdAt: block.timestamp
         });
+
+        require(usdc.transferFrom(msg.sender, address(this), amount), "Transfer failed");
 
         emit MilestoneCreated(milestoneId, dealId, msg.sender, seller, amount);
     }
@@ -80,7 +85,7 @@ contract AgentPactEscrow is ReentrancyGuard {
         emit MilestoneAccepted(milestoneId, sellerAmount, platformFee);
     }
 
-    function openDispute(bytes32 milestoneId) external {
+    function openDispute(bytes32 milestoneId) external nonReentrant {
         Milestone storage milestone = milestones[milestoneId];
         require(milestone.buyer == msg.sender, "Only buyer can dispute");
         require(milestone.status == MilestoneStatus.Funded, "Invalid status");
