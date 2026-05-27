@@ -31,3 +31,4 @@ contracts/typechain-types/
 apps/api/dist/__tests__/
 .gitnexus/
 /scripts/.smoke-agent-deal-state.json
+.omx/
