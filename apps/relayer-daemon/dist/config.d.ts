@@ -1,0 +1,41 @@
+import { z } from "zod";
+declare const schema: z.ZodObject<{
+    relayerPort: z.ZodDefault<z.ZodNumber>;
+    relayerHost: z.ZodDefault<z.ZodString>;
+    relayerPrivateKey: z.ZodOptional<z.ZodString>;
+    databaseUrl: z.ZodOptional<z.ZodString>;
+    baseRpcUrl: z.ZodDefault<z.ZodString>;
+    escrowV2Address: z.ZodOptional<z.ZodString>;
+    platformWallet: z.ZodOptional<z.ZodString>;
+    ackSweepIntervalMs: z.ZodDefault<z.ZodNumber>;
+    schellingSweepIntervalMs: z.ZodDefault<z.ZodNumber>;
+    streamStaleSweepIntervalMs: z.ZodDefault<z.ZodNumber>;
+    logLevel: z.ZodDefault<z.ZodEnum<["debug", "info", "warn", "error"]>>;
+}, "strip", z.ZodTypeAny, {
+    relayerPort: number;
+    relayerHost: string;
+    baseRpcUrl: string;
+    ackSweepIntervalMs: number;
+    schellingSweepIntervalMs: number;
+    streamStaleSweepIntervalMs: number;
+    logLevel: "debug" | "info" | "warn" | "error";
+    relayerPrivateKey?: string | undefined;
+    databaseUrl?: string | undefined;
+    escrowV2Address?: string | undefined;
+    platformWallet?: string | undefined;
+}, {
+    relayerPort?: number | undefined;
+    relayerHost?: string | undefined;
+    relayerPrivateKey?: string | undefined;
+    databaseUrl?: string | undefined;
+    baseRpcUrl?: string | undefined;
+    escrowV2Address?: string | undefined;
+    platformWallet?: string | undefined;
+    ackSweepIntervalMs?: number | undefined;
+    schellingSweepIntervalMs?: number | undefined;
+    streamStaleSweepIntervalMs?: number | undefined;
+    logLevel?: "debug" | "info" | "warn" | "error" | undefined;
+}>;
+export type Config = z.infer<typeof schema>;
+export declare function loadConfig(env?: NodeJS.ProcessEnv): Config;
+export {};
