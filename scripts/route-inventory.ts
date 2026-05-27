@@ -26,6 +26,7 @@ const SOURCES = [
   "apps/api/src/routes/disputes.ts",
   "apps/api/src/routes/payments.ts",
   "apps/api/src/routes/reputation.ts",
+  "apps/api/src/routes/intents.ts",
   "apps/api/src/routes/admin.ts",
   "apps/api/src/routes/feedback.ts",
 ];
@@ -43,6 +44,7 @@ const PUBLIC_GET_PREFIXES = [
   "/api/skills",
   "/api/fulfillment/types",
   "/api/reputation",
+  "/api/intents",
 ];
 const CRON_POST_EXACT = new Set([
   "/api/autopilot/run",
