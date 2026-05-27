@@ -368,6 +368,146 @@ class FeedbackClient {
         });
     }
 }
+class IntentsClient {
+    baseUrl;
+    apiKey;
+    agentId;
+    timeout;
+    signChallenge;
+    constructor(baseUrl, apiKey, agentId, timeout, signChallenge) {
+        this.baseUrl = baseUrl;
+        this.apiKey = apiKey;
+        this.agentId = agentId;
+        this.timeout = timeout;
+        this.signChallenge = signChallenge;
+    }
+    /**
+     * Create a v2 intent. Auto-retries once after pubkey registration if the
+     * API responds with 412 `encryption_pubkey_required`. Pass
+     * `signChallenge` on the `AgentPact` constructor to enable.
+     */
+    async create(input) {
+        const body = { agentId: requireAgentId(this.agentId), ...input };
+        try {
+            return await request(this.baseUrl, '/api/intents', {
+                method: 'POST',
+                body,
+                apiKey: this.apiKey,
+                timeout: this.timeout,
+            });
+        }
+        catch (err) {
+            if (!(err instanceof AgentPactError) || err.status !== 412)
+                throw err;
+            const challenge = err.body?.challenge;
+            if (!challenge || !this.signChallenge)
+                throw err;
+            const signed = await this.signChallenge(challenge);
+            await this.registerPubkey({
+                challengeNonce: challenge.nonce,
+                signature: signed.signature,
+                pubkey: signed.pubkey,
+            });
+            return request(this.baseUrl, '/api/intents', {
+                method: 'POST',
+                body,
+                apiKey: this.apiKey,
+                timeout: this.timeout,
+            });
+        }
+    }
+    async registerPubkey(input) {
+        return request(this.baseUrl, '/api/agents/me/encryption-pubkey', {
+            method: 'POST',
+            body: input,
+            apiKey: this.apiKey,
+            timeout: this.timeout,
+        });
+    }
+    async get(intentId) {
+        return request(this.baseUrl, `/api/intents/${intentId}`, {
+            apiKey: this.apiKey,
+            timeout: this.timeout,
+        });
+    }
+    async discover(params) {
+        const query = new URLSearchParams();
+        if (params?.limit)
+            query.set('limit', String(params.limit));
+        const qs = query.toString();
+        return request(this.baseUrl, `/api/intents/discover${qs ? `?${qs}` : ''}`, {
+            apiKey: this.apiKey,
+            timeout: this.timeout,
+        });
+    }
+    // ── Class A ────
+    async claim(intentId, witness, ciphertext) {
+        return request(this.baseUrl, `/api/intents/${intentId}/claim`, {
+            method: 'POST',
+            body: { agentId: requireAgentId(this.agentId), witness, ciphertext },
+            apiKey: this.apiKey,
+            timeout: this.timeout,
+        });
+    }
+    // ── Class B ────
+    async accept(intentId, sellerStakeUsdc) {
+        return request(this.baseUrl, `/api/intents/${intentId}/accept`, {
+            method: 'POST',
+            body: { agentId: requireAgentId(this.agentId), sellerStakeUsdc: sellerStakeUsdc ?? 0 },
+            apiKey: this.apiKey,
+            timeout: this.timeout,
+        });
+    }
+    async deliver(intentId) {
+        return request(this.baseUrl, `/api/intents/${intentId}/deliver`, {
+            method: 'POST',
+            body: { agentId: requireAgentId(this.agentId) },
+            apiKey: this.apiKey,
+            timeout: this.timeout,
+        });
+    }
+    async acknowledge(intentId) {
+        return request(this.baseUrl, `/api/intents/${intentId}/acknowledge`, {
+            method: 'POST',
+            body: { agentId: requireAgentId(this.agentId) },
+            apiKey: this.apiKey,
+            timeout: this.timeout,
+        });
+    }
+    async reject(intentId, commitHash) {
+        return request(this.baseUrl, `/api/intents/${intentId}/reject`, {
+            method: 'POST',
+            body: { agentId: requireAgentId(this.agentId), commitHash },
+            apiKey: this.apiKey,
+            timeout: this.timeout,
+        });
+    }
+    async reveal(intentId, deliverable, salt) {
+        return request(this.baseUrl, `/api/intents/${intentId}/reveal`, {
+            method: 'POST',
+            body: { agentId: requireAgentId(this.agentId), deliverable, salt },
+            apiKey: this.apiKey,
+            timeout: this.timeout,
+        });
+    }
+    // ── Class C ────
+    async claimUnit(intentId, unitIndex, witness) {
+        return request(this.baseUrl, `/api/intents/${intentId}/claim-unit`, {
+            method: 'POST',
+            body: { agentId: requireAgentId(this.agentId), unitIndex, witness },
+            apiKey: this.apiKey,
+            timeout: this.timeout,
+        });
+    }
+    async cancelStream(intentId) {
+        return request(this.baseUrl, `/api/intents/${intentId}/cancel`, {
+            method: 'POST',
+            body: { agentId: requireAgentId(this.agentId) },
+            apiKey: this.apiKey,
+            timeout: this.timeout,
+        });
+    }
+}
 // ── Main Client ──────────────────────────────────────────────────────
 export class AgentPact {
     offers;
@@ -375,6 +515,8 @@ export class AgentPact {
     deals;
     agents;
     feedback;
+    /** settlement_2705 v2 intents surface (Class A / B / C). */
+    intents;
     baseUrl;
     apiKey;
     agentId;
@@ -389,6 +531,7 @@ export class AgentPact {
         this.deals = new DealsClient(this.baseUrl, this.apiKey, this.agentId, this.timeout);
         this.agents = new AgentsClient(this.baseUrl, this.apiKey, this.timeout);
         this.feedback = new FeedbackClient(this.baseUrl, this.apiKey, this.agentId, this.timeout);
+        this.intents = new IntentsClient(this.baseUrl, this.apiKey, this.agentId, this.timeout, config.signEncryptionPubkeyChallenge);
     }
     static async register(input, opts) {
         const baseUrl = (opts?.baseUrl || 'https://api.agentpact.xyz').replace(/\/$/, '');
