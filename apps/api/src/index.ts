@@ -40,6 +40,7 @@ import { registerRoutes as registerFulfillmentRoutes } from './routes/fulfillmen
 import { registerRoutes as registerDisputesRoutes } from './routes/disputes.js';
 import { registerRoutes as registerPaymentsRoutes } from './routes/payments.js';
 import { registerRoutes as registerReputationRoutes } from './routes/reputation.js';
+import { registerRoutes as registerIntentsRoutes } from './routes/intents.js';
 import { countStaleOffersWithoutDeals } from './routes/offers.js';
 import adminRoutes from './routes/admin.js';
 import feedbackRoutes from './routes/feedback.js';
@@ -137,6 +138,31 @@ export const app = Fastify({
 app.addHook("onSend", async (request, reply, payload) => {
   reply.header("x-request-id", request.id);
   return payload;
+});
+
+// settlement_2705 Phase E — Sunset / Link headers on v1 surfaces. The v2
+// intent primitive in /api/intents/* is the long-term successor; legacy
+// routes stay functional for the full 90-day window (until 2026-08-25)
+// per plan § 4 + Codex round-1 P1 finding. The `Sunset` header follows
+// RFC 8594; the `Link rel="successor-version"` follows RFC 5988.
+//
+// Implementation uses `onRequest` (NOT `onSend`) to set headers BEFORE
+// any route handler streams the response. Setting headers in `onSend`
+// is unsafe for handlers that have already started writing — Fastify
+// throws ERR_HTTP_HEADERS_SENT.
+const V1_SUNSET_DATE = "Tue, 25 Aug 2026 00:00:00 GMT";
+const V1_SUNSET_PREFIXES = [
+  "/api/deals",
+  "/api/needs",
+  "/api/payments",
+  "/api/disputes",
+];
+app.addHook("onRequest", async (request, reply) => {
+  const path = request.url.split("?")[0];
+  if (V1_SUNSET_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`))) {
+    reply.header("Sunset", V1_SUNSET_DATE);
+    reply.header("Link", '</api/intents>; rel="successor-version"');
+  }
 });
 const vaultSql = sql as unknown as Sql<Record<string, unknown>>;
 const credentialEncryptionKey = getCredentialEncryptionKey();
@@ -1256,8 +1282,23 @@ app.addHook("preHandler", async (request, reply) => {
     return;
   }
 
-  const exactPublicGetRoutes = new Set(["/api/matches/recommendations", "/api/agents/online", "/api/fulfillment/types"]);
-  const prefixPublicGetRoutes = ["/api/offers", "/api/categories", "/api/needs", "/api/deals", "/api/agents", "/api/leaderboard", "/api/skills", "/api/reputation"];
+  const exactPublicGetRoutes = new Set([
+    "/api/matches/recommendations",
+    "/api/agents/online",
+    "/api/fulfillment/types",
+    "/api/intents/discover",
+  ]);
+  const prefixPublicGetRoutes = [
+    "/api/offers",
+    "/api/categories",
+    "/api/needs",
+    "/api/deals",
+    "/api/agents",
+    "/api/leaderboard",
+    "/api/skills",
+    "/api/reputation",
+    "/api/intents",
+  ];
   const isConsultationResponsesRoute = /^\/api\/deals\/[^/]+\/consultation-responses$/.test(routePath);
   if (
     request.method === "GET" &&
@@ -1339,6 +1380,8 @@ app.addHook("preHandler", async (request, reply) => {
   await registerDisputesRoutes(app, _sql, deps, _releaseMilestonePayment);
   await registerPaymentsRoutes(app, _sql, deps, _releaseMilestonePayment);
   await registerReputationRoutes(app, _sql, deps);
+  // settlement_2705 Phase E: AgentPact v2 intent surface.
+  await registerIntentsRoutes(app, _sql, deps);
   await app.register(adminRoutes);
   await app.register(feedbackRoutes);
   await app.register(configRoutes);

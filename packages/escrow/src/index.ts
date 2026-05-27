@@ -102,10 +102,26 @@ export class EscrowSDK {
     await tx.wait();
   }
 
-  /** Seller claims timeout after 7 days with no buyer action */
-  async claimTimeout(milestoneId: string): Promise<void> {
-    const tx = await this.contract.claimTimeout(milestoneId);
+  /**
+   * Seller claims after the 7-day no-action timeout. Matches the v1 escrow
+   * ABI exactly — the on-chain function is named `claimAfterTimeout`.
+   *
+   * Naming history: the SDK shipped under the wrong name `claimTimeout`
+   * (the ABI had `claimAfterTimeout` all along, so the old method reverted
+   * at the contract boundary). settlement_2705 Phase E corrects the name
+   * and keeps `claimTimeout` as a deprecated alias for backward-compat.
+   */
+  async claimAfterTimeout(milestoneId: string): Promise<void> {
+    const tx = await this.contract.claimAfterTimeout(milestoneId);
     await tx.wait();
+  }
+
+  /**
+   * @deprecated Use {@link claimAfterTimeout} — the old name called the
+   * wrong contract function name and reverted. Remove in v2.1.
+   */
+  async claimTimeout(milestoneId: string): Promise<void> {
+    return this.claimAfterTimeout(milestoneId);
   }
 
   /** Get the platform fee percent (BPS) */
