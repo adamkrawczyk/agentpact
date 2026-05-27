@@ -1568,6 +1568,182 @@ const tools = [
             properties: {},
         },
     },
+    // ─────────────────────────────────────────────────────────────────────
+    // settlement_2705 v2 — intent surface (Phase F).
+    //
+    // These tools mirror /api/intents/* added in Phase E. They follow the
+    // dot-namespaced convention used elsewhere here. The first call from a
+    // fresh agent that hasn't registered an encryption pubkey will receive
+    // a structured `bootstrap_required` field in the tool error; the client
+    // (SDK or human) then calls `agentpact.register_encryption_pubkey` and
+    // retries the original call.
+    // ─────────────────────────────────────────────────────────────────────
+    {
+        name: "agentpact.create_intent",
+        description: "Create an AgentPact v2 intent (Class A cryptographically verifiable, Class B Schelling commit-reveal, or Class C streaming per-unit). USDC locks at intent creation. If your agent has not yet registered an encryption pubkey, this call returns a `bootstrap_required` structured error — call `agentpact.register_encryption_pubkey` with the supplied nonce + a signed challenge, then retry.",
+        annotations: { title: "Create v2 Intent", readOnlyHint: false, destructiveHint: false },
+        inputSchema: {
+            type: "object",
+            required: ["agentId", "onChainId", "settlementClass", "predicateType", "predicateParams", "maxPriceUsdc", "expiresAt"],
+            properties: {
+                agentId: { type: "string", format: "uuid", description: "Buyer agent UUID" },
+                onChainId: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$", description: "32-byte intent id from the AgentPactEscrowV2 IntentCreated event" },
+                settlementClass: { type: "string", enum: ["A", "B", "C"], description: "A = predicate-verified; B = Schelling; C = streaming" },
+                predicateType: { type: "string", description: "Verifier identifier (e.g. 'hash-preimage-v1', 'signed-blob-v1', 'merkle-membership-v1')" },
+                predicateParams: { type: "object", description: "ABI-encoded predicate parameters (verifier-specific)" },
+                sellerTargetAgentId: { type: "string", format: "uuid", description: "Optional — restrict claim/accept to this specific seller agent" },
+                maxPriceUsdc: { type: "number", minimum: 0, description: "Locked USDC amount in human units (e.g. 1.50)" },
+                buyerStakeUsdc: { type: "number", minimum: 0, description: "Class B only — buyer's commit-reveal stake" },
+                relayGasUsdc: { type: "number", minimum: 0, description: "Optional relayer gas quoted at intent creation" },
+                expiresAt: { type: "string", format: "date-time", description: "ISO-8601 expiry; intents auto-refund after this" },
+            },
+        },
+    },
+    {
+        name: "agentpact.register_encryption_pubkey",
+        description: "Register your agent's 65-byte uncompressed secp256k1 encryption pubkey (0x04 || x || y). Required before creating any v2 intent. Pair the `challengeNonce` you received from a 412 response with a wallet-signed message; the API verifies and persists the pubkey. Returns the registered pubkey on success.",
+        annotations: { title: "Register Encryption Pubkey", readOnlyHint: false, destructiveHint: false },
+        inputSchema: {
+            type: "object",
+            required: ["challengeNonce", "signature", "pubkey"],
+            properties: {
+                challengeNonce: { type: "string", pattern: "^[0-9a-fA-F]{32}$", description: "Nonce returned in the 412 bootstrap_required error from create_intent" },
+                signature: { type: "string", pattern: "^0x[0-9a-fA-F]+$", description: "Wallet-signed `AgentPact encryption pubkey registration v1 ${nonce}`" },
+                pubkey: { type: "string", pattern: "^0x04[0-9a-fA-F]{128}$", description: "65-byte uncompressed pubkey (0x04 prefix + 32-byte x + 32-byte y)" },
+            },
+        },
+    },
+    {
+        name: "agentpact.claim_intent",
+        description: "Seller claims a Class A intent by presenting ciphertext + witness. On predicate verify-pass, escrow releases 90% to seller and 10% platform fee atomically. Class A only.",
+        annotations: { title: "Claim Class A Intent", readOnlyHint: false, destructiveHint: false },
+        inputSchema: {
+            type: "object",
+            required: ["intentId", "agentId", "witness"],
+            properties: {
+                intentId: { type: "string", format: "uuid", description: "Intent UUID returned by create_intent" },
+                agentId: { type: "string", format: "uuid", description: "Seller agent UUID" },
+                ciphertext: { type: "string", pattern: "^0x[0-9a-fA-F]+$", description: "Optional ciphertext blob hex (for the off-chain key-vault record)" },
+                witness: { type: "string", pattern: "^0x[0-9a-fA-F]+$", description: "Verifier-specific witness (hash preimage / signature / Merkle proof)" },
+            },
+        },
+    },
+    {
+        name: "agentpact.accept_intent_b",
+        description: "Class B seller accepts an intent and locks their stake (capped on-chain at min(price/2, 50 USDC)).",
+        annotations: { title: "Accept Class B Intent", readOnlyHint: false, destructiveHint: false },
+        inputSchema: {
+            type: "object",
+            required: ["intentId", "agentId"],
+            properties: {
+                intentId: { type: "string", format: "uuid" },
+                agentId: { type: "string", format: "uuid" },
+                sellerStakeUsdc: { type: "number", minimum: 0 },
+            },
+        },
+    },
+    {
+        name: "agentpact.deliver",
+        description: "Class B seller submits ciphertext, starting the buyer's ack window (10 min ≤ $10, 1 h ≤ $100, else 24 h).",
+        annotations: { title: "Deliver Class B Ciphertext", readOnlyHint: false, destructiveHint: false },
+        inputSchema: {
+            type: "object",
+            required: ["intentId", "agentId"],
+            properties: {
+                intentId: { type: "string", format: "uuid" },
+                agentId: { type: "string", format: "uuid" },
+            },
+        },
+    },
+    {
+        name: "agentpact.acknowledge",
+        description: "Class B buyer acknowledges the deliverable. Seller paid in full, stakes returned.",
+        annotations: { title: "Acknowledge Class B", readOnlyHint: false, destructiveHint: false },
+        inputSchema: {
+            type: "object",
+            required: ["intentId", "agentId"],
+            properties: {
+                intentId: { type: "string", format: "uuid" },
+                agentId: { type: "string", format: "uuid" },
+            },
+        },
+    },
+    {
+        name: "agentpact.reject",
+        description: "Class B buyer rejects the deliverable with a commit hash (round 1). Triggers 24h commit-reveal subprotocol.",
+        annotations: { title: "Reject Class B (Commit)", readOnlyHint: false, destructiveHint: true },
+        inputSchema: {
+            type: "object",
+            required: ["intentId", "agentId", "commitHash"],
+            properties: {
+                intentId: { type: "string", format: "uuid" },
+                agentId: { type: "string", format: "uuid" },
+                commitHash: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$", description: "keccak256(observedDeliverable || salt)" },
+            },
+        },
+    },
+    {
+        name: "agentpact.reveal",
+        description: "Class B round-2 reveal: post the (deliverable, salt) preimage you committed in round 1. Hash-match → seller wins; hash-mismatch → both stakes burn.",
+        annotations: { title: "Reveal Class B Round 2", readOnlyHint: false, destructiveHint: true },
+        inputSchema: {
+            type: "object",
+            required: ["intentId", "agentId", "deliverable", "salt"],
+            properties: {
+                intentId: { type: "string", format: "uuid" },
+                agentId: { type: "string", format: "uuid" },
+                deliverable: { type: "string", pattern: "^0x[0-9a-fA-F]+$" },
+                salt: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$" },
+            },
+        },
+    },
+    {
+        name: "agentpact.claim_unit",
+        description: "Class C streaming seller claims a single unit. Per-unit predicate verify; payout settles atomically.",
+        annotations: { title: "Claim Streaming Unit", readOnlyHint: false, destructiveHint: false },
+        inputSchema: {
+            type: "object",
+            required: ["intentId", "agentId", "unitIndex", "witness"],
+            properties: {
+                intentId: { type: "string", format: "uuid" },
+                agentId: { type: "string", format: "uuid" },
+                unitIndex: { type: "integer", minimum: 0, description: "Monotonic — must equal current unitsClaimed" },
+                witness: { type: "string", pattern: "^0x[0-9a-fA-F]+$" },
+            },
+        },
+    },
+    {
+        name: "agentpact.cancel_stream",
+        description: "Class C either party cancels a streaming intent. Consumed units final; unused USDC refunds to buyer.",
+        annotations: { title: "Cancel Stream", readOnlyHint: false, destructiveHint: true },
+        inputSchema: {
+            type: "object",
+            required: ["intentId", "agentId"],
+            properties: {
+                intentId: { type: "string", format: "uuid" },
+                agentId: { type: "string", format: "uuid" },
+            },
+        },
+    },
+    {
+        name: "agentpact.get_intent",
+        description: "Read full intent state (any class) by UUID.",
+        annotations: { title: "Get Intent", readOnlyHint: true, destructiveHint: false },
+        inputSchema: {
+            type: "object",
+            required: ["intentId"],
+            properties: { intentId: { type: "string", format: "uuid" } },
+        },
+    },
+    {
+        name: "agentpact.discover_intents",
+        description: "Browse open (and your own targeted) intents. Anonymous-safe; authenticated callers additionally see intents targeted to them.",
+        annotations: { title: "Discover Intents", readOnlyHint: true, destructiveHint: false },
+        inputSchema: {
+            type: "object",
+            properties: { limit: { type: "integer", minimum: 1, maximum: 200, default: 50 } },
+        },
+    },
 ];
 // ── Tool call handler ────────────────────────────────────────────────
 function handleToolCall(name, rawArgs) {
@@ -1691,6 +1867,51 @@ function handleToolCall(name, rawArgs) {
         }
         case "agentpact.get_overview":
             return textResult(api("/api/public/overview", "GET"));
+        // ── settlement_2705 v2 — intent surface (Phase F) ──
+        case "agentpact.create_intent":
+            return textResult(api("/api/intents", "POST", args, apiKey));
+        case "agentpact.register_encryption_pubkey":
+            return textResult(api("/api/agents/me/encryption-pubkey", "POST", args, apiKey));
+        case "agentpact.claim_intent": {
+            const { intentId, ...rest } = args;
+            return textResult(api(`/api/intents/${intentId}/claim`, "POST", rest, apiKey));
+        }
+        case "agentpact.accept_intent_b": {
+            const { intentId, ...rest } = args;
+            return textResult(api(`/api/intents/${intentId}/accept`, "POST", rest, apiKey));
+        }
+        case "agentpact.deliver": {
+            const { intentId, ...rest } = args;
+            return textResult(api(`/api/intents/${intentId}/deliver`, "POST", rest, apiKey));
+        }
+        case "agentpact.acknowledge": {
+            const { intentId, ...rest } = args;
+            return textResult(api(`/api/intents/${intentId}/acknowledge`, "POST", rest, apiKey));
+        }
+        case "agentpact.reject": {
+            const { intentId, ...rest } = args;
+            return textResult(api(`/api/intents/${intentId}/reject`, "POST", rest, apiKey));
+        }
+        case "agentpact.reveal": {
+            const { intentId, ...rest } = args;
+            return textResult(api(`/api/intents/${intentId}/reveal`, "POST", rest, apiKey));
+        }
+        case "agentpact.claim_unit": {
+            const { intentId, ...rest } = args;
+            return textResult(api(`/api/intents/${intentId}/claim-unit`, "POST", rest, apiKey));
+        }
+        case "agentpact.cancel_stream": {
+            const { intentId, ...rest } = args;
+            return textResult(api(`/api/intents/${intentId}/cancel`, "POST", rest, apiKey));
+        }
+        case "agentpact.get_intent": {
+            const { intentId } = args;
+            return textResult(api(`/api/intents/${intentId}`, "GET", undefined, apiKey));
+        }
+        case "agentpact.discover_intents": {
+            const limit = args.limit ?? 50;
+            return textResult(api(`/api/intents/discover?limit=${limit}`, "GET", undefined, apiKey));
+        }
         default:
             throw new Error(`Unknown tool: ${name}`);
     }

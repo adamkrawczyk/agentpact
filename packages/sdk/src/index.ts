@@ -15,6 +15,8 @@ export interface AgentPactConfig {
   timeout?: number;
   /** Agent ID for authenticated agent actions */
   agentId?: string;
+  /** Optional signer for the v2 encryption-pubkey bootstrap challenge */
+  signEncryptionPubkeyChallenge?: EncryptionPubkeySigner;
 }
 
 export interface Agent {
@@ -559,6 +561,202 @@ class FeedbackClient {
   }
 }
 
+// ── settlement_2705 v2 IntentsClient (Phase F) ─────────────────────────
+//
+// Auto-bootstraps the encryption-pubkey registration: when `create()` hits
+// a 412, the caller's `signChallenge` callback is invoked, the signed
+// challenge is posted to /api/agents/me/encryption-pubkey, and the original
+// create is retried transparently. SDK consumers see one round-trip.
+
+export interface IntentCreateInput {
+  onChainId: string;
+  settlementClass: 'A' | 'B' | 'C';
+  predicateType: string;
+  predicateParams: Record<string, unknown>;
+  sellerTargetAgentId?: string;
+  maxPriceUsdc: number;
+  buyerStakeUsdc?: number;
+  relayGasUsdc?: number;
+  expiresAt: string;
+}
+
+export interface IntentRow {
+  id: string;
+  on_chain_id: string;
+  buyer_agent_id: string;
+  seller_agent_id: string | null;
+  seller_target_agent_id: string | null;
+  settlement_class: 'A' | 'B' | 'C';
+  predicate_type: string;
+  predicate_params: Record<string, unknown>;
+  max_price_usdc: string;
+  buyer_stake_usdc: string;
+  seller_stake_usdc: string;
+  relay_gas_usdc: string;
+  status: string;
+  expires_at: string;
+  ack_deadline_at: string | null;
+  round1_deadline_at: string | null;
+  round2_deadline_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Caller-supplied signer used to satisfy a 412 bootstrap challenge.
+ * Receives the challenge string the API minted; must return a (signature,
+ * pubkey) tuple. signature is 0x-prefixed hex; pubkey is 0x04 +
+ * 64-byte uncompressed secp256k1 point.
+ */
+export type EncryptionPubkeySigner = (challenge: {
+  message: string;
+  nonce: string;
+}) => Promise<{ signature: string; pubkey: string }>;
+
+class IntentsClient {
+  constructor(
+    private baseUrl: string,
+    private apiKey: string,
+    private agentId: string | undefined,
+    private timeout: number,
+    private signChallenge?: EncryptionPubkeySigner,
+  ) {}
+
+  /**
+   * Create a v2 intent. Auto-retries once after pubkey registration if the
+   * API responds with 412 `encryption_pubkey_required`. Pass
+   * `signChallenge` on the `AgentPact` constructor to enable.
+   */
+  async create(input: IntentCreateInput): Promise<IntentRow> {
+    const body = { agentId: requireAgentId(this.agentId), ...input };
+    try {
+      return await request<IntentRow>(this.baseUrl, '/api/intents', {
+        method: 'POST',
+        body,
+        apiKey: this.apiKey,
+        timeout: this.timeout,
+      });
+    } catch (err) {
+      if (!(err instanceof AgentPactError) || err.status !== 412) throw err;
+      const challenge = (err.body as { challenge?: { message: string; nonce: string } })?.challenge;
+      if (!challenge || !this.signChallenge) throw err;
+      const signed = await this.signChallenge(challenge);
+      await this.registerPubkey({
+        challengeNonce: challenge.nonce,
+        signature: signed.signature,
+        pubkey: signed.pubkey,
+      });
+      return request<IntentRow>(this.baseUrl, '/api/intents', {
+        method: 'POST',
+        body,
+        apiKey: this.apiKey,
+        timeout: this.timeout,
+      });
+    }
+  }
+
+  async registerPubkey(input: { challengeNonce: string; signature: string; pubkey: string }): Promise<{ agentId: string; encryptionPubkey: string }> {
+    return request(this.baseUrl, '/api/agents/me/encryption-pubkey', {
+      method: 'POST',
+      body: input,
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  async get(intentId: string): Promise<IntentRow> {
+    return request<IntentRow>(this.baseUrl, `/api/intents/${intentId}`, {
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  async discover(params?: { limit?: number }): Promise<{ intents: IntentRow[]; callerAgent: string | null }> {
+    const query = new URLSearchParams();
+    if (params?.limit) query.set('limit', String(params.limit));
+    const qs = query.toString();
+    return request(this.baseUrl, `/api/intents/discover${qs ? `?${qs}` : ''}`, {
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  // ── Class A ────
+  async claim(intentId: string, witness: string, ciphertext?: string): Promise<IntentRow> {
+    return request<IntentRow>(this.baseUrl, `/api/intents/${intentId}/claim`, {
+      method: 'POST',
+      body: { agentId: requireAgentId(this.agentId), witness, ciphertext },
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  // ── Class B ────
+  async accept(intentId: string, sellerStakeUsdc?: number): Promise<IntentRow> {
+    return request<IntentRow>(this.baseUrl, `/api/intents/${intentId}/accept`, {
+      method: 'POST',
+      body: { agentId: requireAgentId(this.agentId), sellerStakeUsdc: sellerStakeUsdc ?? 0 },
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  async deliver(intentId: string): Promise<IntentRow> {
+    return request<IntentRow>(this.baseUrl, `/api/intents/${intentId}/deliver`, {
+      method: 'POST',
+      body: { agentId: requireAgentId(this.agentId) },
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  async acknowledge(intentId: string): Promise<IntentRow> {
+    return request<IntentRow>(this.baseUrl, `/api/intents/${intentId}/acknowledge`, {
+      method: 'POST',
+      body: { agentId: requireAgentId(this.agentId) },
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  async reject(intentId: string, commitHash: string): Promise<IntentRow> {
+    return request<IntentRow>(this.baseUrl, `/api/intents/${intentId}/reject`, {
+      method: 'POST',
+      body: { agentId: requireAgentId(this.agentId), commitHash },
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  async reveal(intentId: string, deliverable: string, salt: string): Promise<unknown> {
+    return request(this.baseUrl, `/api/intents/${intentId}/reveal`, {
+      method: 'POST',
+      body: { agentId: requireAgentId(this.agentId), deliverable, salt },
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  // ── Class C ────
+  async claimUnit(intentId: string, unitIndex: number, witness: string): Promise<unknown> {
+    return request(this.baseUrl, `/api/intents/${intentId}/claim-unit`, {
+      method: 'POST',
+      body: { agentId: requireAgentId(this.agentId), unitIndex, witness },
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  async cancelStream(intentId: string): Promise<IntentRow> {
+    return request<IntentRow>(this.baseUrl, `/api/intents/${intentId}/cancel`, {
+      method: 'POST',
+      body: { agentId: requireAgentId(this.agentId) },
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+}
+
 // ── Main Client ──────────────────────────────────────────────────────
 
 export class AgentPact {
@@ -567,6 +765,8 @@ export class AgentPact {
   public readonly deals: DealsClient;
   public readonly agents: AgentsClient;
   public readonly feedback: FeedbackClient;
+  /** settlement_2705 v2 intents surface (Class A / B / C). */
+  public readonly intents: IntentsClient;
 
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -584,6 +784,13 @@ export class AgentPact {
     this.deals = new DealsClient(this.baseUrl, this.apiKey, this.agentId, this.timeout);
     this.agents = new AgentsClient(this.baseUrl, this.apiKey, this.timeout);
     this.feedback = new FeedbackClient(this.baseUrl, this.apiKey, this.agentId, this.timeout);
+    this.intents = new IntentsClient(
+      this.baseUrl,
+      this.apiKey,
+      this.agentId,
+      this.timeout,
+      config.signEncryptionPubkeyChallenge,
+    );
   }
 
   static async register(
