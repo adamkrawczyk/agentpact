@@ -156,9 +156,10 @@ export async function registerAuditOrdersRoutes(
       try {
         await sql.begin(async (tx) => {
           // SELECT FOR UPDATE
-          const orderRows = await tx<Array<Record<string, unknown>>>`
-            SELECT * FROM audit_orders WHERE id = ${id} FOR UPDATE
-          `;
+          const orderRows = (await tx.unsafe(
+            `SELECT * FROM audit_orders WHERE id = $1 FOR UPDATE`,
+            [id],
+          )) as unknown as Array<Record<string, unknown>>;
           const order = orderRows[0];
           if (!order) {
             throw Object.assign(new Error("Not found"), { statusCode: 404 });
@@ -175,18 +176,26 @@ export async function registerAuditOrdersRoutes(
           const newStatus =
             failure_reason && verdict === "FAIL" ? "failed" : "completed";
 
-          const updatedRows = await tx<Array<Record<string, unknown>>>`
-            UPDATE audit_orders SET
-              status = ${newStatus},
-              report_md = ${report_md},
-              report_severity_counts = ${JSON.stringify(severity_counts)}::jsonb,
-              report_verdict = ${verdict},
-              failure_reason = ${failure_reason ?? null},
+          const updatedRows = (await tx.unsafe(
+            `UPDATE audit_orders SET
+              status = $1,
+              report_md = $2,
+              report_severity_counts = $3::jsonb,
+              report_verdict = $4,
+              failure_reason = $5,
               completed_at = NOW(),
               updated_at = NOW()
-            WHERE id = ${id}
-            RETURNING *
-          `;
+            WHERE id = $6
+            RETURNING *`,
+            [
+              newStatus,
+              report_md,
+              JSON.stringify(severity_counts),
+              verdict,
+              failure_reason ?? null,
+              id,
+            ],
+          )) as unknown as Array<Record<string, unknown>>;
 
           finalOrder = updatedRows[0] ?? null;
 
@@ -196,14 +205,18 @@ export async function registerAuditOrdersRoutes(
             const feeCents = Math.floor(amountCents * 0.10);
             fee_credited_minor = feeCents;
 
-            await tx`
-              INSERT INTO platform_fee_ledger
+            await tx.unsafe(
+              `INSERT INTO platform_fee_ledger
                 (audit_order_id, amount_minor, currency, fee_pct_at_close, source, stripe_payment_intent_id)
-              VALUES
-                (${id}, ${feeCents}, ${order.currency as string}, 10.00, 'stripe',
-                 ${order.stripe_payment_intent_id as string | null})
-              ON CONFLICT DO NOTHING
-            `;
+              VALUES ($1, $2, $3, 10.00, 'stripe', $4)
+              ON CONFLICT DO NOTHING`,
+              [
+                id,
+                feeCents,
+                order.currency as string,
+                order.stripe_payment_intent_id as string | null,
+              ],
+            );
           }
         });
       } catch (err: unknown) {
