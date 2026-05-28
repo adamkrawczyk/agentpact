@@ -42,6 +42,25 @@
 10. Run `scripts/dogfood-settlement-v2.cjs --execute` against Base mainnet.
 11. Capture BaseScan tx hashes in the walkthrough doc.
 
+## Self-healing + monitoring (Phase F2 — `settlement_2705`)
+
+External uptime monitoring is **self-hosted on Tori** (no third-party
+UptimeRobot account): the `agentpact-uptime-watcher` cron (Hermes job
+`869d6bd00640`, every 5 min, `no_agent`) probes `api.agentpact.xyz/api/health`
+and `mcp.agentpact.xyz`, stays silent while green, and posts to Discord
+`#agent-heartbeat` only on a 3-consecutive-failure DOWN transition or RECOVERY.
+Script: `~/.hermes/scripts/agentpact-health-watcher.py`; state +
+`alerts.jsonl` ledger under `~/.hermes/scripts/state/`.
+
+When the **relayer-daemon** is deployed (post-Phase-G), install it under
+systemd with `Restart=always` (NOT pm2) — the unit + install steps + the
+SIGKILL acceptance test are checked in at
+`apps/relayer-daemon/deploy/` (`agentpact-relayer.service` + `README.md`).
+
+- [ ] `api` + `mcp` covered by the Tori uptime watcher (verify a test DOWN/RECOVER cycle reached `#agent-heartbeat`).
+- [ ] relayer-daemon (when live) runs under `agentpact-relayer.service` with `Restart=always`.
+- [ ] SIGKILL test passed: `systemctl kill -s SIGKILL agentpact-relayer` → `is-active` returns `active` within `RestartSec`.
+
 ## Post-deploy announcement
 
 - [ ] Post to `#announcements` on the AgentPact community Discord
