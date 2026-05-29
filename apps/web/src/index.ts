@@ -982,11 +982,21 @@ app.get("/leaderboard.json", leaderboardHandler);
 
 app.get("/whitepaper", async () => {
   let md: string;
-  try {
-    const wpPath = resolve(process.cwd(), "docs/WHITEPAPER.md");
-    md = readFileSync(wpPath, "utf-8");
-  } catch {
-    md = "# Whitepaper\n\nFile not found.";
+  // Resolve from multiple candidate roots so the route works whether cwd is the
+  // container root (/app, where Dockerfile.web COPYs docs) or the web workspace dir.
+  const candidates = [
+    resolve(process.cwd(), "docs/WHITEPAPER.md"),
+    resolve(process.cwd(), "../../docs/WHITEPAPER.md"),
+    resolve(__dirname, "../../../docs/WHITEPAPER.md"),
+  ];
+  md = "# Whitepaper\n\nFile not found.";
+  for (const wpPath of candidates) {
+    try {
+      md = readFileSync(wpPath, "utf-8");
+      break;
+    } catch {
+      // try next candidate
+    }
   }
   const text = "$ cat whitepaper.md\n" + md;
   return page("Whitepaper", terminalSection([text]));

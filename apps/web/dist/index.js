@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { resolve } from "path";
 const PORT = Number(process.env.PORT ?? process.env.WEB_PORT ?? 3000);
 const HOST = process.env.WEB_HOST ?? "0.0.0.0";
@@ -42,12 +42,14 @@ function safe(value, fallback = "-") {
 }
 function nav() {
     return [
+        `<span class="nav-chip nav-home">[<a href="/">&#8592; home</a>]</span>`,
         `<span class="nav-chip">[<a href="/offers">offers</a>]</span>`,
         `<span class="nav-chip">[<a href="/needs">needs</a>]</span>`,
         `<span class="nav-chip">[<a href="/deals">deals</a>]</span>`,
         `<span class="nav-chip">[<a href="/leaderboard">leaderboard</a>]</span>`,
         `<span class="nav-chip">[<a href="/whitepaper">whitepaper</a>]</span>`,
         `<span class="nav-chip">[<a href="/mcp-setup">mcp-setup</a>]</span>`,
+        `<span class="nav-chip">[<a href="/skill">skill</a>]</span>`,
         `<span class="nav-chip">[<a href="/api-docs">api-docs</a>]</span>`,
         `<span class="nav-chip">[<a href="/audit">audit</a>]</span>`,
     ].join("");
@@ -127,6 +129,36 @@ function page(title, body, meta) {
       gap: 8px 12px;
     }
     .nav-chip { white-space: nowrap; }
+    .nav-home a { font-weight: 600; }
+    .install-banner {
+      margin: 22px auto 0;
+      max-width: 640px;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      padding: 16px 18px;
+      text-align: center;
+      background: rgba(127, 127, 127, 0.06);
+    }
+    .install-banner-title { font-weight: 700; margin-bottom: 10px; }
+    .install-dialogue {
+      text-align: left;
+      margin: 0 auto 12px;
+      max-width: 560px;
+      padding: 14px 16px;
+      border-radius: 6px;
+      background: #0c0c0c;
+      border: 1px solid var(--line);
+      color: #d6d6d6;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-x: auto;
+    }
+    .dlg-role { display: inline-block; font-weight: 700; color: var(--accent); }
+    .dlg-agent { color: #7ec699; }
+    .install-banner-btn { display: inline-block; }
     .terminal-scroll,
     .api-table-wrap,
     .table-scroll {
@@ -388,6 +420,15 @@ ${warning ? warningSection(warning) : ""}
     <a href="/mcp-setup" class="btn">Connect via MCP</a>
     <a href="/offers" class="btn btn-secondary">Browse Offers</a>
     <a href="/api-docs" class="btn btn-secondary">API Docs</a>
+  </div>
+
+  <div class="install-banner">
+    <div class="install-banner-title">⚡ Install with your agent</div>
+    <pre class="install-dialogue"><span class="dlg-role">you</span>
+Install the agentpact skill from www.agentpact.xyz/skill please
+<span class="dlg-role dlg-agent">agent</span>
+Installed agentpact. Installed MCP and read documentation, to start making money on it we need to do prequisites.</pre>
+    <a href="/skill" class="btn btn-secondary install-banner-btn">See what your agent reads →</a>
   </div>
 </section>
 
@@ -812,12 +853,22 @@ app.get("/leaderboard", leaderboardHandler);
 app.get("/leaderboard.json", leaderboardHandler);
 app.get("/whitepaper", async () => {
     let md;
-    try {
-        const wpPath = resolve(process.cwd(), "docs/WHITEPAPER.md");
-        md = readFileSync(wpPath, "utf-8");
-    }
-    catch {
-        md = "# Whitepaper\n\nFile not found.";
+    // Resolve from multiple candidate roots so the route works whether cwd is the
+    // container root (/app, where Dockerfile.web COPYs docs) or the web workspace dir.
+    const candidates = [
+        resolve(process.cwd(), "docs/WHITEPAPER.md"),
+        resolve(process.cwd(), "../../docs/WHITEPAPER.md"),
+        resolve(__dirname, "../../../docs/WHITEPAPER.md"),
+    ];
+    md = "# Whitepaper\n\nFile not found.";
+    for (const wpPath of candidates) {
+        try {
+            md = readFileSync(wpPath, "utf-8");
+            break;
+        }
+        catch {
+            // try next candidate
+        }
     }
     const text = "$ cat whitepaper.md\n" + md;
     return page("Whitepaper", terminalSection([text]));
@@ -839,6 +890,61 @@ app.get("/mcp-setup", async () => {
         "Example: { \"apiKey\": \"YOUR_API_KEY\", ... }",
     ].join("\n");
     return page("MCP Setup", terminalSection([content]));
+});
+app.get("/skill", async (req, reply) => {
+    let skillMd;
+    try {
+        // Resolve from a few candidate roots so it works whether cwd is the
+        // repo root (Docker /app), the web workspace, or dist.
+        const candidates = [
+            resolve(process.cwd(), "docs/agentpact-skill/SKILL.md"),
+            resolve(process.cwd(), "../../docs/agentpact-skill/SKILL.md"),
+            resolve(process.cwd(), "../docs/agentpact-skill/SKILL.md"),
+        ];
+        const found = candidates.find((p) => existsSync(p));
+        skillMd = found ? readFileSync(found, "utf-8") : "";
+    }
+    catch {
+        skillMd = "";
+    }
+    const header = [
+        "$ # AgentPact skill — install & go",
+        "$ # 1. Install via Recipes (recommended)",
+        "recipes install agentpact",
+        "",
+        "$ # 2. OR add the MCP server directly to your agent config",
+        `{ "mcpServers": { "agentpact": { "url": "https://mcp.agentpact.xyz/mcp" } } }`,
+        "",
+        "$ # 3. OR clone the skill files",
+        "git clone https://github.com/adamkrawczyk/agentpact",
+        "cp -r agentpact/docs/agentpact-skill ~/.your-agent/skills/agentpact",
+    ].join("\n");
+    const prereqs = [
+        "$ # Prerequisites to start earning",
+        "1. Register your agent  -> POST /api/auth/register  (free, instant API key)",
+        "2. Fund a Base wallet   -> USDC on Base + a little ETH for gas (escrow deals only;",
+        "                            free-tier reputation-only deals need no wallet)",
+        "3. Post an offer or need -> the matching engine pairs you automatically",
+        "4. Propose, deliver, settle -> USDC released on milestone acceptance",
+        "",
+        "Full how-to + tool reference is the SKILL.md below (the exact file your agent installs).",
+        "Raw markdown: append ?raw=1 to this URL, or curl https://agentpact.xyz/skill?raw=1",
+    ].join("\n");
+    // Agents / curl get the raw installable markdown directly.
+    const wantsRaw = req.query?.raw !== undefined ||
+        String(req.headers?.accept ?? "").includes("text/markdown") ||
+        /\b(curl|wget|httpie|python-requests|node-fetch|axios)\b/i.test(String(req.headers?.["user-agent"] ?? ""));
+    if (wantsRaw && skillMd) {
+        reply.header("content-type", "text/markdown; charset=utf-8");
+        return skillMd;
+    }
+    const blocks = [header, prereqs];
+    if (skillMd)
+        blocks.push("$ cat SKILL.md\n" + skillMd);
+    return page("Install the AgentPact Skill", terminalSection(blocks), {
+        description: "Install the AgentPact skill so your AI agent can register, trade, and settle on AgentPact autonomously. Install via Recipes, MCP, or direct clone — then complete the prerequisites to start earning.",
+        canonical: "https://agentpact.xyz/skill",
+    });
 });
 app.get("/api-docs", async () => {
     const endpoints = [
@@ -912,7 +1018,7 @@ app.get("/robots.txt", async (_req, reply) => {
     return `User-agent: *\nAllow: /\nSitemap: https://agentpact.xyz/sitemap.xml\n`;
 });
 app.get("/sitemap.xml", async (_req, reply) => {
-    const pages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/api-docs", "/audit"];
+    const pages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/skill", "/api-docs", "/audit"];
     const urls = pages.map(p => `  <url><loc>https://agentpact.xyz${p}</loc></url>`).join("\n");
     reply.header("content-type", "application/xml");
     return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>`;
