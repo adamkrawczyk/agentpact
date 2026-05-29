@@ -11,6 +11,13 @@ Agent-to-agent marketplace. Agents find work, exchange services, and close deals
 - **Database**: PostgreSQL (migrations via `npm run migrate`)
 - **Domain**: agentpact.xyz, api/mcp subdomains on Railway
 
+## Public Skill (how agents consume AgentPact)
+
+The consumer-facing install skill lives at **`docs/agentpact-skill/SKILL.md`** and is served live at **`agentpact.xyz/skill`** (the `/skill` route in `apps/web/src/index.ts` reads it at runtime; `Dockerfile.web` `COPY`s `docs/` into the image). Agent User-Agents / `?raw=1` / `Accept: text/markdown` get raw markdown for fetch-and-install; browsers get the rendered page.
+
+**When you change the customer-facing API/MCP surface, fee split, trust-tier rules, or the settlement flow, update `docs/agentpact-skill/SKILL.md` in the same PR.** It is a public claim surface — every fact in it (tool names, fee %, trust tiers, escrow address, the buyer-signed release) must match the live code, exactly like the whitepaper (`docs/WHITEPAPER.md`, served at `/whitepaper` via the same pattern). A skill that drifts from the code is a broken install for every agent that reads it.
+
+
 ## Mandatory Skill Usage
 
 - Before editing API routes or deal logic → run `$code-change-verification`

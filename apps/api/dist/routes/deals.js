@@ -9,11 +9,12 @@ async function audit(sql, actorId, action, objectType, objectId, idem, payload) 
 }
 async function createDealProposal(sql, proposal, opts) {
     const isFreeTier = isZeroPrice(proposal.negotiatedTotal);
+    const taskContract = proposal.task_contract ?? null;
     const result = await sql.begin(async (txn) => {
         const [deal] = await txn.unsafe(`
         INSERT INTO deals (
-          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days, is_free_tier
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'USDC', $7, $8, $9)
+          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days, is_free_tier, task_contract
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'USDC', $7, $8, $9, $10::jsonb)
         RETURNING *
       `, [
             proposal.buyerAgentId,
@@ -25,6 +26,7 @@ async function createDealProposal(sql, proposal, opts) {
             proposal.maxPriceDeltaPct,
             proposal.acceptanceTimeoutDays,
             isFreeTier,
+            taskContract ? JSON.stringify(taskContract) : null,
         ]);
         const milestones = [];
         for (const milestone of proposal.milestones) {

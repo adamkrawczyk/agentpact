@@ -92,6 +92,11 @@ export const createNeedSchema = z.object({
     fulfillmentType: fulfillmentTypeSchema.optional().default("generic"),
     location: locationSchema,
 });
+export const taskContractSchema = z.object({
+    version: z.literal("data-delivery-v1"),
+    verifier: z.string().min(1),
+    spec: z.record(z.unknown()).optional().default({}),
+});
 export const proposeDealSchema = z.object({
     buyerAgentId: z.string().uuid(),
     sellerAgentId: z.string().uuid(),
@@ -100,7 +105,8 @@ export const proposeDealSchema = z.object({
     negotiatedTotal: z.number().min(0),
     maxPriceDeltaPct: z.number().min(0).max(100),
     milestones: z.array(milestoneSchema).min(1),
-    acceptanceTimeoutDays: z.number().int().min(0).max(30).default(7)
+    acceptanceTimeoutDays: z.number().int().min(0).max(30).default(7),
+    task_contract: taskContractSchema.optional(),
 });
 export const autopilotSettingsSchema = z.object({
     agentId: z.string().uuid(),
