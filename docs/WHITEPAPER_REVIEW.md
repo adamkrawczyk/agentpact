@@ -143,3 +143,84 @@ The problem is that the whitepaper chooses absolute phrasing too often: “witho
 ## Final Judgment
 
 This is real work and a promising protocol direction, but the whitepaper currently reads about one maturity level ahead of the implementation. I would not call it top-1%-of-class yet. With the above corrections, especially around v2 trust assumptions and v1 dispute custody, it could become a highly credible technical whitepaper rather than a strong marketing paper with avoidable precision errors.
+
+## Re-Review (Round 2)
+
+Review target: current `docs/WHITEPAPER.md`, Version 0.4, May 2026, after the author's revisions.
+
+Reviewer posture: adversarial technical re-review against the same implementation surface as Round 1: `contracts/AgentPactEscrow.sol`, `contracts/AgentPactEscrowV2.sol`, `contracts/predicates/*`, `apps/api/src/routes/*`, `apps/api/src/shared/utils.ts`, and `apps/daemon/*`.
+
+## Overall Score: 8.1 / 10
+
+This revision is materially more honest and much closer to code. It fixes the biggest trust-boundary problems around v1 dispute custody, constructor-configured fees, fulfillment auto-verification, Class A predicate limits, and v2 API scope. It is still not top-1%-of-class because a few old overstatements remain in nearby summary text, one new v1 dispute-timeout inaccuracy was introduced, and some fulfillment schema/daemon wording still reads ahead of the actual code.
+
+## Scores
+
+| Axis | Score | Rationale |
+|---|---:|---|
+| Technical accuracy | 8.0 | Most prior mismatches are fixed, but unresolved-dispute timeout, fulfillment schema fields, daemon "initiate execution", and Schelling "dominant strategy" summary language still conflict with code or with the paper's own caveats. |
+| Clarity and structure | 8.6 | The current-state section and explicit caveats make the shipped/designed boundaries much easier to follow. Some summary sections still use broad marketing phrasing before the later caveats. |
+| Intellectual honesty | 8.4 | Section 11 is now unusually candid, especially on v2 API, relayer, pubkey verification, and Class A key custody. The honesty is weakened by residual absolutist lines elsewhere. |
+| Technical depth | 8.2 | The paper now names the actual v2 trust model and payout branches. Remaining depth gaps are mostly around exact API/daemon lifecycle and the limits of Class B incentives. |
+| Persuasiveness | 8.0 | Much more credible to an engineer or investor than Round 1. It still needs tighter summary language before I would call it top-1%-of-class. |
+
+## Prior Issues Rechecked
+
+| # | Prior issue | Status | Current document evidence | Implementation evidence / adversarial note |
+|---:|---|---|---|---|
+| 1 | v1 dispute custody/non-custodial overstatement | PARTIALLY FIXED | Fixed in the worked example caveat: lines 179-181 state that `resolveDispute` is platform-wallet-only and that non-custodial holds only for uncontested releases. Lines 232-239 also describe the privileged dispute path and narrow the guarantee. Line 550 repeats this in current-state. | The code matches the caveat: `resolveDispute` requires `msg.sender == platformWallet` and can refund buyer or pay seller, `contracts/AgentPactEscrow.sol` lines 97-116. New problem: lines 226-228 now imply a "7-day dispute timeout" and say unresolved disputes automatically release. In v1, `claimAfterTimeout` only works while status is `Funded`, not `Disputed`, lines 119-123. Disputed milestones have no timeout release path in `AgentPactEscrow.sol`. |
+| 2 | Hardcoded 90/10 split | FIXED | Lines 179-180 explicitly say the fee is an immutable constructor parameter, configured to 10% on the deployed instance, not literally hardcoded. Line 550 repeats "immutable constructor parameter configured to 10%". | `AgentPactEscrow.sol` has `platformFeePercent` as constructor-set immutable, lines 8-10 and 33-40. V2 likewise uses constructor-set `platformFeeBps`, `AgentPactEscrowV2.sol` lines 62-63 and 171-187. The remaining 90/10 wording in lines 65, 115-119, 174, 414, and 517 is acceptable as product/deployed-instance shorthand after the explicit caveat. |
+| 3 | Fulfillment auto-verify lifecycle | FIXED | Lines 151-159 now describe the actual lifecycle: seller provision runs inline auto-verify where supported, stores the result as metadata, writes `provided` regardless, buyer acceptance moves to `active`, final confirmation moves to `verified`, and auto-complete paths can close deals. Lines 170-174 in the worked example repeat this accurately. | Code matches: route awaits `autoVerify`, lines 167-169; stores status `provided`, lines 171-185; buyer verify sets `active`, lines 514-523; confirmation sets `verified`, lines 578-584; instant and timed auto-complete paths are lines 214-232 and 727-760. |
+| 4 | Buyer confirmation always required | PARTIALLY FIXED | Line 159 correctly says buyer confirmation is the default, not universal, and names `acceptance_timeout_days = 0` plus elapsed-window auto-complete. | The implementation matches those exceptions, `fulfillment.ts` lines 214-232 and 727-760. Residual issue: line 63 still says "Buyer confirmation is required for types without auto-verify" without mentioning timeout auto-complete. That repeats the old absolute in a summary section. |
+| 5 | Fulfillment type count and schema names | PARTIALLY FIXED | The count is fixed: lines 136-145 list eight types, and line 147 says eight. The `api-access` example now uses `endpoint_url`, `auth_type`, and `auth_value`, lines 170-171. | The count matches `FULFILLMENT_TYPES`, `apps/api/src/routes/utils.ts` lines 32-199. But several table field names are still wrong: line 141 says `compute-access` requires `host`, `port`, `credentials`, while code requires `access_type` and `endpoint` with optional `credentials`, lines 102-123. Line 142 says `consulting` uses `deliverable_type`, `format`, while code uses `delivery_format`, `content_url`, `content_text`, `summary`, lines 125-140. Line 143 says `consultation` uses `session_type`, `scheduled_at`, while code is `summary`, `instructions`, passthrough, lines 142-153. |
+| 6 | API security overstatement | FIXED | Line 277 narrows the claim to "state-changing and agent-private endpoints" and explicitly lists public read-only endpoints. | This matches the global auth hook: public exact/prefix GETs are carved out in `apps/api/src/index.ts` lines 1272-1309, admin/cron/webhook exceptions are lines 1311-1343, and other `/api/` routes call `app.authenticate` at lines 1345-1347. Route-local requester checks also reject missing API keys, `apps/api/src/routes/utils.ts` lines 308-315 and `apps/api/src/shared/utils.ts` lines 61-70. |
+| 7 | Daemon auto-accept / zero-touch overstatement | PARTIALLY FIXED | Lines 394-397 now correctly say the daemon auto-proposes only and does not auto-accept, auto-fund, auto-deliver, or auto-settle. Line 554 repeats "auto-proposal" in current-state. | Code confirms auto-proposal only: `buildDealProposal` creates a proposal, `apps/daemon/src/autopilot.ts` lines 49-67; `proposeDeal` calls `/api/deals/propose`, lines 69-89; daemon loop only calls that proposal path, `apps/daemon/src/index.ts` lines 66-95. Residual issue: line 387 still says the daemon can "skip interactive negotiation and initiate execution directly", and the loop diagram lines 352-358 implies deliver/verify/settle as daemon loop output. That still overstates today's daemon. |
+| 8 | Governance-token contradiction | FIXED | Lines 122-125 say no governance token exists or is planned. Lines 446-447 repeat no governance token and none planned. The earlier contradiction is gone. | No contradictory governance-token roadmap language remains in the current document. |
+| 9 | Class A `decrypt(C,K)` predicate overstatement | FIXED | Lines 472-480 now say verifiers check witnesses only, do not decrypt ciphertext, do not prove ciphertext decrypts to the witnessed value, and rely on trusted key custody in v2.0 until adaptor-signature key release. | Code matches: `HashPreimagePredicate` ignores ciphertext and hashes witness, lines 37-49; `SignedBlobPredicate` ignores ciphertext and recovers signer over witness plaintext, lines 50-68; `MerkleMembershipPredicate` ignores ciphertext and checks witness membership, lines 47-61. `AgentPactEscrowV2` only emits `KeyDeliveryRequested`, lines 163-165 and 290-291. |
+| 10 | Schelling game-theory overstatement | PARTIALLY FIXED | The detailed Class B section is now much more accurate: seller stake cap is stated at lines 490-492; payout branches are corrected at lines 494-497; byte-equality limits and seller-stake cap are acknowledged at lines 499-505. | Code supports the corrected detail: ack timeout exists at `AgentPactEscrowV2.sol` lines 410-416; hash match sends 90% of buyer stake to seller and 10% to platform, lines 560-581; mismatch burns both stakes, lines 584-595; buyer/seller default branches are lines 597-635. Residual issue: line 446 still says "honesty is the dominant strategy", directly contradicting the nuanced "bounded, asymmetric penalties" framing at line 505. Line 124 also says v2 "makes honesty the better-paying strategy" without the byte-equality limitation. |
+| 11 | v2 API as settlement enforcement | FIXED | Lines 560-561 explicitly say the v2 routes track Postgres lifecycle state, the header says no on-chain calls, and the contract enforces settlement once the relayer is wired. Lines 562-564 also disclose unverified pubkey registration and missing relayer. | This matches `apps/api/src/routes/intents.ts`: header says no on-chain calls and relayer owns broadcasting, lines 16-22; `claim` just sets `claimed_a`, lines 457-466; `acknowledge` sets DB status, lines 359-364; `reveal` audit-logs only, lines 420-425; pubkey registration trusts submitted pubkey/signature for now, lines 575-580. |
+
+## New Or Remaining Issues
+
+1. **New v1 dispute-timeout inaccuracy.** Lines 226-228 say the 7-day dispute timeout ensures funds are not locked and unresolved disputes auto-release. That is not true for `AgentPactEscrow.sol`: `claimAfterTimeout` requires `Funded`, not `Disputed`, and `resolveDispute` has no timeout branch. This should be corrected before publishing because it appears in the threat model, not just a footnote.
+
+2. **Daemon wording still oversells "zero-touch".** The detailed bullet at lines 394-397 is accurate, but line 387 and the diagram lines 352-358 still imply execution/delivery/settlement automation. Replace "initiate execution directly" with "create a deal proposal directly" unless the daemon grows those steps.
+
+3. **Fulfillment schema table still needs exact field names.** The type count is fixed, but table rows for `compute-access`, `consulting`, and `consultation` do not match `FULFILLMENT_TYPES`. This is easy to fix and would prevent integrators from coding against wrong field names.
+
+4. **Schelling honesty language remains too strong in summaries.** The detailed section is good. The roadmap/current-state summary should not say "dominant strategy"; the contract enforces byte-equality incentives with bounded stakes, not general subjective honesty.
+
+## Top-1%-of-Class Judgment
+
+Not yet. Round 2 is a credible technical whitepaper and a large improvement over Round 1, but top-1%-of-class papers do not leave contradictory claims between summary and detail on dispute timeouts, daemon autonomy, and dominant-strategy game theory. Tightening those remaining lines and correcting the fulfillment field table would move this into the high-8s or low-9s.
+
+## Re-Review (Round 3)
+
+Review target: current `docs/WHITEPAPER.md` after the author's latest revisions.
+
+Implementation checked: `contracts/AgentPactEscrow.sol` (`resolveDispute`, `claimAfterTimeout`), `apps/daemon/src/*`, `apps/api/src/routes/utils.ts` (`FULFILLMENT_TYPES`), and `contracts/AgentPactEscrowV2.sol` plus `contracts/schelling/SchellingCommitReveal.sol`.
+
+## Overall Score: 8.7 / 10
+
+The latest revision fixes most of the Round 2 precision problems and is now much closer to the code. I still would not call it top-1%-of-class because it leaves one contract-state diagram wrong, the daemon architecture diagram still implies more automation than exists, and a new Proof-of-Skill status claim is inverted relative to the API.
+
+## Four Round 2 Issues
+
+| # | Issue | Status | Current whitepaper evidence | Code evidence / note |
+|---:|---|---|---|---|
+| 1 | v1 dispute-timeout inaccuracy in threat model | PARTIALLY FIXED | The threat model is fixed: line 228 now says a v1 dispute does not auto-resolve on a timer and requires the platform resolver. Escrow mechanics are also precise at lines 232-239. However, the state-machine diagram still shows `disputed -> timeout (7d) -> resolved` at lines 89-96, which remains false for v1. | `resolveDispute` is platform-wallet-only and requires `Disputed`, `contracts/AgentPactEscrow.sol` lines 97-116. `claimAfterTimeout` requires `Funded`, not `Disputed`, lines 119-123. There is no disputed-state timeout release branch. |
+| 2 | Daemon wording oversells zero-touch / execution | PARTIALLY FIXED | The prior line-387 problem is fixed: lines 385-397 now say the daemon creates a deal proposal directly and explicitly does not auto-accept, auto-fund, auto-deliver, or auto-settle. Remaining overstatement: line 314 says the daemon can "execute deals with minimal latency," and the loop diagram still has `Deliver + Verify + Settle` inside the daemon loop at lines 352-358. | The daemon watches matches and posts proposals only: `selectAutopilotMatches` filters candidates and `buildDealProposal` creates a proposal, `apps/daemon/src/autopilot.ts` lines 22-67; `proposeDeal` calls `/api/deals/propose`, lines 69-89; the runtime loop only calls that proposal path, `apps/daemon/src/index.ts` lines 66-95. |
+| 3 | Fulfillment schema table field names for `compute-access`, `consulting`, `consultation` | PARTIALLY FIXED | The field names are now aligned at lines 141-143: `compute-access` uses `access_type`, `endpoint`, `credentials`; `consulting` uses `delivery_format`, `content_url`/`content_text`; `consultation` uses `summary`, `instructions`. Remaining accuracy issue: the table column is titled "Required Fields" at line 136, but several listed fields are optional. | Code requires only `access_type` and `endpoint` for `compute-access`; `credentials` is optional, `apps/api/src/routes/utils.ts` lines 102-123. `consulting` requires only `delivery_format`; `content_url`, `content_text`, and `summary` are optional, lines 125-140. `consultation` has optional `summary` and `instructions` and `.passthrough()`, lines 142-153. |
+| 4 | Schelling "dominant strategy" language in summaries | FIXED | The problematic summary language is gone. Line 124 now limits the claim to false-rejection/default being negative-expected-value and points to byte-equality limits; line 446 says the mechanism adjudicates byte-equality with bounded stakes, not subjective quality; line 505 explicitly rejects "honesty is the strictly dominant strategy." | This matches the contract better: hash match pays seller plus 90% of buyer stake, `AgentPactEscrowV2.sol` lines 560-581; hash mismatch burns both stakes, lines 584-595; defaults burn the defaulting stake, lines 597-635; byte equality is the only comparison in `SchellingCommitReveal.revealsMatch`, lines 84-100. |
+
+## New Or Remaining Inaccuracies
+
+1. **State-machine diagram still shows a disputed timeout.** Lines 89-96 are the main remaining v1 escrow inaccuracy. It should show disputed milestones resolving only through `resolveDispute`, not through a 7-day timeout.
+
+2. **Proof-of-Skill is now mislabeled as not implemented.** Line 243 says Proof-of-Skill is "Planned - not yet implemented." The API has live routes for listing, starting, submitting, and reading skill challenges: `apps/api/src/routes/agents.ts` lines 265-351, 354-447, and 449-480. The precise caveat is not "not implemented"; it is that deterministic pass/fail updates `agents.skills_verified` and `skill_verification_count`, not the 0-5 `reputation_score`, lines 409-424.
+
+3. **Fulfillment table still conflates schema fields with required fields.** This is smaller than the Round 2 issue because the names are now right, but integrators could still treat optional fields as mandatory from line 136.
+
+## Top-1%-of-Class Judgment
+
+Not yet. This is now a strong technical whitepaper with unusually good trust-boundary caveats, but top-1%-of-class requires the summary diagrams and shipped/planned labels to be as exact as the detailed sections.
