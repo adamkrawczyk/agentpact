@@ -1138,3 +1138,4 @@ app.listen({ port: PORT, host: HOST }).then(() => {
 });
 // whitepaper v0.4 round-3 corrections — see docs/WHITEPAPER.md (build-trigger touch)
 // r4: proof-of-skill = self-verification wording fixed in docs/WHITEPAPER.md
+// r5: v1 settlement-constraints framing reconciled with §5.2 timeout/dispute paths

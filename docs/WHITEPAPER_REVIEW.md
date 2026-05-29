@@ -224,3 +224,51 @@ The latest revision fixes most of the Round 2 precision problems and is now much
 ## Top-1%-of-Class Judgment
 
 Not yet. This is now a strong technical whitepaper with unusually good trust-boundary caveats, but top-1%-of-class requires the summary diagrams and shipped/planned labels to be as exact as the detailed sections.
+
+## Re-Review (Round 4 — final)
+
+Review target: current `docs/WHITEPAPER.md` after the author's post-Round-3 revisions.
+
+Implementation checked: `contracts/AgentPactEscrow.sol`, `apps/daemon/src/index.ts`, `apps/daemon/src/autopilot.ts`, `apps/api/src/routes/agents.ts`, `apps/api/src/routes/schemas.ts`, `apps/api/src/routes/utils.ts`, and `migrations/007_proof_of_skill.sql`.
+
+## Final Overall Score: 9.1 / 10
+
+This revision fixes the three Round 3 blockers in substance and is now a very strong, code-grounded technical whitepaper. I would still not call it top-1%-of-class because one Proof-of-Skill sentence overstates buyer-issued challenge support that the current API does not implement.
+
+## Round 3 Issues Rechecked
+
+| # | Issue | Status | Current whitepaper evidence | Code evidence / note |
+|---:|---|---|---|---|
+| 1 | State-machine diagram showed `disputed -> timeout (7d) -> resolved` | FIXED | The diagram now routes `disputed` only through `resolveDispute (platform wallet)` at `docs/WHITEPAPER.md` lines 89-96. Line 100 explicitly says there is no automatic timeout that releases a disputed milestone and that the funded-state seller timeout is separate. | This matches v1 escrow: `resolveDispute` is platform-wallet-only and requires `Disputed`, `contracts/AgentPactEscrow.sol` lines 97-101; `claimAfterTimeout` requires `Funded`, not `Disputed`, lines 119-123. |
+| 2 | Daemon loop implied Deliver+Verify+Settle inside the daemon loop plus an "execute deals" line | FIXED | The daemon section now says the daemon can continuously discover work and propose deals, while acceptance, funding, delivery, and release remain on the standard deal flow, `docs/WHITEPAPER.md` line 317. The loop diagram now says `Propose Deal` then `[hand off to standard deal flow: accept · fund · deliver · verify · buyer-signed release]`, lines 355-360, and line 366 says daemon autonomy ends at proposing. Lines 392-402 repeat that zero-touch currently means automated discovery and proposal, not unattended settlement. | This matches the daemon: `runDaemon` watches the market and calls `proposeDeal` only, `apps/daemon/src/index.ts` lines 47-95. `buildDealProposal` creates a proposal object, lines 49-67, and `proposeDeal` posts to `/api/deals/propose`, `apps/daemon/src/autopilot.ts` lines 69-89. |
+| 3 | Proof-of-Skill was mislabeled "not implemented"; fulfillment table conflated required and optional fields | PARTIALLY FIXED | The old mislabel is fixed: `docs/WHITEPAPER.md` line 246 now says the challenge routes are live and that passing updates `skills_verified` and `skill_verification_count`, not `reputation_score`. The fulfillment table header is also fixed: line 139 now says `Key Fields (required + notable optional)`, not `Required Fields`. | The update behavior matches code: challenge list/start/submit/read routes are live at `apps/api/src/routes/agents.ts` lines 265-351, 354-447, and 449-484; deterministic passing updates `skills_verified` and `skill_verification_count`, lines 409-424; `reputation_score` is computed from feedback, `apps/api/src/routes/utils.ts` lines 222-228. The table header now accurately allows optional fields, which matches `FULFILLMENT_TYPES`, e.g. optional `credentials`, `content_url`, `content_text`, `summary`, and `instructions` at `apps/api/src/routes/utils.ts` lines 102-153. Remaining issue: line 246 says buyers can issue Proof-of-Skill challenges, but the current route schema and handlers are self-verification against an admin-seeded catalog: `startChallengeSchema` only accepts `agentId`, `apps/api/src/routes/schemas.ts` lines 265-267; the start/submit routes require `body.agentId === requesterAgentId`, `apps/api/src/routes/agents.ts` lines 285-291 and 354-360; the migration describes `skill_challenges` as admin-seeded, `migrations/007_proof_of_skill.sql` line 1. |
+
+## New Inaccuracy
+
+1. **Buyer-issued Proof-of-Skill is not implemented.** `docs/WHITEPAPER.md` line 246 says buyers can issue Proof-of-Skill challenges before high-value deals. The implemented model is a public/admin-seeded challenge catalog that an agent starts and submits for itself, with authorization requiring the submitted `agentId` to match the requester. There is no buyer-issued, seller-targeted, deal-scoped challenge route in the checked API surface.
+
+## Top-1%-of-Class Judgment
+
+Not quite. The only exact remaining blocker is the buyer-issued Proof-of-Skill claim at `docs/WHITEPAPER.md` line 246; rewrite it to "agents can complete Proof-of-Skill challenges from the live challenge catalog" or add real buyer-issued challenge routes before publishing. With that correction, I would score this in the low-to-mid 9s and call it top-1%-of-class for an implementation-backed agent-commerce whitepaper.
+
+## Re-Review (Round 5 — final)
+
+Review target: current `docs/WHITEPAPER.md` after the author's post-Round-4 revision to §5.3.
+
+Implementation checked: `apps/api/src/routes/agents.ts`, `apps/api/src/routes/schemas.ts`, `migrations/007_proof_of_skill.sql`, `contracts/AgentPactEscrow.sol`, and targeted supporting routes for reputation, fulfillment, disputes, daemon scope, MCP tool count, and v2 limitation claims.
+
+## Final Overall Score: 9.2 / 10
+
+The Round 4 Proof-of-Skill blocker is resolved. `docs/WHITEPAPER.md` line 246 now describes a public challenge catalog, agent self-verification, requester-bound self-submission, `skills_verified` / `skill_verification_count` updates, no impact on the 0-5 feedback reputation score, and buyer-issued seller-targeted challenges as not yet built. This matches the API: challenge list is public/catalog-based (`apps/api/src/routes/agents.ts` lines 265-283), start/submit schemas accept only `agentId` plus submission (`apps/api/src/routes/schemas.ts` lines 265-272), start and submit require `body.agentId === requesterAgentId` (`apps/api/src/routes/agents.ts` lines 285-291 and 354-360), deterministic passing updates `skills_verified` and `skill_verification_count` (`apps/api/src/routes/agents.ts` lines 409-424), and the migration defines admin-seeded catalog tables (`migrations/007_proof_of_skill.sql` lines 1-29).
+
+## Final Adversarial Pass
+
+One blocker remains outside §5.3:
+
+**Blocker: §10 overstates v1 buyer-online lockup as indefinite and as a single buyer-signed release mechanism.** `docs/WHITEPAPER.md` lines 457-459 say the current v1 protocol settles every deal through "a uniform release mechanism: buyer signs `acceptMilestone`" and that if the buyer wallet goes cold, "funds sit in escrow indefinitely." The contract has three release/resolution paths, not one: buyer `acceptMilestone` (`contracts/AgentPactEscrow.sol` lines 72-85), platform-wallet `resolveDispute` for disputed milestones (`contracts/AgentPactEscrow.sol` lines 97-117), and seller `claimAfterTimeout` after `TIMEOUT_PERIOD` while still `Funded` (`contracts/AgentPactEscrow.sol` lines 119-134). The document is precise about this elsewhere (§2.1 and §5.2), but this §10 motivation sentence still conflicts with code and should say buyer signature is the happy-path release, while absent-buyer protection exists through the funded-state seller timeout and disputes use the platform resolver.
+
+I did not find any remaining conflict in §5.3 itself. I also rechecked the previously fragile areas: fulfillment lifecycle and field table, v1 disputed-timeout distinction, daemon auto-propose scope, API auth public/private split, v2 witness/key-custody limitations, Schelling payout language, v2 API DB-only limitation, MCP tool count, and reputation/trust-tier formulas. The surviving issue above is the only remaining code-conflicting blocker I found in this final pass.
+
+## Top-1%-of-Class Verdict
+
+Not yet. This is now very close and the original Proof-of-Skill blocker is fixed, but top-1%-of-class whitepapers do not leave a "funds sit indefinitely" claim in the v2 motivation when the contract implements a seller timeout path and a separate dispute resolver.

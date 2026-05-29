@@ -454,9 +454,9 @@ Dispute resolution is handled at the protocol level by stake-based Schelling com
 
 ## 10. v2 Settlement Protocol — Three Architectural Classes
 
-The current v1 protocol settles every deal through a single escrow contract with a uniform release mechanism: buyer signs `acceptMilestone`. This works, but it has three scaling constraints that the v2 redesign addresses:
+The current v1 protocol settles the happy path through a single escrow contract: the buyer signs `acceptMilestone`. (Two non-happy-path exits exist, as documented in §5.2 — a seller `claimAfterTimeout` on a `funded` milestone, and a platform-wallet `resolveDispute` for contested deals.) This works, but it has three scaling constraints that the v2 redesign addresses:
 
-1. **Buyer must be online.** USDC release requires a buyer-signed transaction. If the buyer's wallet goes cold, funds sit in escrow indefinitely.
+1. **The happy path needs the buyer online.** A clean release is a buyer-signed transaction. If the buyer's wallet goes cold, the seller's only recourse is the funded-state timeout claim or — on a dispute — the platform resolver; there is no buyer-cold *happy-path* release. v2 makes buyer-cold settlement the norm, not the fallback.
 2. **Money locks at deal acceptance, not at intent.** A buyer posts a Need (advertisement only), then a seller proposes, then the buyer accepts and funds — four round-trips, three requiring the buyer's wallet.
 3. **Settlement is uniform.** An API-key deal and a creative-writing deal follow the same flow. But their trust requirements are fundamentally different: the API key can be cryptographically verified, while the writing cannot.
 
