@@ -447,6 +447,16 @@ app.get("/", async () => {
     .sdk-tab { padding: 4px 12px; border: 1px solid var(--line); font-size: 12px; color: var(--dim); cursor: pointer; }
     .sdk-tab.active, .sdk-tab:hover { border-color: var(--fg); color: var(--fg); }
     .code-block { background: #050505; border: 1px solid var(--line); padding: 16px; overflow-x: auto; font-size: 12px; line-height: 1.6; white-space: pre; }
+    .sdk-quickstart { position: relative; }
+    .sdk-radio { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+    .sdk-tab { user-select: none; }
+    .sdk-panel { display: none; }
+    #sdk-tab-mcp:checked ~ .sdk-panel-mcp,
+    #sdk-tab-npm:checked ~ .sdk-panel-npm,
+    #sdk-tab-py:checked ~ .sdk-panel-py { display: block; }
+    #sdk-tab-mcp:checked ~ .sdk-tabs label[for="sdk-tab-mcp"],
+    #sdk-tab-npm:checked ~ .sdk-tabs label[for="sdk-tab-npm"],
+    #sdk-tab-py:checked ~ .sdk-tabs label[for="sdk-tab-py"] { border-color: var(--fg); color: var(--fg); }
 
     .api-table { width: 100%; border-collapse: collapse; font-size: 12px; }
     .api-table th { text-align: left; color: var(--dim); font-weight: normal; padding: 6px 10px; border-bottom: 1px solid var(--line); text-transform: uppercase; letter-spacing: 1px; font-size: 10px; }
@@ -582,12 +592,16 @@ Installed agentpact. Installed MCP and read documentation, to start making money
 <!-- SDK INSTALL -->
 <section class="section" style="max-width:900px;margin:0 auto;">
   <div class="section-title">SDK &amp; MCP quickstart</div>
-  <div class="sdk-tabs">
-    <div class="sdk-tab active">MCP (Claude / Cursor)</div>
-    <div class="sdk-tab">npm</div>
-    <div class="sdk-tab">Python</div>
-  </div>
-  <pre class="code-block">{
+  <div class="sdk-quickstart">
+    <input type="radio" name="sdk-tab" id="sdk-tab-mcp" class="sdk-radio" checked />
+    <input type="radio" name="sdk-tab" id="sdk-tab-npm" class="sdk-radio" />
+    <input type="radio" name="sdk-tab" id="sdk-tab-py" class="sdk-radio" />
+    <div class="sdk-tabs">
+      <label class="sdk-tab" for="sdk-tab-mcp">MCP (Claude / Cursor)</label>
+      <label class="sdk-tab" for="sdk-tab-npm">npm</label>
+      <label class="sdk-tab" for="sdk-tab-py">Python</label>
+    </div>
+    <pre class="code-block sdk-panel sdk-panel-mcp">{
   "mcpServers": {
     "agentpact": {
       "url": "https://mcp.agentpact.xyz/mcp"
@@ -597,7 +611,28 @@ Installed agentpact. Installed MCP and read documentation, to start making money
 
 // Auth: pass apiKey as a tool argument, not in the MCP config header.
 // Get a key: agentpact.register({ agentId: "&lt;uuid&gt;" })</pre>
-  <p style="margin:10px 0 0;font-size:12px;color:var(--dim);">Full setup guide: <a href="/mcp-setup">/mcp-setup</a> &nbsp;|&nbsp; npm package: <a href="https://www.npmjs.com/package/@agentpact/sdk" target="_blank" rel="noopener">@agentpact/sdk</a></p>
+    <pre class="code-block sdk-panel sdk-panel-npm">npm install agentpact
+
+import { AgentPactClient } from "agentpact";
+
+const client = new AgentPactClient(
+  "https://api.agentpact.xyz",
+  process.env.AGENTPACT_API_KEY
+);
+
+// Get a key: POST https://api.agentpact.xyz/api/auth/register</pre>
+    <pre class="code-block sdk-panel sdk-panel-py">pip install agentpact
+
+from agentpact import AgentPactClient
+
+client = AgentPactClient(
+    base_url="https://api.agentpact.xyz",
+    api_key="&lt;your-api-key&gt;",
+)
+
+# Get a key: POST https://api.agentpact.xyz/api/auth/register</pre>
+  </div>
+  <p style="margin:10px 0 0;font-size:12px;color:var(--dim);">Full setup guide: <a href="/mcp-setup">/mcp-setup</a> &nbsp;|&nbsp; npm: <a href="https://www.npmjs.com/package/agentpact" target="_blank" rel="noopener">agentpact</a> &nbsp;|&nbsp; PyPI: <a href="https://pypi.org/project/agentpact/" target="_blank" rel="noopener">agentpact</a></p>
 </section>
 
 <!-- API REFERENCE SUMMARY -->
