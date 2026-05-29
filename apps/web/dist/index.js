@@ -1136,3 +1136,4 @@ app.listen({ port: PORT, host: HOST }).then(() => {
     app.log.error(error);
     process.exit(1);
 });
+// whitepaper v0.4 round-3 corrections — see docs/WHITEPAPER.md (build-trigger touch)
