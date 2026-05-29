@@ -272,3 +272,32 @@ I did not find any remaining conflict in §5.3 itself. I also rechecked the prev
 ## Top-1%-of-Class Verdict
 
 Not yet. This is now very close and the original Proof-of-Skill blocker is fixed, but top-1%-of-class whitepapers do not leave a "funds sit indefinitely" claim in the v2 motivation when the contract implements a seller timeout path and a separate dispute resolver.
+
+## Re-Review (Round 6 — final)
+
+Review target: current `docs/WHITEPAPER.md` after the author's post-Round-5 revision to the §10 intro.
+
+Implementation checked: `contracts/AgentPactEscrow.sol`, `contracts/AgentPactEscrowV2.sol`, `contracts/schelling/SchellingCommitReveal.sol`, `contracts/predicates/*`, `apps/api/src/routes/*`, and `apps/daemon/src/*`.
+
+## Final Overall Score: 9.4 / 10
+
+The Round 5 blocker is resolved. `docs/WHITEPAPER.md` lines 457-459 now say v1 settles the happy path through buyer-signed `acceptMilestone`, while two non-happy-path exits exist: seller `claimAfterTimeout` on a `funded` milestone and platform-wallet `resolveDispute` for contested deals. This matches `AgentPactEscrow.sol`: `acceptMilestone` is buyer-only and requires `Funded` (`contracts/AgentPactEscrow.sol` lines 72-85), `resolveDispute` is platform-wallet-only and requires `Disputed` (`contracts/AgentPactEscrow.sol` lines 97-116), and `claimAfterTimeout` is seller-only, requires `Funded`, and requires the 7-day timeout (`contracts/AgentPactEscrow.sol` lines 119-134). The API's on-chain release route also returns `buyer_sign_required` instead of broadcasting the happy-path release (`apps/api/src/routes/payments.ts` lines 431-439), which supports the paper's happy-path framing.
+
+## Final Adversarial Pass
+
+No blocker remains.
+
+The previously fragile areas now align with the checked code:
+
+- v1 dispute and timeout semantics are consistent: disputed milestones resolve only through the platform resolver, while seller timeout remains a funded-state path.
+- Fulfillment wording matches the route: auto-verification is awaited inline, recorded as metadata, fulfillment is stored as `provided`, buyer verification moves to `active`, confirmation moves to `verified`, and zero/elapsed acceptance windows can auto-complete (`apps/api/src/routes/fulfillment.ts` lines 167-185, 214-232, 514-584, and 728-759).
+- Fulfillment type count and field names match `FULFILLMENT_TYPES` (`apps/api/src/routes/utils.ts` lines 32-153).
+- Proof-of-Skill is now correctly described as self-verification against a public/admin-seeded catalog: challenge list/start/submit/read routes exist, start/submit require `body.agentId === requesterAgentId`, and passing updates `skills_verified` / `skill_verification_count` (`apps/api/src/routes/agents.ts` lines 265-291, 354-424, and 449-484).
+- Daemon scope is accurately limited to heartbeat, watch, and policy-bounded auto-proposal: the runtime loop selects matches and calls `/api/deals/propose`, with no auto-fund, auto-deliver, or auto-settle path (`apps/daemon/src/index.ts` lines 47-95; `apps/daemon/src/autopilot.ts` lines 22-89).
+- v2 Class A trust boundaries are candid: the contract verifies seller-supplied witnesses and emits `KeyDeliveryRequested`, while predicate comments and implementations confirm ciphertext is not decrypted on-chain (`contracts/AgentPactEscrowV2.sol` lines 261-291; `contracts/predicates/HashPreimagePredicate.sol` lines 18-23 and 37-49).
+- v2 Class B payout and game-theory language now matches the contract: ack timeout pays seller and refunds stakes, hash-match awards most buyer stake to seller, mismatch burns both stakes, defaults burn the defaulting stake, and equality is byte-equality rather than subjective quality (`contracts/AgentPactEscrowV2.sol` lines 410-435 and 560-635; `contracts/schelling/SchellingCommitReveal.sol` lines 84-100).
+- v2 API limitations are honestly stated: `apps/api/src/routes/intents.ts` explicitly says this PR makes no on-chain calls and persists DB state for relayer/webhook coordination (`apps/api/src/routes/intents.ts` lines 16-22), while pubkey registration still trusts the submitted pubkey/signature pair pending verification (`apps/api/src/routes/intents.ts` lines 575-580).
+
+## Top-1%-of-Class Verdict
+
+Yes. It is now top-1%-of-class for an implementation-backed agent-commerce whitepaper: the paper is specific, adversarially caveated, and no longer makes a code-conflicting claim in the checked contract/API/daemon surfaces. Remaining caveats are disclosed as limitations rather than hidden contradictions.
