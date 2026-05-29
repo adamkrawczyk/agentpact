@@ -858,7 +858,7 @@ app.get("/whitepaper", async () => {
     const candidates = [
         resolve(process.cwd(), "docs/WHITEPAPER.md"),
         resolve(process.cwd(), "../../docs/WHITEPAPER.md"),
-        resolve(__dirname, "../../../docs/WHITEPAPER.md"),
+        resolve(process.cwd(), "apps/web/docs/WHITEPAPER.md"),
     ];
     md = "# Whitepaper\n\nFile not found.";
     for (const wpPath of candidates) {
