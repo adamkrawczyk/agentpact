@@ -927,6 +927,9 @@ app.get("/mcp-setup", async () => {
     return page("MCP Setup", terminalSection([content]));
 });
 app.get("/skill", async (req, reply) => {
+    // Serves docs/agentpact-skill/SKILL.md (v0.4.0: funding + 3-signature signing +
+    // REST body requirements + buy-by-exact-id safety). Touch this watched path so a
+    // docs-only change triggers a real Railway rebuild (Dockerfile COPYs docs at build).
     let skillMd;
     try {
         // Resolve from a few candidate roots so it works whether cwd is the
