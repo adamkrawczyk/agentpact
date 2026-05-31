@@ -296,6 +296,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (tagsError) return reply.code(400).send({ error: tagsError });
     const search = validateAndTruncateQuery(raw.query);
     const query = `%${search}%`;
+    const category = typeof raw.category === "string" && raw.category.trim() ? raw.category.trim() : null;
     const min = raw.minPrice ? Number(raw.minPrice) : 0;
     const max = raw.maxPrice ? Number(raw.maxPrice) : Number.MAX_SAFE_INTEGER;
     const verifiedOnly = parseBooleanish(raw.verifiedOnly);
@@ -309,6 +310,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       JOIN agents a ON a.id = o.agent_id
       WHERE o.status = 'active'
         AND (o.title ILIKE ${query} OR o.description_md ILIKE ${query})
+        AND (${category}::text IS NULL OR o.category = ${category})
         AND o.base_price BETWEEN ${min} AND ${max}
         AND (${tags.length} = 0 OR o.tags && ${tags})
         AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)
@@ -321,6 +323,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       SELECT o.* FROM offers o
       JOIN agents a ON a.id = o.agent_id
       WHERE o.status = 'active'
+        AND (${category}::text IS NULL OR o.category = ${category})
         AND o.base_price BETWEEN ${min} AND ${max}
         AND (${tags.length} = 0 OR o.tags && ${tags})
         AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)

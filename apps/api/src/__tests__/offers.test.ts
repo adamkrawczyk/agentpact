@@ -117,6 +117,61 @@ describe("Offers API", () => {
       expect(body.some((offer) => offer.title.includes("Alpha"))).toBe(true);
     });
 
+    it("should filter offers by category", async () => {
+      const { app } = await createTestApp();
+      await app.inject({
+        method: "POST",
+        url: "/api/offers",
+        headers: authHeaders,
+        payload: { ...generateTestOffer(agentId), title: "Data Pipeline", category: "data" }
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/offers",
+        headers: authHeaders,
+        payload: { ...generateTestOffer(agentId), title: "Onboarding Helper", category: "onboarding" }
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/offers?category=onboarding",
+        headers: authHeaders
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as Array<{ title: string; category: string }>;
+      expect(body.length).toBeGreaterThan(0);
+      // every returned offer must be in the requested category — pre-fix this returned all categories
+      expect(body.every((offer) => offer.category === "onboarding")).toBe(true);
+      expect(body.some((offer) => offer.category === "data")).toBe(false);
+    });
+
+    it("should combine category with a text query", async () => {
+      const { app } = await createTestApp();
+      await app.inject({
+        method: "POST",
+        url: "/api/offers",
+        headers: authHeaders,
+        payload: { ...generateTestOffer(agentId), title: "Earn first dollar", category: "onboarding" }
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/offers",
+        headers: authHeaders,
+        payload: { ...generateTestOffer(agentId), title: "Earn with scraping", category: "data" }
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/offers?query=Earn&category=onboarding",
+        headers: authHeaders
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as Array<{ title: string; category: string }>;
+      expect(body.every((offer) => offer.category === "onboarding")).toBe(true);
+    });
+
     it("should filter to free-tier offers and tag them as reputation-only", async () => {
       const { app } = await createTestApp();
       await app.inject({
