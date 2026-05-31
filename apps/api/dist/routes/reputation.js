@@ -26,6 +26,50 @@ function computeOverallReputationScore(metrics) {
         responseScore * 0.15 +
         disputeScore * 0.1);
 }
+// Pure transform from the raw aggregate row (produced by the stats query below
+// and by the single-query leaderboard) into a ReputationProfile. Extracted so
+// the leaderboard can score every agent from ONE query instead of issuing one
+// getReputationProfile round-trip per agent (the N+1 that saturated the pool).
+function computeProfileFromStats(agentId, stats, computeTrustTier) {
+    const totalDeals = Number(stats.total_deals ?? 0);
+    const totalCompletedDeals = Number(stats.total_completed_deals ?? 0);
+    const totalReviews = Number(stats.review_count ?? 0);
+    const sellerDeals = Number(stats.seller_deals ?? 0);
+    const sellerCompletedDeals = Number(stats.seller_completed_deals ?? 0);
+    const disputedDeals = Number(stats.disputed_deals ?? 0);
+    const averageRating = stats.avg_rating === null || stats.avg_rating === undefined ? null : Number(stats.avg_rating);
+    const avgResponseTime = stats.avg_response_time === null || stats.avg_response_time === undefined ? null : roundMetric(Number(stats.avg_response_time));
+    const deliveryRate = sellerDeals > 0 ? roundMetric((sellerCompletedDeals / sellerDeals) * 100) : 0;
+    const dealCompletionRate = totalDeals > 0 ? roundMetric((totalCompletedDeals / totalDeals) * 100) : 0;
+    const disputeRate = totalDeals > 0 ? roundMetric((disputedDeals / totalDeals) * 100) : 0;
+    const trustTier = computeTrustTier(totalCompletedDeals, averageRating ?? 0);
+    return {
+        agent_id: agentId,
+        overall_score: computeOverallReputationScore({
+            averageRating,
+            deliveryRate,
+            dealCompletionRate,
+            disputeRate,
+            avgResponseTime,
+            totalDeals,
+            totalReviews,
+        }),
+        delivery_rate: deliveryRate,
+        avg_response_time: avgResponseTime,
+        deal_completion_rate: dealCompletionRate,
+        dispute_rate: disputeRate,
+        trust_tier: trustTier,
+        total_deals: totalDeals,
+        total_reviews: totalReviews,
+        total_completed_deals: totalCompletedDeals,
+        rating_breakdown: {
+            quality: stats.avg_quality === null || stats.avg_quality === undefined ? null : roundMetric(Number(stats.avg_quality)),
+            timeliness: stats.avg_timeliness === null || stats.avg_timeliness === undefined ? null : roundMetric(Number(stats.avg_timeliness)),
+            communication: stats.avg_communication === null || stats.avg_communication === undefined ? null : roundMetric(Number(stats.avg_communication)),
+            accuracy: stats.avg_accuracy === null || stats.avg_accuracy === undefined ? null : roundMetric(Number(stats.avg_accuracy)),
+        },
+    };
+}
 export async function getReputationProfile(db, computeTrustTier, agentId) {
     const [agent] = await db `
     SELECT id
@@ -87,79 +131,94 @@ export async function getReputationProfile(db, computeTrustTier, agentId) {
       WHERE d.seller_agent_id = subject.agent_id
     ) resp ON true
   `;
-    const totalDeals = Number(stats.total_deals ?? 0);
-    const totalCompletedDeals = Number(stats.total_completed_deals ?? 0);
-    const totalReviews = Number(stats.review_count ?? 0);
-    const sellerDeals = Number(stats.seller_deals ?? 0);
-    const sellerCompletedDeals = Number(stats.seller_completed_deals ?? 0);
-    const disputedDeals = Number(stats.disputed_deals ?? 0);
-    const averageRating = stats.avg_rating === null ? null : Number(stats.avg_rating);
-    const avgResponseTime = stats.avg_response_time === null ? null : roundMetric(Number(stats.avg_response_time));
-    const deliveryRate = sellerDeals > 0 ? roundMetric((sellerCompletedDeals / sellerDeals) * 100) : 0;
-    const dealCompletionRate = totalDeals > 0 ? roundMetric((totalCompletedDeals / totalDeals) * 100) : 0;
-    const disputeRate = totalDeals > 0 ? roundMetric((disputedDeals / totalDeals) * 100) : 0;
-    const trustTier = computeTrustTier(totalCompletedDeals, averageRating ?? 0);
-    return {
-        agent_id: agentId,
-        overall_score: computeOverallReputationScore({
-            averageRating,
-            deliveryRate,
-            dealCompletionRate,
-            disputeRate,
-            avgResponseTime,
-            totalDeals,
-            totalReviews,
-        }),
-        delivery_rate: deliveryRate,
-        avg_response_time: avgResponseTime,
-        deal_completion_rate: dealCompletionRate,
-        dispute_rate: disputeRate,
-        trust_tier: trustTier,
-        total_deals: totalDeals,
-        total_reviews: totalReviews,
-        total_completed_deals: totalCompletedDeals,
-        rating_breakdown: {
-            quality: stats.avg_quality === null ? null : roundMetric(Number(stats.avg_quality)),
-            timeliness: stats.avg_timeliness === null ? null : roundMetric(Number(stats.avg_timeliness)),
-            communication: stats.avg_communication === null ? null : roundMetric(Number(stats.avg_communication)),
-            accuracy: stats.avg_accuracy === null ? null : roundMetric(Number(stats.avg_accuracy)),
-        },
-    };
+    return computeProfileFromStats(agentId, stats, computeTrustTier);
 }
 async function listReputationLeaderboard(db, computeTrustTier, opts) {
-    const candidates = await db `
+    // Single-query leaderboard. Previously this loaded every agent and then issued
+    // one getReputationProfile round-trip PER agent via Promise.all — an unbounded
+    // N+1 that fired ~1.4k concurrent queries against a 20-connection pool and
+    // produced CONNECTION_CLOSED / pool-saturation cascades once the marketplace
+    // grew past a few dozen agents. We now compute all per-agent aggregates in ONE
+    // statement (LATERAL subqueries mirror getReputationProfile's stats query),
+    // then score + sort + slice in JS. Ranking semantics are unchanged.
+    const category = opts.category ?? null;
+    const rows = await db `
     SELECT
       a.id,
       a.display_name,
-      COUNT(*) FILTER (
-        WHERE ${opts.category ?? null}::text IS NOT NULL
-          AND o.category = ${opts.category ?? null}::text
-          AND o.status = 'active'
-      )::int AS category_match_count
+      fb.review_count,
+      fb.avg_quality,
+      fb.avg_timeliness,
+      fb.avg_communication,
+      fb.avg_accuracy,
+      fb.avg_rating,
+      deals.total_deals,
+      deals.total_completed_deals,
+      deals.disputed_deals,
+      deals.seller_deals,
+      deals.seller_completed_deals,
+      resp.avg_response_time,
+      COALESCE(cat.category_match_count, 0)::int AS category_match_count
     FROM agents a
-    LEFT JOIN offers o ON o.agent_id = a.id
-    WHERE ${opts.category ?? null}::text IS NULL
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*)::int AS review_count,
+        AVG(rating_quality) AS avg_quality,
+        AVG(rating_timeliness) AS avg_timeliness,
+        AVG(rating_communication) AS avg_communication,
+        AVG(rating_accuracy) AS avg_accuracy,
+        AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0) AS avg_rating
+      FROM feedback
+      WHERE to_agent_id = a.id
+    ) fb ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*)::int AS total_deals,
+        COUNT(*) FILTER (WHERE status = 'completed')::int AS total_completed_deals,
+        COUNT(*) FILTER (WHERE status = 'disputed')::int AS disputed_deals,
+        COUNT(*) FILTER (WHERE seller_agent_id = a.id)::int AS seller_deals,
+        COUNT(*) FILTER (WHERE seller_agent_id = a.id AND status = 'completed')::int AS seller_completed_deals
+      FROM deals
+      WHERE buyer_agent_id = a.id OR seller_agent_id = a.id
+    ) deals ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        AVG(GREATEST(EXTRACT(EPOCH FROM (accept_event.created_at - d.created_at)) / 60.0, 0)) AS avg_response_time
+      FROM deals d
+      JOIN LATERAL (
+        SELECT created_at
+        FROM negotiation_events
+        WHERE deal_id = d.id
+          AND actor_agent_id = a.id
+          AND event_type = 'accept'
+        ORDER BY created_at ASC
+        LIMIT 1
+      ) accept_event ON true
+      WHERE d.seller_agent_id = a.id
+    ) resp ON true
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*)::int AS category_match_count
+      FROM offers o
+      WHERE o.agent_id = a.id
+        AND o.status = 'active'
+        AND ${category}::text IS NOT NULL
+        AND o.category = ${category}::text
+    ) cat ON true
+    WHERE ${category}::text IS NULL
       OR EXISTS (
         SELECT 1
         FROM offers match_offer
         WHERE match_offer.agent_id = a.id
           AND match_offer.status = 'active'
-          AND match_offer.category = ${opts.category ?? null}::text
+          AND match_offer.category = ${category}::text
       )
-    GROUP BY a.id, a.display_name
   `;
-    const profiles = await Promise.all(candidates.map(async (row) => {
-        const profile = await getReputationProfile(db, computeTrustTier, String(row.id));
-        if (!profile)
-            return null;
-        return {
-            ...profile,
-            agent_name: String(row.display_name),
-            category_match_count: Number(row.category_match_count ?? 0),
-        };
-    }));
-    return profiles
-        .filter((profile) => profile !== null)
+    return rows
+        .map((row) => ({
+        ...computeProfileFromStats(String(row.id), row, computeTrustTier),
+        agent_name: String(row.display_name),
+        category_match_count: Number(row.category_match_count ?? 0),
+    }))
         .sort((left, right) => right.overall_score - left.overall_score ||
         right.total_completed_deals - left.total_completed_deals ||
         right.total_reviews - left.total_reviews ||
