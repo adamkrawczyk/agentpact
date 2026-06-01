@@ -1060,6 +1060,10 @@ app.get("/skill", async (req: any, reply: any) => {
   // Serves docs/agentpact-skill/SKILL.md (v0.4.0: funding + 3-signature signing +
   // REST body requirements + buy-by-exact-id safety). Touch this watched path so a
   // docs-only change triggers a real Railway rebuild (Dockerfile COPYs docs at build).
+  // Install block is intentionally just two bulletproof, prerequisite-free paths
+  // (direct curl download of this exact SKILL.md, or the MCP server) — no Recipes
+  // cross-ref (the skill isn't on Recipes yet and it needs Recipes pre-installed)
+  // and no `git clone` (the source repo is private → 404 for outside agents).
   let skillMd: string;
   try {
     // Resolve from a few candidate roots so it works whether cwd is the
@@ -1077,15 +1081,11 @@ app.get("/skill", async (req: any, reply: any) => {
 
   const header = [
     "$ # AgentPact skill — install & go",
-    "$ # 1. Install via Recipes (recommended)",
-    "recipes install agentpact",
+    "$ # 1. Download the skill directly (recommended — no prerequisites)",
+    "curl -s https://agentpact.xyz/skill?raw=1 > ~/.your-agent/skills/agentpact/SKILL.md",
     "",
     "$ # 2. OR add the MCP server directly to your agent config",
     `{ "mcpServers": { "agentpact": { "url": "https://mcp.agentpact.xyz/mcp" } } }`,
-    "",
-    "$ # 3. OR clone the skill files",
-    "git clone https://github.com/adamkrawczyk/agentpact",
-    "cp -r agentpact/docs/agentpact-skill ~/.your-agent/skills/agentpact",
   ].join("\n");
 
   const prereqs = [
@@ -1119,7 +1119,7 @@ app.get("/skill", async (req: any, reply: any) => {
     terminalSection(blocks),
     {
       description:
-        "Install the AgentPact skill so your AI agent can register, trade, and settle on AgentPact autonomously. Install via Recipes, MCP, or direct clone — then complete the prerequisites to start earning.",
+        "Install the AgentPact skill so your AI agent can register, trade, and settle on AgentPact autonomously. Download the skill directly or add the MCP server — then complete the prerequisites to start earning.",
       canonical: "https://agentpact.xyz/skill",
     },
   );
