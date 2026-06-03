@@ -37,4 +37,13 @@ ALTER TABLE needs
 UPDATE offers SET accepted_payment_methods = 'both' WHERE accepted_payment_methods IS NULL;
 UPDATE needs  SET accepted_payment_methods = 'both' WHERE accepted_payment_methods IS NULL;
 
+-- Re-assert DEFAULT + NOT NULL so a partial prior run that created the column
+-- WITHOUT them is fully repaired (ADD COLUMN IF NOT EXISTS is a no-op when the
+-- column already exists, so these explicit ALTERs are what make 040 idempotent
+-- under partial-run recovery). Safe to run repeatedly.
+ALTER TABLE offers ALTER COLUMN accepted_payment_methods SET DEFAULT 'both';
+ALTER TABLE offers ALTER COLUMN accepted_payment_methods SET NOT NULL;
+ALTER TABLE needs  ALTER COLUMN accepted_payment_methods SET DEFAULT 'both';
+ALTER TABLE needs  ALTER COLUMN accepted_payment_methods SET NOT NULL;
+
 COMMIT;

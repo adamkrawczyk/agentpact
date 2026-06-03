@@ -72,4 +72,21 @@ describe("accepted_payment_methods (tillopen_0306/P1)", () => {
     expect(patchRes.statusCode).toBe(200);
     expect((JSON.parse(patchRes.body) as { accepted_payment_methods: string }).accepted_payment_methods).toBe("usdc");
   });
+
+  it("updates a need's payment method via PATCH", async () => {
+    const { app } = await createTestApp();
+    const createRes = await app.inject({
+      method: "POST", url: "/api/needs", headers,
+      payload: { ...generateTestNeed(agentId), acceptedPaymentMethods: "both" },
+    });
+    expect(createRes.statusCode).toBe(201);
+    const needId = (JSON.parse(createRes.body) as { id: string }).id;
+
+    const patchRes = await app.inject({
+      method: "PATCH", url: `/api/needs/${needId}`, headers,
+      payload: { acceptedPaymentMethods: "stripe" },
+    });
+    expect(patchRes.statusCode).toBe(200);
+    expect((JSON.parse(patchRes.body) as { accepted_payment_methods: string }).accepted_payment_methods).toBe("stripe");
+  });
 });

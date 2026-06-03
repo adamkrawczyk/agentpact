@@ -319,3 +319,20 @@ export async function retrieveBuyerContext(sql, vaultSql, credentialEncryptionKe
     }
     return merged;
 }
+export function expandPaymentRails(pref) {
+    if (pref === "usdc")
+        return new Set(["usdc"]);
+    if (pref === "stripe")
+        return new Set(["stripe"]);
+    // 'both', null, undefined, or any unrecognized value → both rails.
+    return new Set(["usdc", "stripe"]);
+}
+export function paymentRailsIntersect(a, b) {
+    const ra = expandPaymentRails(a);
+    const rb = expandPaymentRails(b);
+    for (const rail of ra) {
+        if (rb.has(rail))
+            return true;
+    }
+    return false;
+}

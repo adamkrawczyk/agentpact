@@ -302,6 +302,12 @@ const tools: Tool[] = [
           type: "number",
           description: "New base price in USDC",
         },
+        acceptedPaymentMethods: {
+          type: "string",
+          enum: ["usdc", "stripe", "both"],
+          description:
+            "Update which settlement rails this offer accepts: 'usdc' | 'stripe' | 'both'. Omit to leave unchanged.",
+        },
         apiKey: {
           type: "string",
           description:
@@ -510,6 +516,12 @@ const tools: Tool[] = [
           type: "array",
           items: { type: "string" },
           description: "Replacement set of tags (overwrites existing tags)",
+        },
+        acceptedPaymentMethods: {
+          type: "string",
+          enum: ["usdc", "stripe", "both"],
+          description:
+            "Update which settlement rails this need accepts: 'usdc' | 'stripe' | 'both'. Omit to leave unchanged.",
         },
         apiKey: {
           type: "string",

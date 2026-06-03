@@ -3,7 +3,7 @@ import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
 import { proposeDealSchema, counterDealSchema, consultationResponseSchema } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber, paymentRailsIntersect } from "./utils.js";
 
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
   await sql`
@@ -272,13 +272,24 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (body.buyerAgentId !== requesterAgentId) {
       return reply.code(403).send({ error: "Not authorized to act as this agent" });
     }
-    const [offerOwner] = await sql`SELECT agent_id FROM offers WHERE id = ${body.offerId}`;
+    const [offerOwner] = await sql`SELECT agent_id, accepted_payment_methods FROM offers WHERE id = ${body.offerId}`;
     if (!offerOwner || offerOwner.agent_id !== body.sellerAgentId) {
       return reply.code(403).send({ error: "Not authorized" });
     }
-    const [needOwner] = await sql`SELECT agent_id FROM needs WHERE id = ${body.needId}`;
+    const [needOwner] = await sql`SELECT agent_id, accepted_payment_methods FROM needs WHERE id = ${body.needId}`;
     if (!needOwner || needOwner.agent_id !== body.buyerAgentId) {
       return reply.code(403).send({ error: "Not authorized" });
+    }
+    // tillopen_0306/P1b — rail-intersection gate. Reject a proposal whose offer
+    // and need accept disjoint payment rails (e.g. a usdc-only offer against a
+    // stripe-only need): the deal could never be funded. Recompute LIVE at
+    // propose because a listing's rail can change after posting (PATCH). 'both'
+    // intersects with everything, so default↔default and default↔single pass.
+    if (!paymentRailsIntersect(offerOwner.accepted_payment_methods as string, needOwner.accepted_payment_methods as string)) {
+      return reply.code(400).send({
+        error: "Payment rail mismatch",
+        detail: `Offer accepts '${offerOwner.accepted_payment_methods}' but need accepts '${needOwner.accepted_payment_methods}' — no common settlement rail. The buyer and seller must share at least one of usdc/stripe to transact.`,
+      });
     }
     if (isZeroPrice(body.negotiatedTotal) && body.milestones.some((milestone) => !isZeroPrice(milestone.amount))) {
       return reply.code(400).send({ error: "Free-tier deals must use zero-value milestones" });

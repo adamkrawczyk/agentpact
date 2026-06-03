@@ -3,7 +3,7 @@ import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
 import { proposeDealSchema } from "./schemas.js";
-import { getRequesterAgentId, toNumber, isZeroPrice, withReputationOnlyTag, normalizeTags, parseBooleanish } from "./utils.js";
+import { getRequesterAgentId, toNumber, isZeroPrice, withReputationOnlyTag, normalizeTags, parseBooleanish, paymentRailsIntersect } from "./utils.js";
 import {
   isSemanticMatchingEnabled,
   cacheEmbedding,
@@ -145,6 +145,14 @@ export async function recomputeMatches(app: FastifyInstance, sql: Sql<Record<str
 
   for (const offer of offers) {
     for (const need of needs) {
+      // tillopen_0306/P1b — rail-intersection filter. A deal is only viable if
+      // the buyer-payable and seller-acceptable rails overlap, so never MATCH a
+      // pair whose accepted_payment_methods don't intersect — otherwise we'd
+      // surface a recommendation that can never be funded. 'both' intersects
+      // with everything; 'usdc' vs 'stripe' is the only empty case.
+      if (!paymentRailsIntersect(offer.accepted_payment_methods, need.accepted_payment_methods)) {
+        continue;
+      }
       const overlap = offer.tags.filter((t: string) => need.tags.includes(t));
       const budgetFit =
         need.budget_max === null || need.budget_max === undefined

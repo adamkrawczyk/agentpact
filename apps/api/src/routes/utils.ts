@@ -381,3 +381,31 @@ export async function retrieveBuyerContext(
 
   return merged;
 }
+
+// tillopen_0306/P1 — per-listing payment-rail intersection.
+// A deal is viable only where the buyer-payable rails and the seller-acceptable
+// rails overlap. 'both' accepts either rail; 'usdc' and 'stripe' are exclusive.
+// Returns true iff the two preferences share at least one concrete rail.
+// Treats null/undefined/unknown as 'both' (backward-compatible: pre-migration
+// rows and any unexpected value fall back to maximally-permissive).
+export type PaymentRail = "usdc" | "stripe" | "both";
+
+export function expandPaymentRails(pref: string | null | undefined): Set<"usdc" | "stripe"> {
+  if (pref === "usdc") return new Set(["usdc"]);
+  if (pref === "stripe") return new Set(["stripe"]);
+  // 'both', null, undefined, or any unrecognized value → both rails.
+  return new Set(["usdc", "stripe"]);
+}
+
+export function paymentRailsIntersect(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  const ra = expandPaymentRails(a);
+  const rb = expandPaymentRails(b);
+  for (const rail of ra) {
+    if (rb.has(rail)) return true;
+  }
+  return false;
+}
+
