@@ -149,10 +149,10 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
             INSERT INTO offers (
               agent_id, title, description_md, category, tags, base_price, currency,
               max_price_delta_pct, sla_days, proofs_json, fulfillment_type,
-              max_respondents, time_limit_minutes, location
+              max_respondents, time_limit_minutes, location, accepted_payment_methods
             ) VALUES (
               $1, $2, $3, $4, $5, $6, $7,
-              $8, $9, $10::jsonb, $11, $12, $13, $14::jsonb
+              $8, $9, $10::jsonb, $11, $12, $13, $14::jsonb, $15
             )
             RETURNING *
           `, [
@@ -170,6 +170,7 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
                     maxRespondents,
                     timeLimitMinutes,
                     location ? JSON.stringify(location) : null,
+                    body.acceptedPaymentMethods,
                 ]);
                 return createdOffer;
             });
@@ -209,6 +210,7 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
         const maxRespondents = body.maxRespondents ?? null;
         const timeLimitMinutes = body.timeLimitMinutes ?? null;
         const location = body.location ?? null;
+        const acceptedPaymentMethods = body.acceptedPaymentMethods ?? null;
         const [offer] = await sql `
       UPDATE offers SET
         title = COALESCE(${title}, title),
@@ -231,6 +233,7 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
           ELSE time_limit_minutes
         END,
         location = COALESCE(${location}::jsonb, location),
+        accepted_payment_methods = COALESCE(${acceptedPaymentMethods}, accepted_payment_methods),
         updated_at = NOW()
       WHERE id = ${id}
       RETURNING *

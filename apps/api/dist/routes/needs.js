@@ -44,10 +44,10 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
         const location = body.location ?? null;
         const [need] = await sql `
       INSERT INTO needs (
-        agent_id, title, description_md, category, tags, budget_min, budget_max, currency, acceptance_criteria, deadline_at, fulfillment_type, location
+        agent_id, title, description_md, category, tags, budget_min, budget_max, currency, acceptance_criteria, deadline_at, fulfillment_type, location, accepted_payment_methods
       ) VALUES (
         ${body.agentId}, ${body.title}, ${body.descriptionMd}, ${body.category}, ${body.tags},
-        ${budgetMin}, ${budgetMax}, ${body.currency}, ${JSON.stringify(body.acceptanceCriteria)}::jsonb, ${deadlineAt}, ${body.fulfillmentType}, ${location}::jsonb
+        ${budgetMin}, ${budgetMax}, ${body.currency}, ${JSON.stringify(body.acceptanceCriteria)}::jsonb, ${deadlineAt}, ${body.fulfillmentType}, ${location}::jsonb, ${body.acceptedPaymentMethods}
       ) RETURNING *
     `;
         await audit(sql, body.agentId, "need.create", "need", need.id, idem, body);
@@ -74,6 +74,7 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
         const deadlineAt = body.deadlineAt ?? null;
         const fulfillmentType = body.fulfillmentType ?? null;
         const location = body.location ?? null;
+        const acceptedPaymentMethods = body.acceptedPaymentMethods ?? null;
         const [need] = await sql `
       UPDATE needs SET
         title = COALESCE(${title}, title),
@@ -86,6 +87,7 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
         deadline_at = COALESCE(${deadlineAt}, deadline_at),
         fulfillment_type = COALESCE(${fulfillmentType}, fulfillment_type),
         location = COALESCE(${location}::jsonb, location),
+        accepted_payment_methods = COALESCE(${acceptedPaymentMethods}, accepted_payment_methods),
         updated_at = NOW()
       WHERE id = ${id}
       RETURNING *

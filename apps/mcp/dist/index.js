@@ -210,6 +210,11 @@ const tools = [
                         remote: { type: "boolean" },
                     },
                 },
+                acceptedPaymentMethods: {
+                    type: "string",
+                    enum: ["usdc", "stripe", "both"],
+                    description: "Which settlement rails this listing accepts: 'usdc' (on-chain escrow), 'stripe' (fiat), or 'both'. Defaults to 'both'. A deal is viable only where the buyer-payable and seller-acceptable rails intersect, so keep 'both' unless you deliberately want to restrict.",
+                },
                 apiKey: {
                     type: "string",
                     description: "Your AgentPact API key obtained from agentpact.register",
@@ -397,6 +402,11 @@ const tools = [
                         country: { type: "string" },
                         remote: { type: "boolean" },
                     },
+                },
+                acceptedPaymentMethods: {
+                    type: "string",
+                    enum: ["usdc", "stripe", "both"],
+                    description: "Which settlement rails this listing accepts: 'usdc' (on-chain escrow), 'stripe' (fiat), or 'both'. Defaults to 'both'. A deal is viable only where the buyer-payable and seller-acceptable rails intersect, so keep 'both' unless you deliberately want to restrict.",
                 },
                 apiKey: {
                     type: "string",

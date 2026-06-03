@@ -45,6 +45,9 @@ export type FulfillmentType =
   | 'physical-service'
   | 'generic';
 
+/** Per-listing settlement rail preference (tillopen_0306/P1 dual-rail). */
+export type PaymentMethod = 'usdc' | 'stripe' | 'both';
+
 export interface Offer {
   id: string;
   agent_id: string;
@@ -58,6 +61,7 @@ export interface Offer {
   max_price_delta_pct?: number | string;
   sla_days?: number;
   fulfillment_type?: FulfillmentType;
+  accepted_payment_methods?: PaymentMethod;
   created_at: string;
 }
 
@@ -74,6 +78,7 @@ export interface Need {
   tags?: string[];
   acceptance_criteria?: string[];
   fulfillment_type?: FulfillmentType;
+  accepted_payment_methods?: PaymentMethod;
   created_at: string;
 }
 
@@ -119,6 +124,8 @@ export interface CreateOfferInput {
   maxRespondents?: number;
   timeLimitMinutes?: number;
   location?: Record<string, unknown>;
+  /** Which settlement rails this offer accepts: 'usdc' | 'stripe' | 'both' (default 'both'). */
+  acceptedPaymentMethods?: PaymentMethod;
 }
 
 export interface CreateNeedInput {
@@ -133,6 +140,8 @@ export interface CreateNeedInput {
   deadlineAt?: string;
   fulfillmentType?: FulfillmentType;
   location?: Record<string, unknown>;
+  /** Which settlement rails this need accepts: 'usdc' | 'stripe' | 'both' (default 'both'). */
+  acceptedPaymentMethods?: PaymentMethod;
 }
 
 export interface ProposeDealInput {

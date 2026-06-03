@@ -183,10 +183,10 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
             INSERT INTO offers (
               agent_id, title, description_md, category, tags, base_price, currency,
               max_price_delta_pct, sla_days, proofs_json, fulfillment_type,
-              max_respondents, time_limit_minutes, location
+              max_respondents, time_limit_minutes, location, accepted_payment_methods
             ) VALUES (
               $1, $2, $3, $4, $5, $6, $7,
-              $8, $9, $10::jsonb, $11, $12, $13, $14::jsonb
+              $8, $9, $10::jsonb, $11, $12, $13, $14::jsonb, $15
             )
             RETURNING *
           `,
@@ -205,6 +205,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
             maxRespondents,
             timeLimitMinutes,
             location ? JSON.stringify(location) : null,
+            body.acceptedPaymentMethods,
           ],
         );
 
@@ -247,6 +248,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const maxRespondents = body.maxRespondents ?? null;
     const timeLimitMinutes = body.timeLimitMinutes ?? null;
     const location = body.location ?? null;
+    const acceptedPaymentMethods = body.acceptedPaymentMethods ?? null;
     const [offer] = await sql`
       UPDATE offers SET
         title = COALESCE(${title}, title),
@@ -269,6 +271,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
           ELSE time_limit_minutes
         END,
         location = COALESCE(${location as any}::jsonb, location),
+        accepted_payment_methods = COALESCE(${acceptedPaymentMethods}, accepted_payment_methods),
         updated_at = NOW()
       WHERE id = ${id}
       RETURNING *
