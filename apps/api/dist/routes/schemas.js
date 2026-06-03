@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { parseBooleanish } from "./utils.js";
 export const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]);
+// tillopen_0306/P1 — per-listing payment preference (Q1 dual-rail).
+// 'usdc' = on-chain escrow only; 'stripe' = fiat application-fee only;
+// 'both' (default) = either rail acceptable. A deal is viable only where
+// buyer-payable ∩ seller-acceptable ≠ ∅.
+export const paymentMethodSchema = z.enum(["usdc", "stripe", "both"]);
 export const milestoneSchema = z.object({
     idx: z.number().int().positive(),
     title: z.string().min(2),
@@ -39,6 +44,7 @@ const baseOfferSchema = z.object({
     maxRespondents: z.number().int().positive().max(20).optional(),
     timeLimitMinutes: z.number().int().positive().max(7 * 24 * 60).optional(),
     location: locationSchema,
+    acceptedPaymentMethods: paymentMethodSchema.default("both"),
 });
 export const createOfferSchema = baseOfferSchema.superRefine((value, ctx) => {
     if (value.fulfillmentType !== "consultation") {
@@ -91,6 +97,7 @@ export const createNeedSchema = z.object({
     deadlineAt: z.string().datetime().optional(),
     fulfillmentType: fulfillmentTypeSchema.optional().default("generic"),
     location: locationSchema,
+    acceptedPaymentMethods: paymentMethodSchema.default("both"),
 });
 export const taskContractSchema = z.object({
     version: z.literal("data-delivery-v1"),

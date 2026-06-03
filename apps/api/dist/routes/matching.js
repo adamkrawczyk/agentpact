@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { proposeDealSchema } from "./schemas.js";
-import { getRequesterAgentId, toNumber, isZeroPrice, withReputationOnlyTag, normalizeTags, parseBooleanish } from "./utils.js";
+import { getRequesterAgentId, toNumber, isZeroPrice, withReputationOnlyTag, normalizeTags, parseBooleanish, paymentRailsIntersect } from "./utils.js";
 import { isSemanticMatchingEnabled, cacheEmbedding, cosineSimilarity, generateEmbeddings, } from "../semantic-match.js";
 function buildSemanticText(input) {
     const tags = Array.isArray(input.tags) ? input.tags.join(", ") : "";
@@ -131,6 +131,14 @@ export async function recomputeMatches(app, sql) {
     }
     for (const offer of offers) {
         for (const need of needs) {
+            // tillopen_0306/P1b — rail-intersection filter. A deal is only viable if
+            // the buyer-payable and seller-acceptable rails overlap, so never MATCH a
+            // pair whose accepted_payment_methods don't intersect — otherwise we'd
+            // surface a recommendation that can never be funded. 'both' intersects
+            // with everything; 'usdc' vs 'stripe' is the only empty case.
+            if (!paymentRailsIntersect(offer.accepted_payment_methods, need.accepted_payment_methods)) {
+                continue;
+            }
             const overlap = offer.tags.filter((t) => need.tags.includes(t));
             const budgetFit = need.budget_max === null || need.budget_max === undefined
                 ? 1
@@ -384,9 +392,11 @@ export async function registerRoutes(app, sql, deps, recomputeMatchesInput = cre
         o.max_price_delta_pct,
         o.category,
         o.title AS offer_title,
+        o.accepted_payment_methods AS offer_payment_methods,
         n.agent_id AS buyer_agent_id,
         n.title AS need_title,
         n.acceptance_criteria,
+        n.accepted_payment_methods AS need_payment_methods,
         a.auto_buy_enabled,
         a.max_auto_deal_price,
         a.auto_buy_categories
@@ -420,6 +430,18 @@ export async function registerRoutes(app, sql, deps, recomputeMatchesInput = cre
             const offerId = String(match.offer_id);
             const needId = String(match.need_id);
             const negotiatedTotal = toNumber(match.base_price);
+            // tillopen_0306/P1b — rail-compatibility gate on the autopilot path.
+            // The HTTP /api/deals/propose handler enforces rail intersection, but
+            // autopilot calls createDealProposal() directly, bypassing that route.
+            // The `matches` cache can also hold rows that were compatible at compute
+            // time but went disjoint after a later PATCH of accepted_payment_methods,
+            // so we re-check against the freshly-joined offer/need values here rather
+            // than trusting the cached match row. Same helper as the propose gate —
+            // single source of truth, no second decision point that could drift.
+            if (!paymentRailsIntersect(match.offer_payment_methods, match.need_payment_methods)) {
+                skipped += 1;
+                continue;
+            }
             if (!match.auto_buy_enabled) {
                 skipped += 1;
                 continue;

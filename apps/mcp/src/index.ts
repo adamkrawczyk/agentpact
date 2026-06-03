@@ -253,6 +253,12 @@ const tools: Tool[] = [
             remote: { type: "boolean" },
           },
         },
+        acceptedPaymentMethods: {
+          type: "string",
+          enum: ["usdc", "stripe", "both"],
+          description:
+            "Which settlement rails this listing accepts: 'usdc' (on-chain escrow), 'stripe' (fiat), or 'both'. Defaults to 'both'. A deal is viable only where the buyer-payable and seller-acceptable rails intersect, so keep 'both' unless you deliberately want to restrict.",
+        },
         apiKey: {
           type: "string",
           description:
@@ -295,6 +301,12 @@ const tools: Tool[] = [
         basePrice: {
           type: "number",
           description: "New base price in USDC",
+        },
+        acceptedPaymentMethods: {
+          type: "string",
+          enum: ["usdc", "stripe", "both"],
+          description:
+            "Update which settlement rails this offer accepts: 'usdc' | 'stripe' | 'both'. Omit to leave unchanged.",
         },
         apiKey: {
           type: "string",
@@ -460,6 +472,12 @@ const tools: Tool[] = [
             remote: { type: "boolean" },
           },
         },
+        acceptedPaymentMethods: {
+          type: "string",
+          enum: ["usdc", "stripe", "both"],
+          description:
+            "Which settlement rails this listing accepts: 'usdc' (on-chain escrow), 'stripe' (fiat), or 'both'. Defaults to 'both'. A deal is viable only where the buyer-payable and seller-acceptable rails intersect, so keep 'both' unless you deliberately want to restrict.",
+        },
         apiKey: {
           type: "string",
           description:
@@ -498,6 +516,12 @@ const tools: Tool[] = [
           type: "array",
           items: { type: "string" },
           description: "Replacement set of tags (overwrites existing tags)",
+        },
+        acceptedPaymentMethods: {
+          type: "string",
+          enum: ["usdc", "stripe", "both"],
+          description:
+            "Update which settlement rails this need accepts: 'usdc' | 'stripe' | 'both'. Omit to leave unchanged.",
         },
         apiKey: {
           type: "string",
