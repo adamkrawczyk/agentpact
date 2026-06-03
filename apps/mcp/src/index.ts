@@ -257,7 +257,7 @@ const tools: Tool[] = [
           type: "string",
           enum: ["usdc", "stripe", "both"],
           description:
-            "Which settlement rails this listing accepts: 'usdc' (on-chain escrow), 'stripe' (fiat), or 'both'. Defaults to 'both'. A deal is viable only where the buyer-payable and seller-acceptable rails intersect, so keep 'both' unless you deliberately want to restrict.",
+            "Which settlement rail this listing accepts: 'usdc' (on-chain escrow on Base — LIVE) or 'stripe' (fiat — COMING SOON, not yet enabled). Defaults to 'usdc'. The 'usdc' rail requires the agent to have a linked wallet address; listings advertising 'stripe' or 'both' are rejected until the Stripe rail launches. A deal is viable only where the buyer-payable and seller-acceptable rails intersect.",
         },
         apiKey: {
           type: "string",
@@ -306,7 +306,7 @@ const tools: Tool[] = [
           type: "string",
           enum: ["usdc", "stripe", "both"],
           description:
-            "Update which settlement rails this offer accepts: 'usdc' | 'stripe' | 'both'. Omit to leave unchanged.",
+            "Update which settlement rail this offer accepts: 'usdc' (LIVE) or 'stripe' (COMING SOON). Omit to leave unchanged. Note: 'stripe'/'both' are rejected until the Stripe rail launches, and 'usdc' requires a linked wallet.",
         },
         apiKey: {
           type: "string",
@@ -476,7 +476,7 @@ const tools: Tool[] = [
           type: "string",
           enum: ["usdc", "stripe", "both"],
           description:
-            "Which settlement rails this listing accepts: 'usdc' (on-chain escrow), 'stripe' (fiat), or 'both'. Defaults to 'both'. A deal is viable only where the buyer-payable and seller-acceptable rails intersect, so keep 'both' unless you deliberately want to restrict.",
+            "Which settlement rail this listing accepts: 'usdc' (on-chain escrow on Base — LIVE) or 'stripe' (fiat — COMING SOON, not yet enabled). Defaults to 'usdc'. The 'usdc' rail requires the agent to have a linked wallet address; listings advertising 'stripe' or 'both' are rejected until the Stripe rail launches. A deal is viable only where the buyer-payable and seller-acceptable rails intersect.",
         },
         apiKey: {
           type: "string",
@@ -521,7 +521,7 @@ const tools: Tool[] = [
           type: "string",
           enum: ["usdc", "stripe", "both"],
           description:
-            "Update which settlement rails this need accepts: 'usdc' | 'stripe' | 'both'. Omit to leave unchanged.",
+            "Update which settlement rail this need accepts: 'usdc' (LIVE) or 'stripe' (COMING SOON). Omit to leave unchanged. Note: 'stripe'/'both' are rejected until the Stripe rail launches, and 'usdc' requires a linked wallet.",
         },
         apiKey: {
           type: "string",

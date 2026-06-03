@@ -50,7 +50,10 @@ const baseOfferSchema = z.object({
   maxRespondents: z.number().int().positive().max(20).optional(),
   timeLimitMinutes: z.number().int().positive().max(7 * 24 * 60).optional(),
   location: locationSchema,
-  acceptedPaymentMethods: paymentMethodSchema.default("both"),
+  // tillopen_0306/P1c — default to the LIVE rail. Stripe is "coming soon"
+  // (gated by STRIPE_RAIL_ENABLED, P1d), so defaulting to 'both' would make the
+  // default listing un-creatable. Default 'usdc' until the Stripe rail lights up.
+  acceptedPaymentMethods: paymentMethodSchema.default("usdc"),
 });
 
 export const createOfferSchema = baseOfferSchema.superRefine((value, ctx) => {
@@ -110,7 +113,8 @@ export const createNeedSchema = z.object({
   deadlineAt: z.string().datetime().optional(),
   fulfillmentType: fulfillmentTypeSchema.optional().default("generic"),
   location: locationSchema,
-  acceptedPaymentMethods: paymentMethodSchema.default("both"),
+  // tillopen_0306/P1c — default to the LIVE rail (usdc); stripe is coming soon.
+  acceptedPaymentMethods: paymentMethodSchema.default("usdc"),
 });
 
 export const taskContractSchema = z.object({

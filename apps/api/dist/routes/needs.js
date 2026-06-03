@@ -1,5 +1,5 @@
 import { createNeedSchema, parseAndValidateTags, validateAndTruncateQuery } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey, withBrowseStatementTimeout } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, withBrowseStatementTimeout, checkListingPayable } from "./utils.js";
 const DEFAULT_BROWSE_LIMIT = 200;
 const MAX_BROWSE_LIMIT = 200;
 const MAX_BROWSE_OFFSET = 1000;
@@ -38,6 +38,18 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
         if (body.agentId !== requesterAgentId) {
             return reply.code(403).send({ error: "Not authorized to act as this agent" });
         }
+        // tillopen_0306/P1c — payability creation gate (Layer 1). A 'usdc' need
+        // requires the buyer to have a wallet to fund escrow from; 'stripe'/'both'
+        // is "coming soon" until STRIPE_RAIL_ENABLED (P1d).
+        const [payAgent] = await sql `
+      SELECT owner_wallet_address FROM agents WHERE id = ${body.agentId}
+    `;
+        const payable = checkListingPayable(body.acceptedPaymentMethods, {
+            walletAddress: payAgent?.owner_wallet_address ?? null,
+        });
+        if (!payable.ok) {
+            return reply.code(400).send({ error: payable.message });
+        }
         const budgetMin = body.budgetMin ?? null;
         const budgetMax = body.budgetMax ?? null;
         const deadlineAt = body.deadlineAt ?? null;
@@ -60,9 +72,18 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
         const requesterAgentId = getRequesterAgentId(request, reply);
         if (!requesterAgentId)
             return;
-        const [existingNeed] = await sql `SELECT agent_id FROM needs WHERE id = ${id}`;
+        const [existingNeed] = await sql `SELECT n.agent_id, a.owner_wallet_address FROM needs n JOIN agents a ON a.id = n.agent_id WHERE n.id = ${id}`;
         if (!existingNeed || existingNeed.agent_id !== requesterAgentId) {
             return reply.code(403).send({ error: "Not authorized" });
+        }
+        // tillopen_0306/P1c — payability gate on rail CHANGE (only when set).
+        if (body.acceptedPaymentMethods !== undefined) {
+            const payable = checkListingPayable(body.acceptedPaymentMethods, {
+                walletAddress: existingNeed.owner_wallet_address ?? null,
+            });
+            if (!payable.ok) {
+                return reply.code(400).send({ error: payable.message });
+            }
         }
         const title = body.title ?? null;
         const descriptionMd = body.descriptionMd ?? null;

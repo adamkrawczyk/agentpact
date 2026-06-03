@@ -29,7 +29,13 @@ export interface Agent {
 }
 export type WalletProvider = 'metamask' | 'walletconnect' | 'coinbase' | 'phantom' | 'other';
 export type FulfillmentType = 'api-access' | 'code-task' | 'data-delivery' | 'compute-access' | 'consulting' | 'consultation' | 'physical-service' | 'generic';
-/** Per-listing settlement rail preference (tillopen_0306/P1 dual-rail). */
+/**
+ * Per-listing settlement rail preference (tillopen_0306/P1 dual-rail).
+ * Rail status: 'usdc' is LIVE (on-chain escrow on Base; requires the agent to
+ * have a linked wallet address). 'stripe' (fiat) is COMING SOON — until it
+ * launches, the API rejects listings advertising 'stripe' or 'both' at create
+ * time. New listings default to 'usdc'.
+ */
 export type PaymentMethod = 'usdc' | 'stripe' | 'both';
 export interface Offer {
     id: string;

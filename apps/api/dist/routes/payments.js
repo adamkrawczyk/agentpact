@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { Request as MppRequest } from "mppx/server";
 import { createPaymentIntentSchema, confirmFundingSchema } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey, isZeroPrice, PLATFORM_FEE_PCT, PLATFORM_WALLET, toNumber, sendFetchResponse } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, isZeroPrice, PLATFORM_FEE_PCT, PLATFORM_WALLET, toNumber, sendFetchResponse, isPayableWalletAddress } from "./utils.js";
 import { isOnChainMode, generateFundingTransaction, generateAcceptTransaction, verifyFunding, resolveDisputeOnChain, getMilestoneStatus, resolveChainFromAddress, validateWalletAddress, CHAIN_CONFIG, ESCROW_ADDRESS, } from "../chain.js";
 import { createPaymentIntent as stripeCreatePaymentIntent, constructWebhookEvent, isStripeEnabled, } from "../stripe.js";
 import { chargeDeal, getAvailableDealPaymentMethods, getMppConfigurationError } from "../mpp.js";
@@ -104,6 +104,16 @@ export async function registerRoutes(app, sql, deps, releaseMilestonePayment) {
         }
         // ── USDC / on-chain path (original logic) ────────────────────────────────
         const mode = isOnChainMode() ? "on-chain" : "simulation";
+        // tillopen_0306/P1c — fund guard (Layer 3, last resort). The seller MUST have
+        // a valid payout wallet before any USDC funding intent is created. Closes the
+        // confirmed latent bug where a NULL/invalid seller_wallet_address was cast
+        // straight to viem's Address (and written into payment_intents) — a wallet-less
+        // seller's deal would otherwise target a null address at createMilestone time.
+        if (!isPayableWalletAddress(milestone.seller_wallet_address)) {
+            return reply.code(400).send({
+                error: "Seller has no valid payout wallet — the 'usdc' rail cannot be funded. The seller must link a wallet address before this milestone can be funded.",
+            });
+        }
         // Resolve and validate the chain from wallet address + explicit hint
         const resolvedChain = resolveChainFromAddress(body.buyerWalletAddress, body.chain);
         const chainValidation = validateWalletAddress(body.buyerWalletAddress, resolvedChain);

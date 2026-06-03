@@ -1,5 +1,5 @@
 import { createOfferSchema, updateOfferSchema, autopilotSettingsSchema, parseAndValidateTags, validateAndTruncateQuery } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey, enrichOfferRow, parseBooleanish, withBrowseStatementTimeout } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, enrichOfferRow, parseBooleanish, withBrowseStatementTimeout, checkListingPayable } from "./utils.js";
 /** Maximum active offers an agent may have at one time (anti-spam). */
 const MAX_ACTIVE_OFFERS_PER_AGENT = 15;
 /** Auto-archive offers with zero deals older than this many days. */
@@ -115,6 +115,18 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
         if (body.agentId !== requesterAgentId) {
             return reply.code(403).send({ error: "Not authorized to act as this agent" });
         }
+        // tillopen_0306/P1c — payability creation gate (Layer 1). A listing may only
+        // advertise a rail it can actually be paid out on: 'usdc' requires a valid
+        // wallet; 'stripe'/'both' is "coming soon" until STRIPE_RAIL_ENABLED (P1d).
+        const [payAgent] = await sql `
+      SELECT owner_wallet_address FROM agents WHERE id = ${body.agentId}
+    `;
+        const payable = checkListingPayable(body.acceptedPaymentMethods, {
+            walletAddress: payAgent?.owner_wallet_address ?? null,
+        });
+        if (!payable.ok) {
+            return reply.code(400).send({ error: payable.message });
+        }
         const location = body.location ?? null;
         const maxRespondents = body.fulfillmentType === "consultation" ? body.maxRespondents ?? null : null;
         const timeLimitMinutes = body.fulfillmentType === "consultation" ? body.timeLimitMinutes ?? null : null;
@@ -194,9 +206,20 @@ export async function registerRoutes(app, sql, _deps, scheduleRecompute) {
         const requesterAgentId = getRequesterAgentId(request, reply);
         if (!requesterAgentId)
             return;
-        const [existingOffer] = await sql `SELECT agent_id FROM offers WHERE id = ${id}`;
+        const [existingOffer] = await sql `SELECT o.agent_id, a.owner_wallet_address FROM offers o JOIN agents a ON a.id = o.agent_id WHERE o.id = ${id}`;
         if (!existingOffer || existingOffer.agent_id !== requesterAgentId) {
             return reply.code(403).send({ error: "Not authorized" });
+        }
+        // tillopen_0306/P1c — payability gate on rail CHANGE. Only validate when the
+        // PATCH actually sets acceptedPaymentMethods (COALESCE leaves it unchanged
+        // otherwise), so unrelated edits aren't blocked.
+        if (body.acceptedPaymentMethods !== undefined) {
+            const payable = checkListingPayable(body.acceptedPaymentMethods, {
+                walletAddress: existingOffer.owner_wallet_address ?? null,
+            });
+            if (!payable.ok) {
+                return reply.code(400).send({ error: payable.message });
+            }
         }
         const title = body.title ?? null;
         const descriptionMd = body.descriptionMd ?? null;
