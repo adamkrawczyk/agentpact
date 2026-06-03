@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { encrypt, decrypt, ensureCredentialVaultSchema, getSensitiveFields, } from "../credential-vault.js";
-import { isOnChainMode, generateAcceptTransaction, resolveDisputeOnChain, } from "../chain.js";
 // ── Constants ────────────────────────────────────────────────────────
 export const PLATFORM_FEE_PCT = Number(process.env.PLATFORM_FEE_PCT ?? 10);
 export const PLATFORM_WALLET = process.env.PLATFORM_WALLET ?? "0xAgentPactPlatformUSDC";
@@ -319,85 +318,4 @@ export async function retrieveBuyerContext(sql, vaultSql, credentialEncryptionKe
         merged[fieldName] = decrypt(String(row.encrypted_value), String(row.iv), String(row.auth_tag), credentialEncryptionKey);
     }
     return merged;
-}
-export async function completeDealMilestones(sql, dealId, opts = {}, releaseMilestonePaymentFn, notifyFn) {
-    const mode = isOnChainMode() ? "on-chain" : "simulation";
-    const [deal] = await sql `
-    SELECT is_free_tier
-    FROM deals
-    WHERE id = ${dealId}
-  `;
-    const skipPaymentRelease = opts.skipPaymentRelease ?? Boolean(deal?.is_free_tier);
-    const milestones = await sql `
-    SELECT id
-    FROM milestones
-    WHERE deal_id = ${dealId} AND status != 'accepted'
-    ORDER BY idx
-  `;
-    if (milestones.length === 0) {
-        await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-        return { mode, action: "released" };
-    }
-    if (skipPaymentRelease) {
-        await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-        await sql `UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
-        return { mode, action: "released" };
-    }
-    if (mode === "on-chain") {
-        if (opts.skipOnChainRelease) {
-            await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-            await sql `UPDATE milestones SET status = 'accepted' WHERE deal_id = ${dealId} AND status != 'accepted'`;
-            return { mode, action: "completed_without_onchain_release" };
-        }
-        const intents = await sql `
-      SELECT pi.id, pi.tx_hash
-      FROM payment_intents pi
-      JOIN milestones m ON m.id = pi.milestone_id
-      WHERE m.deal_id = ${dealId} AND pi.status = 'funded'
-      ORDER BY pi.created_at DESC
-    `;
-        const hasOnChainFundedIntent = intents.some((row) => row.tx_hash && !String(row.tx_hash).startsWith("sim_"));
-        if (hasOnChainFundedIntent) {
-            const releaseResults = [];
-            for (const milestone of milestones) {
-                try {
-                    const result = await resolveDisputeOnChain(String(milestone.id), false);
-                    releaseResults.push({ milestoneId: String(milestone.id), txHash: result.txHash });
-                }
-                catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
-                    console.error(`[completeDealMilestones] On-chain release failed for ${milestone.id}: ${msg}`);
-                    releaseResults.push({ milestoneId: String(milestone.id), error: msg });
-                }
-            }
-            await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-            await sql `UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
-            await sql `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW() WHERE milestone_id = ANY(${milestones.map(m => String(m.id))}) AND status = 'funded'`;
-            const allReleased = releaseResults.every(r => r.txHash);
-            return {
-                mode,
-                action: allReleased ? "released" : "buyer_sign_required",
-                txData: releaseResults.filter(r => !r.txHash).map(r => {
-                    const txData = generateAcceptTransaction(r.milestoneId);
-                    return {
-                        milestoneId: r.milestoneId,
-                        to: txData.to,
-                        data: txData.calldata,
-                        value: "0",
-                        description: "Accept milestone on-chain and release escrowed funds (platform release failed, buyer must sign)",
-                    };
-                }),
-                onChainReleaseResults: releaseResults,
-            };
-        }
-    }
-    for (const milestone of milestones) {
-        await releaseMilestonePaymentFn(String(milestone.id));
-    }
-    // Ensure deal and milestones are always transitioned to completed/accepted,
-    // even when no funded payment_intent exists (e.g. intent never created or already
-    // released upstream). Without this explicit UPDATE the deal stays stuck at 'delivered'.
-    await sql `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
-    await sql `UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
-    return { mode, action: "released" };
 }

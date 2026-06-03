@@ -996,6 +996,34 @@ async function completeDealMilestones(dealId, opts = {}) {
             };
         }
     }
+    // tillopen_0306/P1 — silent-$0 phantom-complete guard.
+    // In on-chain mode (prod, since 2026-06-03 RPC_URL+PLATFORM_PRIVATE_KEY went
+    // live), a FEE-BEARING deal must never be marked 'completed' unless real money
+    // actually moved. Reaching this fall-through means hasOnChainFundedIntent was
+    // false — i.e. no real on-chain funded intent. We additionally allow a real
+    // Stripe-funded intent (the P1 fiat rail) as legitimate money movement. If a
+    // fee-bearing deal has NEITHER, completing it would (a) phantom-complete at $0
+    // and (b) inject a fake 'payment.release' feeAmount audit row that pollutes
+    // auditedPlatformFeeRevenue. Hold the deal at 'delivered' instead.
+    if (mode === "on-chain" && !skipPaymentRelease) {
+        const realMoneyIntents = await sql `
+      SELECT 1
+      FROM payment_intents pi
+      JOIN milestones m ON m.id = pi.milestone_id
+      WHERE m.deal_id = ${dealId}
+        AND pi.status IN ('funded', 'released')
+        AND (
+          (pi.tx_hash IS NOT NULL AND pi.tx_hash NOT LIKE 'sim_%')
+          OR (pi.payment_provider = 'stripe' AND pi.stripe_payment_intent_id IS NOT NULL)
+        )
+      LIMIT 1
+    `;
+        if (realMoneyIntents.length === 0) {
+            console.warn(`[completeDealMilestones] settlement_pending: fee-bearing deal ${dealId} reached settlement in on-chain mode with no real-money funded intent. Holding at 'delivered' (no phantom complete, no fake fee).`);
+            await sql `UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
+            return { mode, action: "settlement_pending" };
+        }
+    }
     for (const milestone of milestones) {
         await releaseMilestonePayment(String(milestone.id));
     }
