@@ -392,9 +392,11 @@ export async function registerRoutes(app, sql, deps, recomputeMatchesInput = cre
         o.max_price_delta_pct,
         o.category,
         o.title AS offer_title,
+        o.accepted_payment_methods AS offer_payment_methods,
         n.agent_id AS buyer_agent_id,
         n.title AS need_title,
         n.acceptance_criteria,
+        n.accepted_payment_methods AS need_payment_methods,
         a.auto_buy_enabled,
         a.max_auto_deal_price,
         a.auto_buy_categories
@@ -428,6 +430,18 @@ export async function registerRoutes(app, sql, deps, recomputeMatchesInput = cre
             const offerId = String(match.offer_id);
             const needId = String(match.need_id);
             const negotiatedTotal = toNumber(match.base_price);
+            // tillopen_0306/P1b — rail-compatibility gate on the autopilot path.
+            // The HTTP /api/deals/propose handler enforces rail intersection, but
+            // autopilot calls createDealProposal() directly, bypassing that route.
+            // The `matches` cache can also hold rows that were compatible at compute
+            // time but went disjoint after a later PATCH of accepted_payment_methods,
+            // so we re-check against the freshly-joined offer/need values here rather
+            // than trusting the cached match row. Same helper as the propose gate —
+            // single source of truth, no second decision point that could drift.
+            if (!paymentRailsIntersect(match.offer_payment_methods, match.need_payment_methods)) {
+                skipped += 1;
+                continue;
+            }
             if (!match.auto_buy_enabled) {
                 skipped += 1;
                 continue;
