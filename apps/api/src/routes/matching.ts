@@ -79,8 +79,8 @@ export async function recomputeMatches(app: FastifyInstance, sql: Sql<Record<str
 
       if (missingTexts.length > 0) {
         const newEmbeddings = await generateEmbeddings(missingTexts);
-        // Batch write back new embeddings to DB (awaited, not fire-and-forget)
-        const embeddingUpdates: Promise<void>[] = [];
+        // Update the in-memory maps + cache for ALL missing refs first (cheap,
+        // no I/O) so matching can proceed regardless of write batching below.
         for (let i = 0; i < missingRefs.length; i += 1) {
           const ref = missingRefs[i];
           const emb = newEmbeddings[i];
@@ -90,14 +90,32 @@ export async function recomputeMatches(app: FastifyInstance, sql: Sql<Record<str
             needEmbeddings.set(ref.id, emb);
           }
           cacheEmbedding(ref.text, emb);
-          const table = ref.type === 'offer' ? 'offers' : 'needs';
-          embeddingUpdates.push(
-            sql.unsafe(`UPDATE ${table} SET description_embedding = $1::jsonb WHERE id = $2`, [JSON.stringify(emb), ref.id])
-              .then(() => {})
-              .catch((err) => { app.log.warn({ err, id: ref.id, type: ref.type }, 'Failed to store embedding'); })
+        }
+        // ── N+1 pool-saturation preempt (mirrors WIS-985 / the #44 leaderboard
+        // fix below) ────────────────────────────────────────────────────────
+        // Previously this fired one UPDATE per missing embedding inside a SINGLE
+        // unbounded `Promise.all` — at a cold cache (post-deploy / post-bulk-
+        // import) `missingRefs` is every active offer + open need, so thousands
+        // of concurrent UPDATEs hit the 20-connection pool at once. That is the
+        // exact CONNECTION_CLOSED self-DoS shape that took down /api/leaderboard
+        // (#44). recomputeMatches is on a user-reachable path (offer/need create
+        // → scheduleRecompute) so the risk grows with the marketplace. Bound the
+        // write concurrency to EMBED_WRITE_BATCH at a time; each UPDATE stays
+        // best-effort (a failed embedding write must not abort matching warmup).
+        const EMBED_WRITE_BATCH = 50;
+        for (let i = 0; i < missingRefs.length; i += EMBED_WRITE_BATCH) {
+          const chunk = missingRefs.slice(i, i + EMBED_WRITE_BATCH);
+          await Promise.all(
+            chunk.map((ref, j) => {
+              const emb = newEmbeddings[i + j];
+              const table = ref.type === 'offer' ? 'offers' : 'needs';
+              return sql
+                .unsafe(`UPDATE ${table} SET description_embedding = $1::jsonb WHERE id = $2`, [JSON.stringify(emb), ref.id])
+                .then(() => {})
+                .catch((err) => { app.log.warn({ err, id: ref.id, type: ref.type }, 'Failed to store embedding'); });
+            })
           );
         }
-        await Promise.all(embeddingUpdates);
       }
     } catch (error) {
       app.log.warn({ err: error }, "Semantic matching warmup failed, using tag-only matching");
