@@ -25,6 +25,7 @@ UPDATE payment_intents
 SET payment_provider = 'usdc'
 WHERE payment_provider IS NULL;
 
+ALTER TABLE payment_intents DROP CONSTRAINT IF EXISTS payment_intents_payment_provider_check;
 ALTER TABLE payment_intents
   ADD CONSTRAINT payment_intents_payment_provider_check
   CHECK (payment_provider IS NULL OR payment_provider IN ('usdc','stripe'));
