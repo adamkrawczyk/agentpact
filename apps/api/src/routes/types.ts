@@ -5,7 +5,7 @@ import type { FULFILLMENT_TYPES, TRUST_TIERS } from "./utils.js";
 
 export type CompleteDealMilestonesResult = {
   mode: "simulation" | "on-chain";
-  action: "released" | "buyer_sign_required" | "completed_without_onchain_release";
+  action: "released" | "buyer_sign_required" | "completed_without_onchain_release" | "settlement_pending";
   txData?: Array<{ milestoneId: string; to: string; data: string; value: string; description: string }>;
   onChainReleaseResults?: Array<{ milestoneId: string; txHash?: string; error?: string }>;
 };

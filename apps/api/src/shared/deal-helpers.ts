@@ -264,7 +264,8 @@ export async function completeDealMilestones(
   action:
     | "released"
     | "buyer_sign_required"
-    | "completed_without_onchain_release";
+    | "completed_without_onchain_release"
+    | "settlement_pending";
   txData?: Array<{
     milestoneId: string;
     to: string;
@@ -414,6 +415,41 @@ export async function completeDealMilestones(
           }),
         onChainReleaseResults: releaseResults,
       };
+    }
+  }
+
+  // tillopen_0306/P1 — silent-$0 phantom-complete guard. Mirror of the guard in
+  // index.ts completeDealMilestones (admin force-complete path uses THIS copy).
+  // COVERAGE, not existence (Codex MUST-FIX 2026-06-03): prove EVERY non-accepted
+  // milestone is backed by real money (real on-chain non-sim tx_hash OR a real
+  // Stripe intent). A LIMIT-1 existence check would let one funded milestone mask
+  // unfunded tranches; the tail force-accepts all milestones. Hold the whole deal
+  // at 'delivered' if any milestone is unbacked — no phantom complete, no fake fee
+  // audit row. Mutates ONLY deals.status (milestones stay 'in_progress' →
+  // fundable via /api/payments/create-intent), so a held deal is recoverable by
+  // funding then re-closing.
+  if (mode === "on-chain" && !skipPaymentRelease) {
+    const [unbacked] = await sql`
+      SELECT COUNT(*)::int AS n
+      FROM milestones m
+      WHERE m.deal_id = ${dealId}
+        AND m.status != 'accepted'
+        AND NOT EXISTS (
+          SELECT 1 FROM payment_intents pi
+          WHERE pi.milestone_id = m.id
+            AND pi.status IN ('funded', 'released')
+            AND (
+              (pi.tx_hash IS NOT NULL AND pi.tx_hash NOT LIKE 'sim_%')
+              OR (pi.payment_provider = 'stripe' AND pi.stripe_payment_intent_id IS NOT NULL)
+            )
+        )
+    `;
+    if (Number(unbacked?.n ?? 0) > 0) {
+      console.warn(
+        `[completeDealMilestones] settlement_pending: fee-bearing deal ${dealId} has ${unbacked.n} milestone(s) with no real-money funded intent in on-chain mode. Holding at 'delivered' (no phantom complete, no fake fee). Milestones stay fundable.`,
+      );
+      await sql`UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
+      return { mode, action: "settlement_pending" };
     }
   }
 
