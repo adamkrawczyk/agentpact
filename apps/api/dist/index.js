@@ -1005,21 +1005,39 @@ async function completeDealMilestones(dealId, opts = {}) {
     // fee-bearing deal has NEITHER, completing it would (a) phantom-complete at $0
     // and (b) inject a fake 'payment.release' feeAmount audit row that pollutes
     // auditedPlatformFeeRevenue. Hold the deal at 'delivered' instead.
+    //
+    // COVERAGE, not existence (Codex MUST-FIX 2026-06-03): we must prove EVERY
+    // not-yet-accepted milestone is backed by real money. A LIMIT 1 existence check
+    // would let ONE funded milestone mask other unfunded tranches in a multi-
+    // milestone deal — the tail below force-accepts ALL milestones, stranding
+    // seller value on the unpaid ones. So we count milestones that LACK a
+    // qualifying real-money intent; if any exist, hold the whole deal.
+    //
+    // RECOVERY (Codex MUST-FIX 2026-06-03): this guard mutates ONLY deals.status →
+    // 'delivered'; it never touches milestone status. The milestones remain at
+    // 'in_progress' (set at accept), which /api/payments/create-intent accepts for
+    // funding (payments.ts: status IN ('in_progress','pending')). So a held deal is
+    // fully recoverable: buyer funds the milestone(s), then re-runs close/confirm
+    // (both accept deal.status='delivered'), which re-enters here, now finds real
+    // money, and completes properly. Verified by the recover-by-funding test.
     if (mode === "on-chain" && !skipPaymentRelease) {
-        const realMoneyIntents = await sql `
-      SELECT 1
-      FROM payment_intents pi
-      JOIN milestones m ON m.id = pi.milestone_id
+        const [unbacked] = await sql `
+      SELECT COUNT(*)::int AS n
+      FROM milestones m
       WHERE m.deal_id = ${dealId}
-        AND pi.status IN ('funded', 'released')
-        AND (
-          (pi.tx_hash IS NOT NULL AND pi.tx_hash NOT LIKE 'sim_%')
-          OR (pi.payment_provider = 'stripe' AND pi.stripe_payment_intent_id IS NOT NULL)
+        AND m.status != 'accepted'
+        AND NOT EXISTS (
+          SELECT 1 FROM payment_intents pi
+          WHERE pi.milestone_id = m.id
+            AND pi.status IN ('funded', 'released')
+            AND (
+              (pi.tx_hash IS NOT NULL AND pi.tx_hash NOT LIKE 'sim_%')
+              OR (pi.payment_provider = 'stripe' AND pi.stripe_payment_intent_id IS NOT NULL)
+            )
         )
-      LIMIT 1
     `;
-        if (realMoneyIntents.length === 0) {
-            console.warn(`[completeDealMilestones] settlement_pending: fee-bearing deal ${dealId} reached settlement in on-chain mode with no real-money funded intent. Holding at 'delivered' (no phantom complete, no fake fee).`);
+        if (Number(unbacked?.n ?? 0) > 0) {
+            console.warn(`[completeDealMilestones] settlement_pending: fee-bearing deal ${dealId} has ${unbacked.n} milestone(s) with no real-money funded intent in on-chain mode. Holding at 'delivered' (no phantom complete, no fake fee). Milestones stay fundable.`);
             await sql `UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
             return { mode, action: "settlement_pending" };
         }

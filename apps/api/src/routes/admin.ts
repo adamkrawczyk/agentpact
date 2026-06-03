@@ -264,7 +264,16 @@ export default async function adminRoutes(app: FastifyInstance) {
     for (const deal of expiredDeals) {
       try {
         await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${deal.id} AND status NOT IN ('verified', 'revoked')`;
-        await completeDealMilestones(String(deal.id), { skipOnChainRelease: false });
+        const releaseResult = await completeDealMilestones(String(deal.id), { skipOnChainRelease: false });
+        // tillopen_0306/P1 — the guard holds unfunded fee-bearing deals at
+        // 'delivered'. This cron selects ('delivered','active','funded') deals, so
+        // a held deal would be re-selected every run; do NOT bump reputation or
+        // fire "auto-completed" on a settlement_pending result, or the cron would
+        // repeatedly false-reward an unpaid seller. Report it as pending instead.
+        if (releaseResult.action === "settlement_pending") {
+          results.push({ dealId: deal.id, completed: false, settlement_pending: true });
+          continue;
+        }
         await sql`UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
         notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.feedback_requested", {
           dealId: String(deal.id),
@@ -300,6 +309,18 @@ export default async function adminRoutes(app: FastifyInstance) {
 
     await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${body.dealId} AND status NOT IN ('verified', 'revoked')`;
     const releaseResult = await completeDealMilestones(body.dealId, { skipOnChainRelease: false });
+
+    // tillopen_0306/P1 — even on an operator force-close, do not archive the
+    // offer, reward the seller, or claim completion if the guard held the deal at
+    // 'delivered' (settlement_pending). Surface it so the operator funds first.
+    if (releaseResult.action === "settlement_pending") {
+      notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.settlement_pending", {
+        dealId: body.dealId,
+        reason: body.reason,
+      });
+      const [pendingDeal] = await sql`SELECT * FROM deals WHERE id = ${body.dealId}`;
+      return { ok: true, deal: pendingDeal, release: releaseResult, settlement_pending: true };
+    }
 
     if (deal.offer_id) {
       await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;

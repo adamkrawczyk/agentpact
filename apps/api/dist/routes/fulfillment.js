@@ -158,7 +158,20 @@ export async function registerRoutes(app, sql, deps) {
         if (!dealFull?.is_free_tier && Number(dealFull?.acceptance_timeout_days ?? 7) === 0) {
             try {
                 await sql `UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
-                await completeDealMilestones(id, { skipOnChainRelease: false });
+                const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: false });
+                // tillopen_0306/P1 — only celebrate (reputation bump, "Deal complete!"
+                // notifications, auto_completed:true) when the deal ACTUALLY settled. If
+                // the guard held it at 'delivered' (settlement_pending — fee-bearing deal
+                // with no real-money funded intent), do NOT reward the seller or claim
+                // completion; surface the pending state so the buyer funds it.
+                if (releaseResult.action === "settlement_pending") {
+                    notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.settlement_pending", {
+                        dealId: id,
+                        reason: "Fulfillment delivered, but no funded payment was found. Fund the deal to release escrow and complete it.",
+                    });
+                    const [pendingDeal] = await sql `SELECT * FROM deals WHERE id = ${id}`;
+                    return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields, auto_completed: false, settlement_pending: true, deal: pendingDeal, release: releaseResult });
+                }
                 await sql `UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
                 notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.auto_completed", {
                     dealId: id, reason: "acceptance_timeout_days=0 — instant auto-complete on fulfillment",
@@ -171,7 +184,7 @@ export async function registerRoutes(app, sql, deps) {
                     sellerAgentId: deal.seller_agent_id,
                 });
                 const [completedDeal] = await sql `SELECT * FROM deals WHERE id = ${id}`;
-                return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields, auto_completed: true, deal: completedDeal });
+                return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields, auto_completed: true, deal: completedDeal, release: releaseResult });
             }
             catch (autoErr) {
                 console.error("[fulfillment] Auto-complete failed:", autoErr.message);
@@ -495,6 +508,17 @@ export async function registerRoutes(app, sql, deps) {
       WHERE deal_id = ${id}
     `;
             const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: false });
+            // tillopen_0306/P1 — if the deal was held (no real-money funding), do not
+            // archive the offer, reward the seller, or claim completion. Surface pending.
+            if (releaseResult.action === "settlement_pending") {
+                notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.settlement_pending", {
+                    dealId: id, reason: "Delivery confirmed, but the deal has unfunded milestones — fund them to release escrow and complete.",
+                });
+                const [pendingDeal] = await sql `SELECT * FROM deals WHERE id = ${id}`;
+                const pendingMilestones = await sql `SELECT * FROM milestones WHERE deal_id = ${id} ORDER BY idx`;
+                const pendingEvents = await sql `SELECT * FROM negotiation_events WHERE deal_id = ${id} ORDER BY created_at`;
+                return reply.code(200).send({ ...pendingDeal, settlement_pending: true, milestones: pendingMilestones, events: pendingEvents, release: releaseResult });
+            }
             if (deal.offer_id) {
                 await sql `UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
             }
@@ -593,6 +617,16 @@ export async function registerRoutes(app, sql, deps) {
         WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')
       `;
             const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: false });
+            // tillopen_0306/P1 — held deal (unfunded milestones): do not archive,
+            // reward, or claim "closed". Surface pending so the buyer funds first.
+            if (releaseResult.action === "settlement_pending") {
+                notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.settlement_pending", {
+                    dealId: id, reason: "Close requested, but the deal has unfunded milestones — fund them to release escrow and complete.",
+                });
+                const [pendingDeal] = await sql `SELECT * FROM deals WHERE id = ${id}`;
+                const pendingMilestones = await sql `SELECT * FROM milestones WHERE deal_id = ${id} ORDER BY idx`;
+                return { ...pendingDeal, settlement_pending: true, milestones: pendingMilestones, release: releaseResult };
+            }
             if (deal.offer_id) {
                 await sql `UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
             }
@@ -640,7 +674,16 @@ export async function registerRoutes(app, sql, deps) {
             return { ok: false, reason: `Acceptance timeout not reached. Expires at ${expiredAt.toISOString()}`, expiresAt: expiredAt.toISOString() };
         }
         await sql `UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
-        await completeDealMilestones(id, { skipOnChainRelease: false });
+        const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: false });
+        // tillopen_0306/P1 — do not archive the offer, reward the seller, or claim
+        // completion when the deal was held at 'delivered' (settlement_pending).
+        if (releaseResult.action === "settlement_pending") {
+            notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.settlement_pending", {
+                dealId: id, reason: "Acceptance timeout reached but no funded payment was found — deal cannot complete until funded.",
+            });
+            const [pendingDeal] = await sql `SELECT * FROM deals WHERE id = ${id}`;
+            return { ok: true, completed: false, settlement_pending: true, deal: pendingDeal, release: releaseResult };
+        }
         if (deal.offer_id) {
             await sql `UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
         }
@@ -649,7 +692,7 @@ export async function registerRoutes(app, sql, deps) {
             dealId: id, reason: "Acceptance timeout reached — deal auto-completed", expiredAt: expiredAt.toISOString(),
         });
         const [updatedDeal] = await sql `SELECT * FROM deals WHERE id = ${id}`;
-        return { ok: true, completed: true, deal: updatedDeal };
+        return { ok: true, completed: true, deal: updatedDeal, release: releaseResult };
     });
     // NOTE: admin routes (auto-complete-timeouts, force-close) live in routes/admin.ts
     app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {
