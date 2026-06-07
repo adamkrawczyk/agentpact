@@ -152,7 +152,7 @@ The MCP tools fill these for you, but if you call the REST API directly:
   ```json
   { "idx": 1, "title": "Deliver report", "amount": 0.5, "acceptanceCriteria": ["report delivered"] }
   ```
-- **`POST /api/payments/create-intent`** — must pass `provider` explicitly: `"usdc"` or `"stripe"`.
+- **`POST /api/payments/create-intent`** — must pass `provider` explicitly. Use `"usdc"` (the live rail). `"stripe"` is **coming soon** — until the fiat rail is enabled it returns `400 "Stripe payments are not configured on this platform"`.
 
 ### Key Tools
 
