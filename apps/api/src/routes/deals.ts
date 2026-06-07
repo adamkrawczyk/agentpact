@@ -3,7 +3,7 @@ import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
 import { proposeDealSchema, counterDealSchema, consultationResponseSchema } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber, paymentRailsIntersect } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber, expandPaymentRails, STRIPE_RAIL_ENABLED, isPayableWalletAddress } from "./utils.js";
 
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
   await sql`
@@ -272,24 +272,43 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (body.buyerAgentId !== requesterAgentId) {
       return reply.code(403).send({ error: "Not authorized to act as this agent" });
     }
-    const [offerOwner] = await sql`SELECT agent_id, accepted_payment_methods FROM offers WHERE id = ${body.offerId}`;
+    const [offerOwner] = await sql`SELECT o.agent_id, o.accepted_payment_methods, a.owner_wallet_address FROM offers o JOIN agents a ON a.id = o.agent_id WHERE o.id = ${body.offerId}`;
     if (!offerOwner || offerOwner.agent_id !== body.sellerAgentId) {
       return reply.code(403).send({ error: "Not authorized" });
     }
-    const [needOwner] = await sql`SELECT agent_id, accepted_payment_methods FROM needs WHERE id = ${body.needId}`;
+    const [needOwner] = await sql`SELECT n.agent_id, n.accepted_payment_methods, a.owner_wallet_address FROM needs n JOIN agents a ON a.id = n.agent_id WHERE n.id = ${body.needId}`;
     if (!needOwner || needOwner.agent_id !== body.buyerAgentId) {
       return reply.code(403).send({ error: "Not authorized" });
     }
-    // tillopen_0306/P1b — rail-intersection gate. Reject a proposal whose offer
-    // and need accept disjoint payment rails (e.g. a usdc-only offer against a
-    // stripe-only need): the deal could never be funded. Recompute LIVE at
-    // propose because a listing's rail can change after posting (PATCH). 'both'
-    // intersects with everything, so default↔default and default↔single pass.
-    if (!paymentRailsIntersect(offerOwner.accepted_payment_methods as string, needOwner.accepted_payment_methods as string)) {
+    // tillopen_0306/P1c — payability propose gate (Layer 2). The deal will fund
+    // on the EFFECTIVE rail = the intersection of what both parties accept AND
+    // can actually service. Stripe is gated off (P1d), so today the only fundable
+    // rail is usdc → both parties need a valid wallet. This re-checks live at
+    // propose (catches capability drift after listing creation, e.g. a wallet
+    // cleared via PATCH) and uses the same primitives as the create + fund gates.
+    const fundableRails = expandPaymentRails(offerOwner.accepted_payment_methods as string);
+    const needRails = expandPaymentRails(needOwner.accepted_payment_methods as string);
+    // Intersect the two accepted-rail sets, then drop rails that are not live.
+    const liveRails = new Set<"usdc" | "stripe">();
+    for (const rail of fundableRails) {
+      if (!needRails.has(rail)) continue;            // must be mutually accepted
+      if (rail === "stripe" && !STRIPE_RAIL_ENABLED) continue; // stripe not live yet
+      liveRails.add(rail);
+    }
+    if (liveRails.size === 0) {
       return reply.code(400).send({
         error: "Payment rail mismatch",
-        detail: `Offer accepts '${offerOwner.accepted_payment_methods}' but need accepts '${needOwner.accepted_payment_methods}' — no common settlement rail. The buyer and seller must share at least one of usdc/stripe to transact.`,
+        detail: `Offer accepts '${offerOwner.accepted_payment_methods}' and need accepts '${needOwner.accepted_payment_methods}', but they share no LIVE settlement rail. Only 'usdc' is live right now (Stripe is coming soon).`,
       });
+    }
+    // For the usdc rail (the only live one today) both parties need a wallet.
+    if (liveRails.has("usdc") && liveRails.size === 1) {
+      if (!isPayableWalletAddress(offerOwner.owner_wallet_address)) {
+        return reply.code(400).send({ error: "Seller has no valid wallet to settle the 'usdc' rail this deal would fund on." });
+      }
+      if (!isPayableWalletAddress(needOwner.owner_wallet_address)) {
+        return reply.code(400).send({ error: "Buyer has no valid wallet to fund the 'usdc' rail this deal would settle on." });
+      }
     }
     if (isZeroPrice(body.negotiatedTotal) && body.milestones.some((milestone) => !isZeroPrice(milestone.amount))) {
       return reply.code(400).send({ error: "Free-tier deals must use zero-value milestones" });

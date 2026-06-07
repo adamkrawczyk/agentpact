@@ -408,3 +408,75 @@ export function paymentRailsIntersect(
   }
   return false;
 }
+
+// tillopen_0306/P1 — payability gate (defense-in-depth; all layers share this
+// ONE function so there is a single source of truth for "may this listing
+// advertise this rail", never two checks that can drift).
+//
+// Rail status today:
+//   - usdc   → LIVE. Requires a valid on-chain payout address
+//              (agents.owner_wallet_address). Closes the confirmed latent bug
+//              where a wallet-less seller's deal hit a NULL address at fund time.
+//   - stripe → COMING SOON. Gated behind STRIPE_RAIL_ENABLED (default false).
+//              The seller-payout side (Stripe Connect onboarding + payouts_enabled)
+//              is built in P1d; until the env flag flips on, a stripe/both listing
+//              is rejected at create with a clear "coming soon" message.
+export const STRIPE_RAIL_ENABLED = parseBooleanish(process.env.STRIPE_RAIL_ENABLED);
+
+/**
+ * Minimal, dependency-free wallet sanity check (0x + 40 hex). We deliberately
+ * do NOT import viem here (keeps utils unit-testable); the fund path still casts
+ * to viem's Address, but for the payability GATE a syntactic EVM-address check
+ * is the right strength — it rejects null/empty/garbage without passing a
+ * malformed string down to createMilestone.
+ */
+export function isPayableWalletAddress(addr: unknown): boolean {
+  return typeof addr === "string" && /^0x[0-9a-fA-F]{40}$/.test(addr);
+}
+
+/**
+ * The single payability decision point, shared by the create gate (offers +
+ * needs), the propose gate (re-check on both parties — catches capability drift
+ * after listing creation), and the fund guard (last-resort NULL-wallet block).
+ *
+ * `requestedRail` is the listing's accepted_payment_methods ('usdc'|'stripe'|
+ * 'both'; null/undefined/unknown → treated as 'both' via expandPaymentRails, so
+ * the gate is maximally protective). Returns ok:false + an actionable message on
+ * the first unservable rail, else ok:true.
+ */
+export function checkListingPayable(
+  requestedRail: string | null | undefined,
+  opts: { walletAddress: unknown; stripePayoutsEnabled?: boolean },
+): { ok: true } | { ok: false; message: string } {
+  const wanted = expandPaymentRails(requestedRail);
+
+  // Stripe rail — coming soon until STRIPE_RAIL_ENABLED flips on in P1d, AND
+  // (once enabled) the seller has a Stripe connected account with payouts.
+  if (wanted.has("stripe")) {
+    if (!STRIPE_RAIL_ENABLED) {
+      return {
+        ok: false,
+        message:
+          "The 'stripe' payment rail is coming soon — only 'usdc' is available right now. Create this listing with acceptedPaymentMethods:'usdc'.",
+      };
+    }
+    if (!opts.stripePayoutsEnabled) {
+      return {
+        ok: false,
+        message:
+          "Complete Stripe payout onboarding before advertising the 'stripe' payment rail.",
+      };
+    }
+  }
+
+  // USDC rail — live; requires a valid payout wallet.
+  if (wanted.has("usdc") && !isPayableWalletAddress(opts.walletAddress)) {
+    return {
+      ok: false,
+      message:
+        "Link a valid wallet address to your agent before advertising the 'usdc' payment rail.",
+    };
+  }
+
+  return { ok: true };
+}

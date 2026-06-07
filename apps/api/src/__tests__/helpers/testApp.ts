@@ -21,7 +21,12 @@ export async function getAuthHeadersForAgent(agentId: string, options?: { wallet
     agentId
   };
   if (options && "walletAddress" in options) {
-    payload.walletAddress = options.walletAddress;
+    // null ⇒ register a WALLET-LESS agent: the /api/auth/register schema accepts
+    // walletAddress as an optional string (not nullable), so we OMIT the field
+    // rather than send null (which Zod rejects). A string is forwarded as-is.
+    if (options.walletAddress != null) {
+      payload.walletAddress = options.walletAddress;
+    }
   } else {
     payload.walletAddress = "0x1234567890123456789012345678901234567890";
   }

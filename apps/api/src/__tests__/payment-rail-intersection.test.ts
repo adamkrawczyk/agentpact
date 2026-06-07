@@ -48,19 +48,23 @@ describe("propose rail-intersection gate (tillopen_0306/P1b)", () => {
   });
 
   async function makeOfferAndNeed(offerRail: string, needRail: string): Promise<{ offerId: string; needId: string }> {
-    const { app } = await createTestApp();
+    const { app, sql } = await createTestApp();
+    // Create as 'usdc' (the only rail that passes the P1c create gate), then set
+    // the target rail directly via SQL. These tests exercise the propose-time
+    // rail logic specifically; the create gate is covered in payability.test.ts.
     const offerRes = await app.inject({
       method: "POST", url: "/api/offers", headers: sellerHeaders,
-      payload: { ...generateTestOffer(sellerId), acceptedPaymentMethods: offerRail },
+      payload: { ...generateTestOffer(sellerId), acceptedPaymentMethods: "usdc" },
     });
     const needRes = await app.inject({
       method: "POST", url: "/api/needs", headers: buyerHeaders,
-      payload: { ...generateTestNeed(buyerId), acceptedPaymentMethods: needRail },
+      payload: { ...generateTestNeed(buyerId), acceptedPaymentMethods: "usdc" },
     });
-    return {
-      offerId: (JSON.parse(offerRes.body) as { id: string }).id,
-      needId: (JSON.parse(needRes.body) as { id: string }).id,
-    };
+    const offerId = (JSON.parse(offerRes.body) as { id: string }).id;
+    const needId = (JSON.parse(needRes.body) as { id: string }).id;
+    await sql`UPDATE offers SET accepted_payment_methods = ${offerRail} WHERE id = ${offerId}`;
+    await sql`UPDATE needs SET accepted_payment_methods = ${needRail} WHERE id = ${needId}`;
+    return { offerId, needId };
   }
 
   function proposePayload(offerId: string, needId: string) {
@@ -118,16 +122,20 @@ describe("autopilot rail-intersection gate (tillopen_0306/P1b)", () => {
 
   async function seedDisjointMatch(offerRail: string, needRail: string, needBudgetMax = 150): Promise<{ offerId: string; needId: string }> {
     const { app, sql } = await createTestApp();
+    // Create as 'usdc' (passes the P1c create gate) then set the target rail via
+    // SQL — this block tests the autopilot rail guard, not the create gate.
     const offerRes = await app.inject({
       method: "POST", url: "/api/offers", headers: sellerHeaders,
-      payload: { ...generateTestOffer(sellerId), acceptedPaymentMethods: offerRail },
+      payload: { ...generateTestOffer(sellerId), acceptedPaymentMethods: "usdc" },
     });
     const needRes = await app.inject({
       method: "POST", url: "/api/needs", headers: buyerHeaders,
-      payload: { ...generateTestNeed(buyerId), budgetMax: needBudgetMax, acceptedPaymentMethods: needRail },
+      payload: { ...generateTestNeed(buyerId), budgetMax: needBudgetMax, acceptedPaymentMethods: "usdc" },
     });
     const offerId = (JSON.parse(offerRes.body) as { id: string }).id;
     const needId = (JSON.parse(needRes.body) as { id: string }).id;
+    await sql`UPDATE offers SET accepted_payment_methods = ${offerRail} WHERE id = ${offerId}`;
+    await sql`UPDATE needs SET accepted_payment_methods = ${needRail} WHERE id = ${needId}`;
 
     // Buyer opts into autopilot with a price ceiling above the offer price.
     await sql`
