@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  api-and-mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build API
+        run: npm run -w @agentpact/api build
+
+      - name: Build MCP
+        run: npm run -w @agentpact/mcp build
+
+      - name: Test API
+        run: npm run -w @agentpact/api test
+
+      - name: Test MCP (if present)
+        run: npm run -w @agentpact/mcp test --if-present

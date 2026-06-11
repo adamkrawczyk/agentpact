@@ -1,0 +1,5 @@
+ALTER TABLE deals
+  ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'legacy-usdc';
+
+ALTER TABLE deals
+  ADD COLUMN IF NOT EXISTS mpp_receipt JSONB DEFAULT NULL;

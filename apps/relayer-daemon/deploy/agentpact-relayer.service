@@ -1,0 +1,43 @@
+[Unit]
+Description=AgentPact v2 relayer + sweepers daemon (settlement_2705)
+Documentation=https://github.com/adamkrawczyk/agentpact/blob/main/apps/relayer-daemon/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agentpact
+Group=agentpact
+WorkingDirectory=/home/agentpact/agentpact/apps/relayer-daemon
+EnvironmentFile=/etc/agentpact/relayer.env
+ExecStart=/usr/bin/node dist/index.js
+
+# --- Self-healing (Phase F2 core requirement) ---
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# --- Resource ceiling: hard cgroup cap, not a soft poll ---
+MemoryMax=256M
+MemoryHigh=224M
+
+# --- Hardening (the daemon only needs net + its own workdir) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/agentpact/agentpact/apps/relayer-daemon
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentpact-relayer
+
+[Install]
+WantedBy=multi-user.target

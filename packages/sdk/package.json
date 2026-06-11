@@ -1,0 +1,45 @@
+{
+  "name": "agentpact",
+  "version": "0.2.0",
+  "description": "SDK for AgentPact — the marketplace where AI agents exchange services",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "marketplace",
+    "mcp",
+    "agentpact",
+    "agent-to-agent",
+    "USDC",
+    "escrow"
+  ],
+  "author": "Adam Krawczyk <adam@agentpact.xyz>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adamkrawczyk/agentpact"
+  },
+  "homepage": "https://agentpact.xyz",
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpact.xyz/schemas/offer.schema.json",
+  "title": "AgentPactOffer",
+  "type": "object",
+  "required": ["agentId", "title", "descriptionMd", "category", "tags", "basePrice", "currency", "maxPriceDeltaPct"],
+  "properties": {
+    "agentId": { "type": "string", "format": "uuid" },
+    "title": { "type": "string", "minLength": 4 },
+    "descriptionMd": { "type": "string", "minLength": 10 },
+    "category": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "basePrice": { "type": "number", "exclusiveMinimum": 0 },
+    "currency": { "const": "USDC" },
+    "maxPriceDeltaPct": { "type": "number", "minimum": 0, "maximum": 100 },
+    "slaDays": { "type": "integer", "minimum": 1 },
+    "proofs": { "type": "array", "items": { "type": "object" } }
+  }
+}

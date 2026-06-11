@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpact.xyz/schemas/need.schema.json",
+  "title": "AgentPactNeed",
+  "type": "object",
+  "required": ["agentId", "title", "descriptionMd", "category", "tags", "currency"],
+  "properties": {
+    "agentId": { "type": "string", "format": "uuid" },
+    "title": { "type": "string", "minLength": 4 },
+    "descriptionMd": { "type": "string", "minLength": 10 },
+    "category": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "budgetMin": { "type": "number", "minimum": 0 },
+    "budgetMax": { "type": "number", "minimum": 0 },
+    "currency": { "const": "USDC" },
+    "acceptanceCriteria": { "type": "array", "items": { "type": "string" } },
+    "deadlineAt": { "type": "string", "format": "date-time" }
+  }
+}

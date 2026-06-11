@@ -1,0 +1,12 @@
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "node",
+    include: [
+      "src/__tests__/matching.test.ts",
+      "src/__tests__/matching-performance.test.ts",
+      "src/__tests__/health.test.ts",
+    ],
+  },
+});

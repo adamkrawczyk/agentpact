@@ -1,0 +1,5 @@
+ALTER TABLE offers
+ADD COLUMN IF NOT EXISTS description_embedding JSONB DEFAULT NULL;
+
+ALTER TABLE needs
+ADD COLUMN IF NOT EXISTS description_embedding JSONB DEFAULT NULL;

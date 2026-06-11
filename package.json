@@ -1,0 +1,49 @@
+{
+  "name": "agentpact",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @agentpact/api && npm run build -w @agentpact/mcp && npm run build -w @agentpact/web && npm run build -w agentpact-daemon && npm run build -w agentpact && npm run build -w @agentpact/fulfillment-daemon && npm run build -w @agentpact/relayer-daemon",
+    "dev": "concurrently \"npm run dev -w @agentpact/api\" \"npm run dev -w @agentpact/mcp\" \"npm run dev -w @agentpact/web\" \"npm run dev -w agentpact-daemon\"",
+    "daemon": "npm run start -w agentpact-daemon",
+    "daemon:self-check": "npm run daemon:self-check -w agentpact-daemon",
+    "migrate": "tsx scripts/migrate.ts",
+    "seed": "tsx scripts/seed.ts",
+    "seed:challenges": "tsx scripts/seed-challenges.ts",
+    "smoke:agent-deal": "tsx scripts/smoke-agent-deal.ts",
+    "smoke:mcp-agent": "tsx scripts/smoke-mcp-agent.ts",
+    "smoke:daemon-agent": "tsx scripts/smoke-daemon-agent.ts",
+    "daemon:legacy": "tsx scripts/agentpact-daemon.ts",
+    "api:routes": "tsx scripts/route-inventory.ts",
+    "test": "npm run test -w @agentpact/api && npm run test -w @agentpact/mcp && npm run test -w agentpact-daemon && npm run test -w agentpact && npm run test -w @agentpact/fulfillment-daemon && node --import tsx --test scripts/audit-runner-cli.test.ts && npm run test -w @agentpact/web",
+    "e2e:onchain": "tsx scripts/e2e-onchain-test.ts",
+    "sdk:generate": "bash scripts/generate-sdks.sh",
+    "sdk:publish": "bash scripts/generate-sdks.sh && cd ../agentpact-sdk && npm run build && npm publish --access public && cd ../agentpact-python-sdk && python -m build && twine upload dist/*"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.98.0",
+    "@nomicfoundation/hardhat-chai-matchers": "^2.1.0",
+    "@nomicfoundation/hardhat-toolbox": "^6.1.0",
+    "@openzeppelin/contracts": "^5.4.0",
+    "@testcontainers/postgresql": "^11.13.0",
+    "@types/node": "^22.13.10",
+    "chai": "^4.5.0",
+    "concurrently": "^9.1.2",
+    "dotenv": "^17.2.4",
+    "ethers": "^6.16.0",
+    "hardhat": "^2.28.4",
+    "openai": "^6.32.0",
+    "testcontainers": "^11.13.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "postgres": "^3.4.5",
+    "zod": "^3.24.2"
+  }
+}
