@@ -877,4 +877,80 @@ describe("AgentPactEscrowV3", function () {
       ).to.be.revertedWith("MockUSDC: caller is not to");
     });
   });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  describe("claimIntentForSeller — relayer-brokered claim pays sellerTarget", function () {
+    async function fundTargetedIntent(ctx, { maxPrice, sellerTarget }) {
+      const plaintext = ethers.toUtf8Bytes("broker-claim-secret");
+      const { params } = makePredicateParams(plaintext);
+      const ts = BigInt((await ethers.provider.getBlock("latest")).timestamp);
+      const expiresAt = ts + 3600n;
+      const auth = await buildAuthParams(ctx, { maxPrice });
+      const tx = await ctx.escrow.connect(ctx.relayer).createIntentWithAuthorization(
+        ctx.buyer.address,
+        await ctx.hashPre.getAddress(),
+        params,
+        sellerTarget,
+        maxPrice,
+        expiresAt,
+        auth.value, auth.validAfter, auth.validBefore,
+        auth.nonce, auth.v, auth.r, auth.s
+      );
+      const rc = await tx.wait();
+      const evt = rc.logs.find(l => l.fragment && l.fragment.name === "IntentCreated");
+      return { intentId: evt.args[0], plaintext };
+    }
+
+    it("relayer broadcasts; seller (sellerTarget) receives 90%, relayer receives nothing", async function () {
+      const ctx = await setupV3();
+      const maxPrice = ethers.parseUnits("100", 6);
+      const { intentId, plaintext } = await fundTargetedIntent(ctx, {
+        maxPrice, sellerTarget: ctx.seller.address,
+      });
+
+      const sellerBefore   = await ctx.usdc.balanceOf(ctx.seller.address);
+      const relayerBefore  = await ctx.usdc.balanceOf(ctx.relayer.address);
+      const platformBefore = await ctx.usdc.balanceOf(ctx.platform.address);
+      const escrowBefore   = await ctx.usdc.balanceOf(ctx.escrowAddr);
+
+      // RELAYER broadcasts (msg.sender = relayer), but seller is the payee.
+      await ctx.escrow.connect(ctx.relayer).claimIntentForSeller(intentId, "0x", plaintext);
+
+      const sellerDelta   = (await ctx.usdc.balanceOf(ctx.seller.address)) - sellerBefore;
+      const relayerDelta  = (await ctx.usdc.balanceOf(ctx.relayer.address)) - relayerBefore;
+      const platformDelta = (await ctx.usdc.balanceOf(ctx.platform.address)) - platformBefore;
+      const escrowDelta   = escrowBefore - (await ctx.usdc.balanceOf(ctx.escrowAddr));
+
+      const expectedSeller   = (maxPrice * 9000n) / 10000n;
+      const expectedPlatform = maxPrice - expectedSeller;
+
+      expect(sellerDelta).to.equal(expectedSeller, "seller (sellerTarget) gets 90%");
+      expect(relayerDelta).to.equal(0n, "relayer (msg.sender) gets NOTHING — no custodial hop");
+      expect(platformDelta).to.equal(expectedPlatform, "platform gets 10% fee");
+      expect(escrowDelta).to.equal(maxPrice, "escrow released the full locked amount");
+    });
+
+    it("reverts when sellerTarget is the zero address (untargeted intent)", async function () {
+      const ctx = await setupV3();
+      const maxPrice = ethers.parseUnits("5", 6);
+      const { intentId, plaintext } = await fundTargetedIntent(ctx, {
+        maxPrice, sellerTarget: ZERO,
+      });
+      await expect(
+        ctx.escrow.connect(ctx.relayer).claimIntentForSeller(intentId, "0x", plaintext)
+      ).to.be.revertedWith("Escrow: NO_SELLER_TARGET");
+    });
+
+    it("reverts on a bad witness (predicate still gates correctness)", async function () {
+      const ctx = await setupV3();
+      const maxPrice = ethers.parseUnits("5", 6);
+      const { intentId } = await fundTargetedIntent(ctx, {
+        maxPrice, sellerTarget: ctx.seller.address,
+      });
+      const wrongWitness = ethers.toUtf8Bytes("not-the-preimage");
+      await expect(
+        ctx.escrow.connect(ctx.relayer).claimIntentForSeller(intentId, "0x", wrongWitness)
+      ).to.be.revertedWith("Escrow: predicate failed");
+    });
+  });
 });
