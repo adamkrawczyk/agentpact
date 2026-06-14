@@ -180,7 +180,7 @@ if (isEntrypoint) {
     // Minimal ABI — only the two functions the relayer needs + IntentCreated event.
     const ESCROW_V3_ABI = parseAbi([
       "function createIntentWithAuthorization(address buyer, address verifier, bytes params, address sellerTarget, uint256 maxPrice, uint64 expiresAt, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external returns (bytes32 intentId)",
-      "function claimIntent(bytes32 intentId, bytes ciphertext, bytes witness) external",
+      "function claimIntentForSeller(bytes32 intentId, bytes ciphertext, bytes witness) external",
       "event IntentCreated(bytes32 indexed intentId, uint8 class, address indexed buyer, address indexed sellerTarget, address verifier, uint256 maxPrice, uint64 expiresAt)",
     ]);
 
@@ -287,7 +287,7 @@ if (isEntrypoint) {
         const hash = await walletClient.writeContract({
           address: escrowAddress,
           abi: ESCROW_V3_ABI,
-          functionName: "claimIntent",
+          functionName: "claimIntentForSeller",
           args: [
             toHex(onChainId) as `0x${string}`,
             toHex(ciphertext),

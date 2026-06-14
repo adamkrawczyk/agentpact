@@ -364,6 +364,51 @@ contract AgentPactEscrowV3 is ReentrancyGuard {
     }
 
     /**
+     * @notice Relayer-brokered Class A claim. Anyone (typically the autoclose
+     *         relayer) may broadcast this, but the seller's 90% share is paid to
+     *         the intent's designated `sellerTarget` — NOT to msg.sender. This is
+     *         the gasless-for-both-parties settlement path: the seller never needs
+     *         ETH, the relayer sponsors gas, and funds settle to the correct
+     *         seller address with no custodial hop (the relayer never receives
+     *         the seller's money). Requires a non-zero sellerTarget (an untargeted
+     *         intent has no canonical payee, so this path is disallowed for it —
+     *         use claimIntent for the self-claim case).
+     * @dev    The predicate still gates correctness identically to claimIntent;
+     *         broadcasting authority is decoupled from payee. The off-chain layer
+     *         (API reveal endpoint) enforces that only the deal's seller can
+     *         trigger a reveal, which is what queues this claim.
+     */
+    function claimIntentForSeller(
+        bytes32 intentId,
+        bytes calldata ciphertext,
+        bytes calldata witness
+    ) external nonReentrant {
+        Intent storage it = _intents[intentId];
+        require(it.status == IntentStatus.Open && it.class == SettlementClass.ClassA, "Escrow: not Class A open");
+        require(block.timestamp < it.expiresAt, "Escrow: expired");
+        require(it.sellerTarget != address(0), "Escrow: NO_SELLER_TARGET");
+
+        bytes memory params = predicateParams[intentId];
+        bool ok = IPredicateVerifier(it.verifier).verify(params, ciphertext, witness);
+        require(ok, "Escrow: predicate failed");
+
+        // Effects FIRST.
+        it.status = IntentStatus.ClaimedA;
+        it.acceptedSeller = it.sellerTarget;
+
+        (uint256 sellerShare, uint256 platformShare) = StreamingEngine.unitPayout(it.maxPrice, platformFeeBps);
+
+        // Interactions — seller share goes to the designated sellerTarget, never msg.sender.
+        require(usdc.transfer(it.sellerTarget, sellerShare), "Escrow: seller xfer failed");
+        if (platformShare > 0) {
+            require(usdc.transfer(platformWallet, platformShare), "Escrow: platform xfer failed");
+        }
+
+        emit IntentClaimedA(intentId, it.sellerTarget, sellerShare, platformShare);
+        emit KeyDeliveryRequested(intentId, it.buyer);
+    }
+
+    /**
      * @notice Refund an expired open intent to the buyer.
      * @dev The refund target is the stored `buyer` (invariant I7), not msg.sender.
      */
