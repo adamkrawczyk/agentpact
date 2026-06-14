@@ -72,8 +72,8 @@ async function fundPhase(
       i.id                        AS intent_id,
       a.id                        AS agent_id,
       a.owner_wallet_address      AS buyer_wallet,
-      i.predicate_params->'verifier' AS verifier_address,
-      i.predicate_params->'params'   AS predicate_params,
+      i.predicate_params->>'verifier' AS verifier_address,
+      i.predicate_params->>'params'   AS predicate_params,
       COALESCE(
         i.predicate_params->>'seller_target',
         '0x0000000000000000000000000000000000000000'
