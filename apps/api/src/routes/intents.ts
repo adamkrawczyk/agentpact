@@ -291,6 +291,74 @@ export async function registerRoutes(
     },
   );
 
+  // POST /api/intents/:id/reveal-preimage — autoclose_0614 Change 2: Class-A
+  // seller submits the hash preimage (the witness for hash-preimage-v1). Stored
+  // in intent_reveals and the intent flips to 'reveal_ready'; the relayer's CLAIM
+  // sweep then broadcasts claimIntent(on_chain_id, ciphertext, preimage), which
+  // the on-chain predicate verifies → atomic 90/10 release. (Distinct from the
+  // Class-B Schelling round-2 /reveal route below.)
+  app.post(
+    "/api/intents/:id/reveal-preimage",
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = z
+        .object({
+          agentId: z.string().uuid(),
+          preimage: z.string().regex(/^0x[0-9a-fA-F]+$/),
+          ciphertext: z.string().regex(/^0x[0-9a-fA-F]+$/).optional(),
+        })
+        .parse(request.body);
+      const requester = getRequesterAgentId(request, reply);
+      if (!requester) return;
+      if (body.agentId !== requester) {
+        return reply.code(403).send({ error: "Not authorized", code: "AUTH_FORBIDDEN" });
+      }
+
+      const [intent] = await sql<Array<{
+        id: string;
+        status: string;
+        settlement_class: string;
+        seller_target_agent_id: string | null;
+        seller_agent_id: string | null;
+      }>>`
+        SELECT id, status, settlement_class, seller_target_agent_id, seller_agent_id
+        FROM intents WHERE id = ${id} FOR UPDATE
+      `;
+      if (!intent) return reply.code(404).send({ error: "Intent not found", code: "NOT_FOUND" });
+      if (intent.settlement_class !== "A") {
+        return reply.code(400).send({ error: "Only Class A intents support reveal", code: "VALIDATION_FAILED" });
+      }
+      const authorizedSeller = intent.seller_target_agent_id ?? intent.seller_agent_id;
+      if (authorizedSeller && authorizedSeller !== body.agentId) {
+        return reply.code(403).send({ error: "Only the deal seller may reveal", code: "AUTH_FORBIDDEN" });
+      }
+      // Reveal is valid only while the intent is funded/awaiting-funding and not
+      // already revealed/claimed.
+      if (!["awaiting_funding", "open"].includes(intent.status)) {
+        return reply.code(409).send({ error: `Intent status is ${intent.status}`, code: "INTENT_BAD_STATE" });
+      }
+
+      const preimageBuf = Buffer.from(body.preimage.slice(2), "hex");
+      const ciphertextBuf = body.ciphertext ? Buffer.from(body.ciphertext.slice(2), "hex") : null;
+      await sql.begin(async (txn) => {
+        await txn.unsafe(
+          `
+            INSERT INTO intent_reveals (intent_id, preimage, ciphertext)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (intent_id) DO UPDATE SET
+              preimage = EXCLUDED.preimage, ciphertext = EXCLUDED.ciphertext, created_at = now()
+          `,
+          [id, preimageBuf, ciphertextBuf]
+        );
+        await txn.unsafe("UPDATE intents SET status = 'reveal_ready', updated_at = now() WHERE id = $1", [id]);
+      });
+      await audit(sql, body.agentId, "intent.reveal", "intent", id,
+        idempotencyKey(request.headers as Record<string, unknown>), { agentId: body.agentId });
+      return reply.code(200).send({ ok: true, intent_id: id, status: "reveal_ready" });
+    },
+  );
+
   // POST /api/intents/:id/deliver — Class B seller posts ciphertext.
   app.post(
     "/api/intents/:id/deliver",
