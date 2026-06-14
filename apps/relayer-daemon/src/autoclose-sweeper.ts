@@ -17,7 +17,7 @@ interface FundRow {
   agent_id: string;
   buyer_wallet: string;
   verifier_address: string;
-  predicate_params: Buffer;         // ABI-encoded bytes
+  predicate_params: string;         // 0x-prefixed ABI-encoded bytes (hex text from JSONB ->>)
   seller_target: string;            // 0x address or '0x0000000000000000000000000000000000000000'
   max_price_usdc: string;           // numeric string from postgres
   expires_at: Date;
@@ -111,7 +111,7 @@ async function fundPhase(
       const { txHash, onChainId } = await chain.createIntentWithAuthorization({
         buyer: row.buyer_wallet,
         verifier: row.verifier_address,
-        params: row.predicate_params,
+        params: row.predicate_params as `0x${string}`,
         sellerTarget: row.seller_target,
         maxPrice,
         expiresAt,

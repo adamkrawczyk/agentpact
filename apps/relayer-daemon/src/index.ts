@@ -238,7 +238,7 @@ if (isEntrypoint) {
           args: [
             args.buyer as `0x${string}`,
             args.verifier as `0x${string}`,
-            toHex(args.params),
+            args.params,
             args.sellerTarget as `0x${string}`,
             args.maxPrice,
             args.expiresAt,

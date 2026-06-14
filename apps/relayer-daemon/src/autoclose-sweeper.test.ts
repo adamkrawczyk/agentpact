@@ -54,7 +54,7 @@ function fundRow(overrides: Record<string, unknown> = {}) {
     agent_id:  "bbbb0000-0000-0000-0000-000000000001",
     buyer_wallet:    "0xBuyerWallet000000000000000000000000000001",
     verifier_address:"0xVerifier000000000000000000000000000000001",
-    predicate_params: Buffer.from("aabbcc", "hex"),
+    predicate_params: "0xaabbcc",
     seller_target:   "0x0000000000000000000000000000000000000000",
     max_price_usdc:  "2.000000",
     expires_at:      new Date(Date.now() + 3600_000),

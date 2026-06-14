@@ -17,7 +17,7 @@ export interface ChainClient {
   createIntentWithAuthorization(args: {
     buyer: string;         // 0x address — EIP-3009 authorizer
     verifier: string;      // 0x address — approved IPredicateVerifier
-    params: Buffer;        // ABI-encoded predicate params
+    params: `0x${string}`; // ABI-encoded predicate params (hex)
     sellerTarget: string;  // 0x address or zero address
     maxPrice: bigint;      // USDC 6-decimal units
     expiresAt: bigint;     // unix seconds
