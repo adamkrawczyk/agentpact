@@ -58,6 +58,11 @@ export default async function adminRoutes(app: FastifyInstance) {
     };
   }
 
+  // Bare conversion ratio (0..1) or null when the denominator is 0.
+  function rate(fromCount: number, toCount: number): number | null {
+    return fromCount > 0 ? Number((toCount / fromCount).toFixed(4)) : null;
+  }
+
   async function getMetrics() {
     const browseByEndpoint = await sql`
       SELECT
@@ -133,6 +138,56 @@ export default async function adminRoutes(app: FastifyInstance) {
         AND payload_json ? 'feeAmount'
     `;
 
+    // ── ECONOMICS: two HARD-SEPARATED signals (autoclose_0614 metrics loop) ──
+    //
+    // The naive GMV above (SUM negotiated_total WHERE completed) is wash-trade
+    // blind: it counts a fleet agent paying ANOTHER fleet agent — or itself — as
+    // "revenue". The settlement-marketplace doctrine requires owner-pair tagging
+    // so fleet-to-fleet volume can never masquerade as real GMV. We compute:
+    //
+    //   ENGINEERING signal  — funnel conversion (proposals→funded→completed).
+    //     Answers "is the settlement machine working?". Improves the moment our
+    //     own relayer auto-funds dogfood deals — so it is NOT proof of demand.
+    //
+    //   BUSINESS signal     — external-only GMV: completed deals where buyer and
+    //     seller are BOTH non-internal AND have DISTINCT owner wallets. Answers
+    //     "does anyone real want this?". This is the only number allowed to mean
+    //     "money".
+    //
+    // BLIND-SPOT HONESTY: external_only here depends on agents.is_internal being
+    // set. If zero agents are flagged internal, the split is UNTRUSTWORTHY (every
+    // seed/test agent reads as "external"), so we surface internal_agent_count and
+    // a trust flag rather than silently reporting an inflated number.
+    const [econ] = await sql`
+      WITH classified AS (
+        SELECT
+          d.status,
+          d.negotiated_total,
+          (NOT b.is_internal AND NOT s.is_internal) AS both_external,
+          (b.owner_wallet_address IS DISTINCT FROM s.owner_wallet_address) AS distinct_owners
+        FROM deals d
+        JOIN agents b ON b.id = d.buyer_agent_id
+        JOIN agents s ON s.id = d.seller_agent_id
+      )
+      SELECT
+        COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_total,
+        COALESCE(SUM(negotiated_total) FILTER (WHERE status = 'completed'), 0)::float AS gmv_total,
+        COUNT(*) FILTER (
+          WHERE status = 'completed' AND both_external AND distinct_owners
+        )::int AS completed_external,
+        COALESCE(SUM(negotiated_total) FILTER (
+          WHERE status = 'completed' AND both_external AND distinct_owners
+        ), 0)::float AS gmv_external,
+        COUNT(*) FILTER (
+          WHERE status = 'completed' AND NOT (both_external AND distinct_owners)
+        )::int AS completed_internal_or_self
+      FROM classified
+    `;
+
+    const [{ internal_agent_count }] = await sql`
+      SELECT COUNT(*) FILTER (WHERE is_internal)::int AS internal_agent_count FROM agents
+    `;
+
     const dealProposalsCreated = Number(funnelStats.deal_proposals_created ?? 0);
     const proposalsAccepted = Number(funnelStats.proposals_accepted ?? 0);
     const dealsFunded = Number(funnelStats.deals_funded ?? 0);
@@ -188,6 +243,43 @@ export default async function adminRoutes(app: FastifyInstance) {
         platformFeeRevenue: calculatedPlatformFeeRevenue,
         auditedPlatformFeeRevenue,
       },
+      economics: (() => {
+        const completedTotal = Number(econ.completed_total ?? 0);
+        const completedExternal = Number(econ.completed_external ?? 0);
+        const completedInternalOrSelf = Number(econ.completed_internal_or_self ?? 0);
+        const gmvExternal = Number(econ.gmv_external ?? 0);
+        const internalAgentCount = Number(internal_agent_count ?? 0);
+        // The external split is only trustworthy once at least one agent is
+        // flagged internal. With zero flagged, every seed/test deal reads as
+        // external and gmvExternal is inflated — say so loudly.
+        const externalSplitTrustworthy = internalAgentCount > 0;
+        return {
+          // ENGINEERING signal — is the settlement machine working?
+          engineering: {
+            proposalsAccepted,
+            dealsFunded,
+            dealsCompleted,
+            acceptToFundRate: rate(proposalsAccepted, dealsFunded),
+            fundToCompleteRate: rate(dealsFunded, dealsCompleted),
+          },
+          // BUSINESS signal — does anyone real want this? (the only "money" number)
+          business: {
+            completedExternalDeals: completedExternal,
+            externalGmv: gmvExternal,
+            externalFeeRevenue: Number(((gmvExternal * PLATFORM_FEE_PCT) / 100).toFixed(6)),
+          },
+          // Self-honesty: what the business number is NOT counting + whether it can be trusted.
+          integrity: {
+            completedTotal,
+            completedInternalOrSelf,
+            internalAgentCount,
+            externalSplitTrustworthy,
+            note: externalSplitTrustworthy
+              ? "External split active: internal agents are flagged."
+              : "UNTRUSTWORTHY: zero agents flagged is_internal — externalGmv likely inflated by seed/test deals. Flag fleet agents via POST /api/admin/agents/internal before trusting business.externalGmv.",
+          },
+        };
+      })(),
     };
   }
 
