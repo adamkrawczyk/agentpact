@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import { z } from "zod";
+import { encodeAbiParameters } from "viem";
 import type { Deps } from "./types.js";
 import { proposeDealSchema, counterDealSchema, consultationResponseSchema, decomposeDealSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber, expandPaymentRails, STRIPE_RAIL_ENABLED, isPayableWalletAddress } from "./utils.js";
@@ -401,9 +402,14 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
     const [deal] = await sql`
       SELECT d.buyer_agent_id, d.seller_agent_id, d.status,
-             COALESCE(o.fulfillment_type, 'generic') AS fulfillment_type
+             d.negotiated_total, d.currency, d.deliverable_hash, d.intent_id,
+             COALESCE(o.fulfillment_type, 'generic') AS fulfillment_type,
+             buyer.owner_wallet_address AS buyer_wallet,
+             seller.owner_wallet_address AS seller_wallet
       FROM deals d
       LEFT JOIN offers o ON o.id = d.offer_id
+      LEFT JOIN agents buyer ON buyer.id = d.buyer_agent_id
+      LEFT JOIN agents seller ON seller.id = d.seller_agent_id
       WHERE d.id = ${id}
     `;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
@@ -441,6 +447,60 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
           `,
           [id, body.actorAgentId, JSON.stringify(body)]
         );
+
+        // ── autoclose_0614 Change 1: auto-mint a Class-A intent ───────────────
+        // When an accepted deal is paid (negotiated_total > 0), settled in USDC,
+        // both parties hold a wallet, and the deal carries a deliverable_hash
+        // commitment, mint a hash-preimage Class-A intent in 'awaiting_funding'.
+        // The relayer daemon broadcasts createIntentWithAuthorization (assigning
+        // on_chain_id) once the buyer queues an EIP-3009 funding authorization.
+        // Idempotent: skip if the deal already has an intent_id.
+        const negotiatedTotal = Number(deal.negotiated_total ?? 0);
+        const dealCurrency = String(deal.currency ?? "USDC");
+        const eligible =
+          !deal.intent_id &&
+          negotiatedTotal > 0 &&
+          dealCurrency === "USDC" &&
+          deal.deliverable_hash != null &&
+          deal.buyer_wallet != null &&
+          deal.seller_wallet != null;
+        if (eligible) {
+          const hashHex = ("0x" + Buffer.from(deal.deliverable_hash as Buffer).toString("hex")) as `0x${string}`;
+          // The relayer broadcasts createIntentWithAuthorization with these fields,
+          // so predicate_params must carry everything the on-chain call needs:
+          //  - verifier: the deployed HashPreimagePredicate address (chain config)
+          //  - params:   abi.encode(["bytes32"], [commitment]) — the predicate's
+          //              verify() strictly decodes exactly one bytes32
+          //  - seller_target: the seller's wallet (intent is targeted to them)
+          //  - hash: retained for human/debug inspection
+          const HASH_PREIMAGE_PREDICATE =
+            (process.env.HASH_PREIMAGE_PREDICATE_ADDRESS as `0x${string}`) ??
+            "0x0000000000000000000000000000000000000000";
+          const encodedParams = encodeAbiParameters([{ type: "bytes32" }], [hashHex]);
+          const predicateParams = JSON.stringify({
+            hash: hashHex,
+            verifier: HASH_PREIMAGE_PREDICATE,
+            params: encodedParams,
+            seller_target: deal.seller_wallet,
+          });
+          // Class-A intents auto-expire 7 days out if never funded/claimed.
+          const [mintedIntent] = await txn.unsafe(
+            `
+              INSERT INTO intents (
+                on_chain_id, buyer_agent_id, seller_agent_id, seller_target_agent_id,
+                settlement_class, predicate_type, predicate_params,
+                max_price_usdc, status, expires_at, deal_id
+              ) VALUES (
+                NULL, $1, $2, $2,
+                'A', 'hash-preimage-v1', $3::jsonb,
+                $4, 'awaiting_funding', NOW() + INTERVAL '7 days', $5
+              )
+              RETURNING id
+            `,
+            [deal.buyer_agent_id, deal.seller_agent_id, predicateParams, negotiatedTotal, id]
+          );
+          await txn.unsafe("UPDATE deals SET intent_id = $1 WHERE id = $2", [mintedIntent.id, id]);
+        }
       });
     } catch (err) {
       app.log.error({ err, dealId: id }, "deal.accept transaction failed — deal status NOT changed");
@@ -459,6 +519,78 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
     const [updatedDeal] = await sql`SELECT * FROM deals WHERE id = ${id}`;
     return { ok: true, ...updatedDeal };
+  });
+
+  // ── autoclose_0614 Change 2: buyer queues an EIP-3009 funding authorization ──
+  // The buyer signs USDC's receiveWithAuthorization off-chain and POSTs the
+  // signature components here. The relayer daemon's FUND sweep consumes the
+  // 'queued' row and broadcasts createIntentWithAuthorization on EscrowV3,
+  // pulling the buyer's USDC into escrow with zero buyer-side gas.
+  app.post("/api/deals/:id/funding-authorization", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = z
+      .object({
+        actorAgentId: z.string().uuid().optional(),
+        agentId: z.string().uuid().optional(),
+        value: z.number().positive(),
+        validAfter: z.number().int().nonnegative(),
+        validBefore: z.number().int().positive(),
+        nonce: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+        v: z.number().int(),
+        r: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+        s: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+      })
+      .parse(request.body);
+    const actorAgentId = body.actorAgentId ?? body.agentId;
+    const requesterAgentId = getRequesterAgentId(request, reply);
+    if (!requesterAgentId) return;
+    if (actorAgentId && actorAgentId !== requesterAgentId) {
+      return reply.code(403).send({ error: "Not authorized to act as this agent" });
+    }
+
+    const [deal] = await sql`
+      SELECT buyer_agent_id, intent_id FROM deals WHERE id = ${id}
+    `;
+    if (!deal) return reply.code(404).send({ error: "Deal not found" });
+    if (requesterAgentId !== deal.buyer_agent_id) {
+      return reply.code(403).send({ error: "Only the buyer may authorize funding" });
+    }
+    if (!deal.intent_id) {
+      return reply
+        .code(409)
+        .send({ error: "Deal has no auto-minted intent to fund", code: "NO_INTENT" });
+    }
+
+    const [intent] = await sql`
+      SELECT max_price_usdc, status FROM intents WHERE id = ${deal.intent_id}
+    `;
+    if (!intent) {
+      return reply.code(409).send({ error: "Linked intent not found", code: "NO_INTENT" });
+    }
+    if (Number(body.value) !== Number(intent.max_price_usdc)) {
+      return reply.code(400).send({
+        error: `Authorization value ${body.value} does not match intent price ${intent.max_price_usdc}`,
+        code: "VALUE_MISMATCH",
+      });
+    }
+
+    const nonceBuf = Buffer.from(body.nonce.slice(2), "hex");
+    const rBuf = Buffer.from(body.r.slice(2), "hex");
+    const sBuf = Buffer.from(body.s.slice(2), "hex");
+    await sql`
+      INSERT INTO intent_funding_authorizations (
+        intent_id, value_usdc, valid_after, valid_before, nonce, sig_v, sig_r, sig_s, status
+      ) VALUES (
+        ${deal.intent_id}, ${body.value}, ${body.validAfter}, ${body.validBefore},
+        ${nonceBuf}, ${body.v}, ${rBuf}, ${sBuf}, 'queued'
+      )
+      ON CONFLICT (intent_id) DO UPDATE SET
+        value_usdc = EXCLUDED.value_usdc, valid_after = EXCLUDED.valid_after,
+        valid_before = EXCLUDED.valid_before, nonce = EXCLUDED.nonce,
+        sig_v = EXCLUDED.sig_v, sig_r = EXCLUDED.sig_r, sig_s = EXCLUDED.sig_s,
+        status = 'queued', created_at = now()
+    `;
+    return reply.code(201).send({ ok: true, intent_id: deal.intent_id, status: "queued" });
   });
 
   app.post("/api/deals/:id/cancel", async (request, reply) => {
