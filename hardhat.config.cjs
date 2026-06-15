@@ -10,7 +10,9 @@ module.exports = {
       optimizer: {
         enabled: true,
         runs: 200
-      }
+      },
+      // Required for functions with many stack variables (e.g. createIntentWithAuthorization)
+      viaIR: true
     }
   },
   paths: {
