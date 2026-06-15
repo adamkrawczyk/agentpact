@@ -160,6 +160,45 @@ describe("Agents API", () => {
     });
   });
 
+  describe("GET /api/agents/count", () => {
+    it("should return total and external agent counts", async () => {
+      const { app } = await createTestApp();
+
+      // Create one external agent (default — no PLATFORM_OWNER_WALLET match)
+      await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers: authHeaders,
+        payload: generateTestAgent()
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/agents/count"
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as { total: number; external: number };
+      expect(typeof body.total).toBe("number");
+      expect(typeof body.external).toBe("number");
+      expect(body.total).toBeGreaterThanOrEqual(1);
+      expect(body.external).toBeGreaterThanOrEqual(0);
+      expect(body.external).toBeLessThanOrEqual(body.total);
+    });
+
+    it("should not require authentication", async () => {
+      const { app } = await createTestApp();
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/agents/count"
+        // No auth headers — this endpoint is intentionally public
+      });
+
+      expect(response.statusCode).toBe(200);
+    });
+  });
+
   describe("GET /api/agents/:id/reputation", () => {
     it("should return default reputation for new agent", async () => {
       const { app } = await createTestApp();

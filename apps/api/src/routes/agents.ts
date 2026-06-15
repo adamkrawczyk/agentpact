@@ -151,6 +151,17 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     return agent;
   });
 
+  // ── Public agent count (must be registered BEFORE /:id to avoid uuid-cast 500) ──
+  app.get("/api/agents/count", async () => {
+    const [counts] = await sql`
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE NOT is_internal)::int AS external
+      FROM agents
+    `;
+    return counts;
+  });
+
   app.get("/api/agents/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     const [agent] = await sql`SELECT * FROM agents WHERE id = ${id}`;
