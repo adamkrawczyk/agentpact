@@ -13,6 +13,28 @@ export interface SqlClient {
 export interface ChainClient {
   acknowledgeTimeout(intentOnChainId: Buffer): Promise<{ txHash: string }>;
   settleSchelling(intentOnChainId: Buffer): Promise<{ txHash: string }>;
+  /** Gasless Class-A intent creation via EIP-3009. Returns the on-chain intentId. */
+  createIntentWithAuthorization(args: {
+    buyer: string;         // 0x address — EIP-3009 authorizer
+    verifier: string;      // 0x address — approved IPredicateVerifier
+    params: `0x${string}`; // ABI-encoded predicate params (hex)
+    sellerTarget: string;  // 0x address or zero address
+    maxPrice: bigint;      // USDC 6-decimal units
+    expiresAt: bigint;     // unix seconds
+    value: bigint;         // must equal maxPrice
+    validAfter: bigint;
+    validBefore: bigint;
+    nonce: Buffer;         // 32-byte bytes32
+    sigV: number;
+    sigR: Buffer;          // 32-byte
+    sigS: Buffer;          // 32-byte
+  }): Promise<{ txHash: string; onChainId: Buffer }>;
+  /** Claim a Class-A intent by presenting ciphertext + witness (preimage). */
+  claimIntent(
+    onChainId: Buffer,
+    ciphertext: Buffer,
+    witness: Buffer,
+  ): Promise<{ txHash: string }>;
 }
 
 export interface SweeperResult {

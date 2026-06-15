@@ -18,6 +18,8 @@ function staticChain(): ChainClient {
   return {
     async acknowledgeTimeout() { return { txHash: "0xack" }; },
     async settleSchelling() { return { txHash: "0xsch" }; },
+    async createIntentWithAuthorization() { return { txHash: "0xfund", onChainId: Buffer.alloc(32, 0) }; },
+    async claimIntent() { return { txHash: "0xclaim" }; },
   };
 }
 
@@ -29,10 +31,13 @@ function tinyConfig(port: number) {
     databaseUrl: undefined,
     baseRpcUrl: "https://mainnet.base.org",
     escrowV2Address: undefined,
+    escrowV3Address: undefined,
     platformWallet: undefined,
     ackSweepIntervalMs: QUICK_INTERVAL,
     schellingSweepIntervalMs: QUICK_INTERVAL,
     streamStaleSweepIntervalMs: QUICK_INTERVAL,
+    autocloseSweepIntervalMs: QUICK_INTERVAL,
+    autocloseMaxUsdc: 5,
     logLevel: "warn" as const,
   };
 }
@@ -68,6 +73,8 @@ describe("relayer-daemon wiring", () => {
     const failingChain: ChainClient = {
       async acknowledgeTimeout() { throw new Error("chain panic"); },
       async settleSchelling() { throw new Error("chain panic"); },
+      async createIntentWithAuthorization() { throw new Error("chain panic"); },
+      async claimIntent() { throw new Error("chain panic"); },
     };
     const failingSql = (() => {
       throw new Error("db panic");
