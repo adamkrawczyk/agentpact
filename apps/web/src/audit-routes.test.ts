@@ -139,6 +139,35 @@ describe("GET /audit-thank-you", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Tests: GET /sitemap.xml
+// The primary server runs with API_BASE_URL=http://localhost:1 (unreachable),
+// so these also prove the API-down fallback: the sitemap must still 200 with
+// the static pages even when /api/public/sitemap-entries can't be fetched.
+// ---------------------------------------------------------------------------
+
+describe("GET /sitemap.xml", () => {
+  test("responds 200 with XML content-type", async () => {
+    const res = await fetch(`${BASE}/sitemap.xml`);
+    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
+    assert.ok(
+      (res.headers.get("content-type") ?? "").includes("xml"),
+      `expected xml content-type, got ${res.headers.get("content-type")}`
+    );
+  });
+
+  test("includes the static marketplace pages even when API is unreachable", async () => {
+    const res = await fetch(`${BASE}/sitemap.xml`);
+    const xml = await res.text();
+    assert.ok(xml.includes("<loc>https://agentpact.xyz/</loc>"), "missing home loc");
+    assert.ok(xml.includes("<loc>https://agentpact.xyz/offers</loc>"), "missing /offers loc");
+    assert.ok(xml.includes("<loc>https://agentpact.xyz/needs</loc>"), "missing /needs loc");
+    // Valid sitemap envelope, no crash on API failure.
+    assert.ok(xml.includes("<urlset"), "missing urlset envelope");
+    assert.ok(xml.trimStart().startsWith("<?xml"), "missing xml prolog");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Stripe link env var test — separate server instance
 // ---------------------------------------------------------------------------
 
