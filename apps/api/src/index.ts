@@ -123,10 +123,31 @@ export const sql = postgres(DATABASE_URL, {
   // the pool instead of leaking it. Catches future leak sources from any
   // code path, not just the matching engine. idle_in_transaction safety net
   // bounds stuck txns; application_name makes pg_stat_activity grep-able.
+  //
+  // ⚠️ 2026-06-17 (503-on-everything storm, ~12h outage): these `connection.*`
+  // values are sent as Postgres STARTUP PARAMETERS, and the Supabase
+  // transaction-mode pooler (Supavisor, :6543 in DATABASE_URL) SILENTLY
+  // STRIPS them. Verified live: SHOW application_name returned "Supavisor"
+  // (not "agentpact-api") and SHOW idle_in_transaction_session_timeout
+  // returned "0". A browse request whose socket dropped right after
+  // `withBrowseStatementTimeout`'s sql.begin() left a bare `begin` txn open;
+  // with the idle-in-tx reaper inert it sat 11h55m, pinning a pool slot until
+  // every DB-touching route queued behind it and 503'd at the 30s timeout
+  // (while /health, which never hits the DB, stayed 200).
+  //
+  // DURABLE FIX is a ROLE-LEVEL GUC (lives in pg_authid, applied server-side
+  // by Postgres on backend assignment, so the pooler cannot strip it):
+  //   ALTER ROLE postgres SET idle_in_transaction_session_timeout = '60000';
+  // (statement_timeout already defaults to 2min server-side on this cluster.)
+  // DO NOT rely on the `connection:` block below for leak protection while on
+  // the :6543 transaction pooler — it is belt-and-suspenders that is currently
+  // defeated. Keep the role GUC in place; verify with:
+  //   SELECT rolname, rolconfig FROM pg_roles WHERE rolname='postgres';
+  // Skill: postgres-leaked-tx-watchdog (2026-06-17 postmortem).
   connection: {
     statement_timeout: 25_000,             // ms — must be < REQUEST_TIMEOUT_MS (30_000)
-    idle_in_transaction_session_timeout: 60_000, // ms — safety net for stuck txns
-    application_name: 'agentpact-api',     // makes pg_stat_activity rows easy to grep
+    idle_in_transaction_session_timeout: 60_000, // ms — INERT behind Supavisor :6543; see role GUC above
+    application_name: 'agentpact-api',     // stripped to "Supavisor" by the txn pooler
   },
 } as postgres.Options<Record<string, postgres.PostgresType>>);
 export const app = Fastify({
