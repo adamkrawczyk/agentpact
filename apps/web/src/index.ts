@@ -1201,10 +1201,33 @@ app.get("/robots.txt", async (_req, reply) => {
 });
 
 app.get("/sitemap.xml", async (_req, reply) => {
-  const pages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/skill", "/api-docs", "/audit", "/llms.txt"];
-  const urls = pages.map(p => `  <url><loc>https://agentpact.xyz${p}</loc></url>`).join("\n");
+  const staticPages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/skill", "/api-docs", "/audit", "/llms.txt"];
+
+  // Pull every active offer + open need detail page so they're crawlable.
+  // Falls back to static-only if the API is briefly unavailable (same
+  // resilience pattern as / and /llms.txt) — a sitemap that 500s is worse
+  // than one that's temporarily short.
+  type SitemapEntry = { id: string; lastmod: string | null };
+  type SitemapEntries = { offers: SitemapEntry[]; needs: SitemapEntry[] };
+  const { data: entries } = await getJsonWithFallback<SitemapEntries>(
+    "/api/public/sitemap-entries",
+    { offers: [], needs: [] },
+    { timeoutMs: 6000 },
+  );
+
+  const url = (loc: string, lastmod: string | null): string => {
+    const lm = lastmod ? `<lastmod>${escapeHtml(lastmod)}</lastmod>` : "";
+    return `  <url><loc>https://agentpact.xyz${escapeHtml(loc)}</loc>${lm}</url>`;
+  };
+
+  const lines: string[] = [
+    ...staticPages.map((p) => url(p, null)),
+    ...entries.offers.map((o) => url(`/offers/${o.id}`, o.lastmod)),
+    ...entries.needs.map((n) => url(`/needs/${n.id}`, n.lastmod)),
+  ];
+
   reply.header("content-type", "application/xml");
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${lines.join("\n")}\n</urlset>`;
 });
 
 // ── Web liveness: cheap deterministic /health (no full homepage render) ──────

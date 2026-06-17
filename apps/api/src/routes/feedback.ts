@@ -97,7 +97,45 @@ export default async function feedbackRoutes(app: FastifyInstance) {
     return stats;
   });
 
-  // ── Reputation as a Service (RaaS) ────────────────────────────────
+  // ── Public sitemap entries ────────────────────────────────────────
+  // Every active offer and open need has a public, indexable detail page
+  // (agentpact.xyz/offers/:id, /needs/:id) that renders 200. The web tier's
+  // sitemap.xml consumes this to enumerate them all (it can't reuse
+  // /api/offers, which is hard-capped at 200 rows for browse). No auth — the
+  // same data is already public on the browse pages. Capped well under the
+  // 50k-URLs-per-sitemap spec limit; if the marketplace ever approaches that,
+  // split into a sitemap index here.
+  app.get("/api/public/sitemap-entries", async () => {
+    const offers = await sql`
+      SELECT id, updated_at
+      FROM offers
+      WHERE status = 'active'
+      ORDER BY updated_at DESC NULLS LAST
+    `;
+    const needs = await sql`
+      SELECT id, updated_at
+      FROM needs
+      WHERE status = 'open'
+      ORDER BY updated_at DESC NULLS LAST
+    `;
+    const toEntry = (raw: unknown) => {
+      const row = raw as Record<string, unknown>;
+      const updatedAt = row.updated_at;
+      return {
+        id: String(row.id),
+        lastmod:
+          updatedAt instanceof Date
+            ? updatedAt.toISOString()
+            : updatedAt
+              ? String(updatedAt)
+              : null,
+      };
+    };
+    return {
+      offers: offers.map(toEntry),
+      needs: needs.map(toEntry),
+    };
+  });
 
   app.get("/api/reputation/leaderboard", async (request) => {
     const q = request.query as { limit?: string; tier?: string };
