@@ -106,17 +106,28 @@ export default async function feedbackRoutes(app: FastifyInstance) {
   // 50k-URLs-per-sitemap spec limit; if the marketplace ever approaches that,
   // split into a sitemap index here.
   app.get("/api/public/sitemap-entries", async () => {
+    // Hardening (test/sitemap-entries-hardening): (1) exclude internal/seeded
+    // agents (is_internal = FALSE) so the public index never advertises
+    // internal listings — currently 0 internal offers exist, so this is a
+    // latent-safety filter, not a behavior change today; (2) apply the
+    // 50k-URLs/file sitemap-spec cap the comment above promises but the SQL
+    // previously lacked.
+    const SITEMAP_CAP = 50000;
     const offers = await sql`
-      SELECT id, updated_at
-      FROM offers
-      WHERE status = 'active'
-      ORDER BY updated_at DESC NULLS LAST
+      SELECT o.id, o.updated_at
+      FROM offers o
+      JOIN agents a ON a.id = o.agent_id
+      WHERE o.status = 'active' AND a.is_internal = FALSE
+      ORDER BY o.updated_at DESC NULLS LAST
+      LIMIT ${SITEMAP_CAP}
     `;
     const needs = await sql`
-      SELECT id, updated_at
-      FROM needs
-      WHERE status = 'open'
-      ORDER BY updated_at DESC NULLS LAST
+      SELECT n.id, n.updated_at
+      FROM needs n
+      JOIN agents a ON a.id = n.agent_id
+      WHERE n.status = 'open' AND a.is_internal = FALSE
+      ORDER BY n.updated_at DESC NULLS LAST
+      LIMIT ${SITEMAP_CAP}
     `;
     const toEntry = (raw: unknown) => {
       const row = raw as Record<string, unknown>;
