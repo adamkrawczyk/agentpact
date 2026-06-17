@@ -135,14 +135,20 @@ export const sql = postgres(DATABASE_URL, {
   // every DB-touching route queued behind it and 503'd at the 30s timeout
   // (while /health, which never hits the DB, stayed 200).
   //
-  // DURABLE FIX is a ROLE-LEVEL GUC (lives in pg_authid, applied server-side
-  // by Postgres on backend assignment, so the pooler cannot strip it):
-  //   ALTER ROLE postgres SET idle_in_transaction_session_timeout = '60000';
-  // (statement_timeout already defaults to 2min server-side on this cluster.)
-  // DO NOT rely on the `connection:` block below for leak protection while on
-  // the :6543 transaction pooler — it is belt-and-suspenders that is currently
-  // defeated. Keep the role GUC in place; verify with:
-  //   SELECT rolname, rolconfig FROM pg_roles WHERE rolname='postgres';
+  // SERVER-SIDE TIMERS ARE NOT A RELIABLE FIX BEHIND SUPAVISOR. Tried and
+  // empirically rejected (all tested via the live :6543 pooler):
+  //   - this connection.* block          → stripped (SHOW shows defaults)
+  //   - ALTER ROLE postgres SET ... =60000 → propagates to the *session* pooler
+  //     (:5432, SHOW = 1min) but the :6543 transaction pooler still SHOWs 0 and
+  //     a synthetic idle-in-tx was NOT reaped after 75s
+  //   - SET LOCAL inside the txn         → value applies but timer did not reap
+  //
+  // DURABLE FIX = external polling reaper: scripts/pg-leak-watchdog.mjs, run as
+  // a Hermes cron every 5 min via `railway run -s @agentpact/api`. It issues
+  // pg_terminate_backend (a normal SQL command on the wire, immune to the
+  // pooler) against idle-in-tx > 60s and wedged-active-ClientRead > 5min
+  // backends. This is the SAME command that killed the 11h leak and restored
+  // the site in <1s during the incident. Recovery is <1s; it never restarts.
   // Skill: postgres-leaked-tx-watchdog (2026-06-17 postmortem).
   connection: {
     statement_timeout: 25_000,             // ms — must be < REQUEST_TIMEOUT_MS (30_000)
