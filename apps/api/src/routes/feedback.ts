@@ -97,6 +97,41 @@ export default async function feedbackRoutes(app: FastifyInstance) {
     return stats;
   });
 
+  // ── Public sitemap IDs ────────────────────────────────────────────
+  // Lightweight enumeration of every indexable detail page (active offers +
+  // open needs) so the web tier can emit a complete sitemap.xml. The browse
+  // endpoints (/api/offers, /api/needs) are capped at 200 rows for UI paging,
+  // which silently hides ~1000 live offer pages from Google + LLM crawlers.
+  // This route returns id + updated_at ONLY (no description, no embedding) so
+  // it stays cheap even at the full marketplace size. Hard-capped per the
+  // sitemap spec ceiling (50k URLs/file); external agents only (is_internal
+  // = FALSE) so seeded/internal rows don't pollute the index.
+  app.get("/api/public/sitemap-ids", async () => {
+    const SITEMAP_CAP = 50000;
+    const [offers, needs] = await Promise.all([
+      sql`
+        SELECT o.id, o.updated_at
+        FROM offers o
+        JOIN agents a ON a.id = o.agent_id
+        WHERE o.status = 'active' AND a.is_internal = FALSE
+        ORDER BY o.updated_at DESC
+        LIMIT ${SITEMAP_CAP}
+      `,
+      sql`
+        SELECT n.id, n.updated_at
+        FROM needs n
+        JOIN agents a ON a.id = n.agent_id
+        WHERE n.status = 'open' AND a.is_internal = FALSE
+        ORDER BY n.updated_at DESC
+        LIMIT ${SITEMAP_CAP}
+      `,
+    ]);
+    return {
+      offers: offers.map((r) => ({ id: String(r.id), updated_at: r.updated_at })),
+      needs: needs.map((r) => ({ id: String(r.id), updated_at: r.updated_at })),
+    };
+  });
+
   // ── Reputation as a Service (RaaS) ────────────────────────────────
 
   app.get("/api/reputation/leaderboard", async (request) => {

@@ -1201,10 +1201,37 @@ app.get("/robots.txt", async (_req, reply) => {
 });
 
 app.get("/sitemap.xml", async (_req, reply) => {
-  const pages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/skill", "/api-docs", "/audit", "/llms.txt"];
-  const urls = pages.map(p => `  <url><loc>https://agentpact.xyz${p}</loc></url>`).join("\n");
+  const staticPages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/skill", "/api-docs", "/audit", "/llms.txt"];
+
+  // Enumerate every live offer + need detail page so crawlers (Google + LLM)
+  // can reach them. /api/public/sitemap-ids returns id + updated_at only, so
+  // this stays cheap at full marketplace size. On upstream failure we fall
+  // back to the static routes alone rather than emit a broken/empty sitemap.
+  type SitemapIds = { offers: Array<{ id: string; updated_at?: string }>; needs: Array<{ id: string; updated_at?: string }> };
+  const { data: ids } = await getJsonWithFallback<SitemapIds>(
+    "/api/public/sitemap-ids",
+    { offers: [], needs: [] },
+    { timeoutMs: 8000 },
+  );
+
+  const xmlEscape = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const lastmod = (raw?: string): string => {
+    if (!raw) return "";
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? "" : `<lastmod>${d.toISOString().slice(0, 10)}</lastmod>`;
+  };
+
+  const urlNodes: string[] = staticPages.map(p => `  <url><loc>https://agentpact.xyz${p}</loc></url>`);
+  for (const o of ids.offers) {
+    urlNodes.push(`  <url><loc>https://agentpact.xyz/offers/${xmlEscape(o.id)}</loc>${lastmod(o.updated_at)}</url>`);
+  }
+  for (const n of ids.needs) {
+    urlNodes.push(`  <url><loc>https://agentpact.xyz/needs/${xmlEscape(n.id)}</loc>${lastmod(n.updated_at)}</url>`);
+  }
+
   reply.header("content-type", "application/xml");
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>`;
+  reply.header("cache-control", "public, max-age=3600");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urlNodes.join("\n")}\n</urlset>`;
 });
 
 // ── Web liveness: cheap deterministic /health (no full homepage render) ──────
