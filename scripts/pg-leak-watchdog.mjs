@@ -75,9 +75,12 @@ try {
   }
 
   if (actions.length === 0) {
-    console.log("HEARTBEAT_OK pg-leak-watchdog | agentpact-supabase: clean");
+    // Script-only cron jobs deliver non-empty stdout verbatim. Stay SILENT on
+    // a clean run (log to stderr only) so the channel isn't spammed every 5 min.
+    console.error("pg-leak-watchdog: agentpact-supabase clean");
   } else {
-    console.log(`HEARTBEAT_OK pg-leak-watchdog | agentpact-supabase: terminated_${actions.length}`);
+    // Only print to stdout when there are terminations -> delivered as an alert.
+    console.log(`pg-leak-watchdog: agentpact-supabase terminated_${actions.length}`);
     console.log("");
     console.log("=== POSTGRES_LEAKED_TX_WATCHDOG: TERMINATIONS ===");
     console.log("target=agentpact-supabase");
