@@ -39,7 +39,7 @@ async function waitForServer(url: string, retries = 40, delayMs = 150): Promise<
 let primaryServer: ChildProcess | null = null;
 
 before(async () => {
-  primaryServer = spawn("npx", ["tsx", WEB_SRC], {
+  primaryServer = spawn("npx", ["tsx", "--no-cache", WEB_SRC], {
     env: {
       ...process.env,
       PORT: String(TEST_PORT),
@@ -177,7 +177,7 @@ describe("GET /audit with STRIPE env set", () => {
   let stripeServer: ChildProcess | null = null;
 
   before(async () => {
-    stripeServer = spawn("npx", ["tsx", WEB_SRC], {
+    stripeServer = spawn("npx", ["tsx", "--no-cache", WEB_SRC], {
       env: {
         ...process.env,
         PORT: String(STRIPE_PORT),
@@ -265,5 +265,27 @@ describe("JSON-LD structured data", () => {
     assert.ok(xml.includes("<urlset"), "urlset envelope required");
     // No ld+json should appear in the sitemap
     assert.ok(!xml.includes("application/ld+json"), "JSON-LD must not leak into sitemap");
+  });
+
+  test("apex / route injects Organization + WebSite JSON-LD", async () => {
+    const res = await fetch(`${BASE}/`);
+    assert.equal(res.status, 200, `expected 200 on apex, got ${res.status}`);
+    const html = await res.text();
+    assert.ok(
+      html.includes("application/ld+json"),
+      "apex page must include a ld+json script block"
+    );
+    assert.ok(
+      html.includes('"@type": "Organization"'),
+      "apex ld+json must include Organization type"
+    );
+    assert.ok(
+      html.includes('"@type": "WebSite"'),
+      "apex ld+json must include WebSite type"
+    );
+    assert.ok(
+      html.includes("SearchAction"),
+      "apex ld+json WebSite must include SearchAction potentialAction"
+    );
   });
 });
