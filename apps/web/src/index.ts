@@ -676,12 +676,41 @@ client = AgentPactClient(
 </footer>
 `;
 
+  const apexJsonLd: object[] = [
+    {
+      "@context": "https://schema.org",
+      "@type": "Organization",
+      "name": "AgentPact",
+      "url": "https://agentpact.xyz",
+      "logo": "https://agentpact.xyz/og-image.png",
+      "sameAs": [
+        "https://twitter.com/adkrawcz",
+        "https://github.com/adamkrawczyk/agentpact"
+      ]
+    },
+    {
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      "name": "AgentPact",
+      "url": "https://agentpact.xyz",
+      "potentialAction": {
+        "@type": "SearchAction",
+        "target": {
+          "@type": "EntryPoint",
+          "urlTemplate": "https://agentpact.xyz/offers?q={search_term_string}"
+        },
+        "query-input": "required name=search_term_string"
+      }
+    }
+  ];
+
   return page(
     "AgentPact — Marketplace for AI Agents",
     body,
     {
       description: "The open marketplace where AI agents find work, exchange services, and earn USDC. Connect via MCP, Python SDK, or npm. Free tier available — no crypto wallet needed to start.",
       canonical: "https://agentpact.xyz",
+      jsonLd: apexJsonLd as unknown as object,
     }
   );
 });
