@@ -24,6 +24,10 @@ type Offer = {
   created_at?: string;
 };
 
+type SellerReputation = {
+  total_completed_deals: number;
+};
+
 type Need = {
   id: string;
   title: string;
@@ -811,6 +815,33 @@ app.get("/offers/:id", async (request: any, reply: any) => {
     : "";
 
   const offerCanonical = `https://agentpact.xyz/offers/${id}`;
+
+  // Fetch real seller reputation stats for a social-proof JSON-LD signal.
+  // Only interactionStatistic (completed-deal count) is emitted — it is a
+  // literal, unambiguous BuyAction count. aggregateRating is deliberately
+  // NOT emitted: the endpoint exposes only a composite overall_score, not a
+  // pure review-average, and emitting a star rating from a composite would
+  // be schema drift on a public claim surface. Never fabricate.
+  let sellerRep: SellerReputation | null = null;
+  if (offer.agent_id) {
+    try {
+      sellerRep = (await getJson(`/api/agents/${offer.agent_id}/reputation`, { timeoutMs: 4000 })) as SellerReputation;
+    } catch {
+      // Best-effort — missing rep data is safe to skip
+    }
+  }
+
+  // Build interactionStatistic block only when completed deals exist
+  const interactionStatBlock = (sellerRep && sellerRep.total_completed_deals >= 1)
+    ? {
+        "interactionStatistic": {
+          "@type": "InteractionCounter",
+          "interactionType": { "@type": "BuyAction" },
+          "userInteractionCount": sellerRep.total_completed_deals,
+        }
+      }
+    : {};
+
   const offerJsonLd: object = {
     "@context": "https://schema.org",
     "@type": "Offer",
@@ -823,6 +854,7 @@ app.get("/offers/:id", async (request: any, reply: any) => {
     ...(offer.category ? { "category": offer.category } : {}),
     ...(offer.created_at ? { "datePublished": offer.created_at } : {}),
     ...(offer.tags && offer.tags.length > 0 ? { "keywords": offer.tags.join(", ") } : {}),
+    ...interactionStatBlock,
   };
 
   const body = `
@@ -917,6 +949,28 @@ app.get("/needs/:id", async (request: any, reply: any) => {
     : "";
 
   const needCanonical = `https://agentpact.xyz/needs/${id}`;
+
+  // Fetch real buyer/poster reputation stats for social-proof JSON-LD signals.
+  // Only inject if real reviews/completed deals exist (no fabrication).
+  let needPosterRep: SellerReputation | null = null;
+  if (need.agent_id) {
+    try {
+      needPosterRep = (await getJson(`/api/agents/${need.agent_id}/reputation`, { timeoutMs: 4000 })) as SellerReputation;
+    } catch {
+      // Best-effort — missing rep data is safe to skip
+    }
+  }
+
+  const needInteractionStatBlock = (needPosterRep && needPosterRep.total_completed_deals >= 1)
+    ? {
+        "interactionStatistic": {
+          "@type": "InteractionCounter",
+          "interactionType": { "@type": "BuyAction" },
+          "userInteractionCount": needPosterRep.total_completed_deals,
+        }
+      }
+    : {};
+
   const needJsonLd: object = {
     "@context": "https://schema.org",
     "@type": "Demand",
@@ -936,6 +990,7 @@ app.get("/needs/:id", async (request: any, reply: any) => {
     ...(need.created_at ? { "datePublished": need.created_at } : {}),
     ...(need.deadline_at ? { "validThrough": need.deadline_at } : {}),
     ...(need.tags && need.tags.length > 0 ? { "keywords": need.tags.join(", ") } : {}),
+    ...needInteractionStatBlock,
   };
 
   const body = `
