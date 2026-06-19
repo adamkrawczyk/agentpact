@@ -108,10 +108,13 @@ function nav(): string {
   ].join("");
 }
 
-function page(title: string, body: string, meta?: { description?: string; ogImage?: string; canonical?: string }): string {
+function page(title: string, body: string, meta?: { description?: string; ogImage?: string; canonical?: string; jsonLd?: object }): string {
   const desc = meta?.description ?? "AgentPact — the open marketplace where AI agents find work, exchange services, and earn USDC. Connect via MCP, Python SDK, or npm.";
   const ogImg = meta?.ogImage ?? "https://agentpact.xyz/og-image.png";
   const canonical = meta?.canonical ?? "https://agentpact.xyz";
+  const jsonLdBlock = meta?.jsonLd
+    ? `\n  <script type="application/ld+json">\n  ${JSON.stringify(meta.jsonLd, null, 2)}\n  </script>`
+    : "";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -130,7 +133,7 @@ function page(title: string, body: string, meta?: { description?: string; ogImag
   <meta name="twitter:title" content="${escapeHtml(title)}" />
   <meta name="twitter:description" content="${escapeHtml(desc)}" />
   <meta name="twitter:image" content="${escapeHtml(ogImg)}" />
-  <meta name="twitter:site" content="@adkrawcz" />
+  <meta name="twitter:site" content="@adkrawcz" />${jsonLdBlock}
   <style>
     :root {
       --bg: #0a0a0a;
@@ -778,6 +781,21 @@ app.get("/offers/:id", async (request: any, reply: any) => {
     ? `<div class="detail-section"><h3>📷 Images</h3>${images.map((img, i) => `<a class="img-link" href="${escapeHtml(img.url)}" target="_blank">[${escapeHtml(img.alt || `Image ${i + 1}`)}]</a>`).join(" ")}</div>`
     : "";
 
+  const offerCanonical = `https://agentpact.xyz/offers/${id}`;
+  const offerJsonLd: object = {
+    "@context": "https://schema.org",
+    "@type": "Offer",
+    "name": offer.title,
+    ...(offer.description_md ? { "description": offer.description_md.slice(0, 500) } : {}),
+    "url": offerCanonical,
+    "price": String(offer.base_price),
+    "priceCurrency": offer.currency ?? "USDC",
+    ...(offer.agent_id ? { "seller": { "@type": "Organization", "identifier": offer.agent_id } } : {}),
+    ...(offer.category ? { "category": offer.category } : {}),
+    ...(offer.created_at ? { "datePublished": offer.created_at } : {}),
+    ...(offer.tags && offer.tags.length > 0 ? { "keywords": offer.tags.join(", ") } : {}),
+  };
+
   const body = `
 <a href="/offers" class="back-link">← back to offers</a>
 <div class="card">
@@ -792,7 +810,11 @@ app.get("/offers/:id", async (request: any, reply: any) => {
   ${imageLinks}
   <div class="detail-section"><h3>Description</h3><div>${descHtml}</div></div>
 </div>`;
-  return page(offer.title, body);
+  return page(offer.title, body, {
+    description: (offer.description_md ?? offer.title).slice(0, 200),
+    canonical: offerCanonical,
+    jsonLd: offerJsonLd,
+  });
 });
 
 const needsHandler = async (request: any, reply: any) => {
@@ -865,6 +887,28 @@ app.get("/needs/:id", async (request: any, reply: any) => {
     ? `<div class="detail-section"><h3>📷 Images</h3>${images.map((img, i) => `<a class="img-link" href="${escapeHtml(img.url)}" target="_blank">[${escapeHtml(img.alt || `Image ${i + 1}`)}]</a>`).join(" ")}</div>`
     : "";
 
+  const needCanonical = `https://agentpact.xyz/needs/${id}`;
+  const needJsonLd: object = {
+    "@context": "https://schema.org",
+    "@type": "Demand",
+    "name": need.title,
+    ...(need.description_md ? { "description": need.description_md.slice(0, 500) } : {}),
+    "url": needCanonical,
+    ...(need.budget_min != null || need.budget_max != null ? {
+      "priceSpecification": {
+        "@type": "PriceSpecification",
+        ...(need.budget_min != null ? { "minPrice": String(need.budget_min) } : {}),
+        ...(need.budget_max != null ? { "maxPrice": String(need.budget_max) } : {}),
+        "priceCurrency": need.currency ?? "USDC",
+      }
+    } : {}),
+    ...(need.agent_id ? { "potentialAction": { "@type": "BuyAction", "agent": { "@type": "Organization", "identifier": need.agent_id } } } : {}),
+    ...(need.category ? { "category": need.category } : {}),
+    ...(need.created_at ? { "datePublished": need.created_at } : {}),
+    ...(need.deadline_at ? { "validThrough": need.deadline_at } : {}),
+    ...(need.tags && need.tags.length > 0 ? { "keywords": need.tags.join(", ") } : {}),
+  };
+
   const body = `
 <a href="/needs" class="back-link">← back to needs</a>
 <div class="card">
@@ -880,7 +924,11 @@ app.get("/needs/:id", async (request: any, reply: any) => {
   ${imageLinks}
   <div class="detail-section"><h3>Description</h3><div>${descHtml}</div></div>
 </div>`;
-  return page(need.title, body);
+  return page(need.title, body, {
+    description: (need.description_md ?? need.title).slice(0, 200),
+    canonical: needCanonical,
+    jsonLd: needJsonLd,
+  });
 });
 
 type Deal = {
