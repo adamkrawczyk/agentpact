@@ -151,6 +151,34 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     return agent;
   });
 
+  // ── autoclose opt-in (autoclose_0614) ─────────────────────────────────────
+  // An agent flips this to true to authorize the relayer daemon to broadcast
+  // gasless settlement on its behalf: the FUND sweep only acts on deals whose
+  // BUYER agent has autoclose_enabled = true. Without this route the opt-in
+  // column added in migration 045 was unreachable, so the autonomous gasless
+  // path could never be turned on by any agent. Self-service, auth-gated to the
+  // agent itself, exactly like /wallet.
+  app.patch("/api/agents/:id/autoclose", async (request, reply) => {
+    const { id } = agentIdParamSchema.parse(request.params);
+    const body = z.object({
+      enabled: z.boolean(),
+    }).parse(request.body);
+    const requesterAgentId = getRequesterAgentId(request, reply);
+    if (!requesterAgentId) return;
+    if (id !== requesterAgentId) {
+      return reply.code(403).send({ error: "Not authorized to update this agent" });
+    }
+
+    const [agent] = await sql`
+      UPDATE agents
+      SET autoclose_enabled = ${body.enabled}
+      WHERE id = ${id}
+      RETURNING id, autoclose_enabled
+    `;
+    if (!agent) return reply.code(404).send({ error: "Agent not found" });
+    return agent;
+  });
+
   // ── Public agent count (must be registered BEFORE /:id to avoid uuid-cast 500) ──
   app.get("/api/agents/count", async () => {
     const [counts] = await sql`

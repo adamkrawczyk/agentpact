@@ -1960,6 +1960,67 @@ const tools: Tool[] = [
       properties: { limit: { type: "integer", minimum: 1, maximum: 200, default: 50 } },
     },
   },
+  // ── autoclose_0614 — GASLESS settlement surface ──────────────────────────
+  // The buyer needs NO ETH and need not stay online per-step. Flow:
+  //   1. buyer calls set_autoclose(enabled=true) once,
+  //   2. on deal accept the API auto-mints a Class-A intent (awaiting_funding),
+  //   3. buyer signs ONE off-chain USDC EIP-3009 receiveWithAuthorization and
+  //      submits it via submit_funding_authorization,
+  //   4. seller submits the deliverable preimage via submit_reveal_preimage,
+  //   5. the relayer daemon broadcasts createIntentWithAuthorization (it pays
+  //      gas) then claimIntent → atomic 90% seller / 10% platform release.
+  // This replaces the legacy 3-on-chain-signature path with ONE off-chain sig.
+  {
+    name: "agentpact.set_autoclose",
+    description:
+      "Opt this agent in (or out) of GASLESS autonomous settlement. When enabled, AgentPact's relayer broadcasts on-chain funding + claim on your behalf for deals where you are the buyer — you sign ONE off-chain USDC authorization and need no ETH for gas. Required before the gasless path will act on your deals. Default is off.",
+    annotations: { title: "Set Autoclose Opt-In", readOnlyHint: false, destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      required: ["agentId", "enabled"],
+      properties: {
+        agentId: { type: "string", format: "uuid", description: "Your agent UUID (must be the authenticated agent)" },
+        enabled: { type: "boolean", description: "true to enable gasless autonomous settlement, false to disable" },
+      },
+    },
+  },
+  {
+    name: "agentpact.submit_funding_authorization",
+    description:
+      "BUYER submits a signed EIP-3009 USDC receiveWithAuthorization for an accepted deal's auto-minted Class-A intent. This is the gasless funding step: instead of sending approve + createIntent on-chain (needing ETH for gas), you sign ONE off-chain message authorizing the escrow to pull exactly `value` USDC; the relayer broadcasts it and pays the gas. `value` MUST equal the intent's max price. Sign over Base USDC's EIP-712 domain with the ReceiveWithAuthorization typehash (to = the EscrowV3 address from get_intent). After this and the seller's reveal, settlement completes autonomously.",
+    annotations: { title: "Submit Gasless Funding Authorization", readOnlyHint: false, destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      required: ["dealId", "agentId", "value", "validAfter", "validBefore", "nonce", "v", "r", "s"],
+      properties: {
+        dealId: { type: "string", format: "uuid", description: "The accepted deal whose auto-minted intent you are funding" },
+        agentId: { type: "string", format: "uuid", description: "Your buyer agent UUID (must own the deal)" },
+        value: { type: "number", minimum: 0, description: "USDC amount authorized — MUST equal the intent max price" },
+        validAfter: { type: "integer", minimum: 0, description: "EIP-3009 validAfter (unix seconds; 0 = immediately)" },
+        validBefore: { type: "integer", minimum: 1, description: "EIP-3009 validBefore (unix seconds; authorization expiry)" },
+        nonce: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$", description: "32-byte random EIP-3009 nonce" },
+        v: { type: "integer", description: "ECDSA recovery id (27 or 28)" },
+        r: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$", description: "ECDSA r" },
+        s: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$", description: "ECDSA s" },
+      },
+    },
+  },
+  {
+    name: "agentpact.submit_reveal_preimage",
+    description:
+      "SELLER submits the deliverable preimage (the witness for hash-preimage-v1) for a gasless Class-A intent. keccak256(preimage) must equal the deliverable hash committed on the deal. Once submitted, the intent flips to reveal_ready and the relayer's CLAIM sweep broadcasts claimIntent on-chain → the predicate verifies and escrow releases 90% to you / 10% platform fee, with no gas spent by you. Distinct from agentpact.reveal (Class-B Schelling round 2).",
+    annotations: { title: "Submit Gasless Reveal Preimage", readOnlyHint: false, destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      required: ["intentId", "agentId", "preimage"],
+      properties: {
+        intentId: { type: "string", format: "uuid", description: "The Class-A intent UUID (from get_intent / the deal's intent_id)" },
+        agentId: { type: "string", format: "uuid", description: "Your seller agent UUID (must be the deal seller)" },
+        preimage: { type: "string", pattern: "^0x[0-9a-fA-F]+$", description: "The deliverable preimage; keccak256(preimage) == committed deliverable hash" },
+        ciphertext: { type: "string", pattern: "^0x[0-9a-fA-F]+$", description: "Optional encrypted deliverable blob for the key-vault record" },
+      },
+    },
+  },
 ];
 
 // ── Tool call handler ────────────────────────────────────────────────
@@ -2252,6 +2313,20 @@ function handleToolCall(name: string, rawArgs: Json) {
     case "agentpact.discover_intents": {
       const limit = (args as { limit?: number }).limit ?? 50;
       return textResult(api(`/api/intents/discover?limit=${limit}`, "GET", undefined, apiKey));
+    }
+
+    // ── autoclose_0614 — gasless settlement surface ──
+    case "agentpact.set_autoclose": {
+      const { agentId, enabled } = args as { agentId: string; enabled: boolean };
+      return textResult(api(`/api/agents/${agentId}/autoclose`, "PATCH", { enabled }, apiKey));
+    }
+    case "agentpact.submit_funding_authorization": {
+      const { dealId, ...rest } = args as { dealId: string };
+      return textResult(api(`/api/deals/${dealId}/funding-authorization`, "POST", rest, apiKey));
+    }
+    case "agentpact.submit_reveal_preimage": {
+      const { intentId, ...rest } = args as { intentId: string };
+      return textResult(api(`/api/intents/${intentId}/reveal-preimage`, "POST", rest, apiKey));
     }
 
     default:

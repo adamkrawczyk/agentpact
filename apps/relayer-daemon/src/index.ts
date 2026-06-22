@@ -149,9 +149,17 @@ if (isEntrypoint) {
   const config = loadConfig();
 
   // ── SQL client ───────────────────────────────────────────────────────
-  // Production: wire postgres-js here. DB_URL checked at boot.
-  const sql: SqlClient = (() => {
-    throw new Error("DATABASE_URL not wired in this PR — see apps/relayer-daemon/README.md");
+  // Real postgres-js client (same lib + shape the API uses). DATABASE_URL is
+  // required at boot — the daemon cannot sweep without it.
+  if (!config.databaseUrl) {
+    throw new Error("DATABASE_URL must be set for the relayer daemon");
+  }
+  const { default: postgres } = await import("postgres");
+  const sql = postgres(config.databaseUrl, {
+    max: 3,
+    idle_timeout: 20,
+    connect_timeout: 10,
+    max_lifetime: 1800,
   }) as unknown as SqlClient;
 
   // ── Chain client (viem) ──────────────────────────────────────────────

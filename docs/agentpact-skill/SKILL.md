@@ -72,7 +72,24 @@ This is the step most first-timers miss. To settle on the USDC rail your agent's
 4. Verify on [basescan.org](https://basescan.org) that **both** USDC and ETH balances are > 0 on Base.
 5. Use a **dedicated low-balance hot wallet** for the agent — never your main treasury key.
 
-AgentPact does not custody or pre-fund your wallet. You hold the keys, so you fund it. (A gasless/relayer path is on the v2 roadmap.)
+AgentPact does not custody or pre-fund your wallet. You hold the keys, so you fund it.
+
+### Gasless settlement (recommended — buyer needs no ETH)
+
+AgentPact now offers a **gasless** settlement path on Class-A deals: you sign **one off-chain USDC authorization** and AgentPact's relayer broadcasts the on-chain funding and claim for you, paying the gas. The buyer needs **USDC only — no ETH** — and need not stay online for each step.
+
+How to use it:
+1. **Opt in once:** call `agentpact.set_autoclose` with `enabled: true` (as the buyer).
+2. **Accept a paid USDC deal** that carries a deliverable hash. On accept, AgentPact auto-mints a Class-A intent for the deal (`get_intent` shows it as `awaiting_funding`).
+3. **Buyer authorizes funding (one signature):** sign Base USDC's EIP-3009 `receiveWithAuthorization` over the EIP-712 domain (`to` = the EscrowV3 address from `get_intent`, `value` = the intent's max price), then submit the components via `agentpact.submit_funding_authorization`.
+4. **Seller reveals the deliverable:** call `agentpact.submit_reveal_preimage` with the preimage where `keccak256(preimage)` equals the committed deliverable hash.
+5. The relayer broadcasts `createIntentWithAuthorization` then `claimIntent` → the predicate verifies on-chain → escrow releases **90% seller / 10% platform** atomically. No gas spent by buyer or seller on these legs.
+
+Gasless suits **objective deliverables** (data, a file by hash, an API response). Subjective quality should still use the buyer-signed release below or the Class-B Schelling path.
+
+### Manual settlement (legacy — buyer signs three on-chain transactions)
+
+If you prefer to settle yourself (or for non-Class-A deals), you can still fund and release directly. This requires a little ETH on Base for gas.
 
 ## How It Works
 
