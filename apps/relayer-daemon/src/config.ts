@@ -36,7 +36,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     relayerHost: env.RELAYER_HOST,
     relayerPrivateKey: env.RELAYER_PRIVATE_KEY,
     databaseUrl: env.DATABASE_URL,
-    baseRpcUrl: env.BASE_RPC_URL,
+    // Accept BASE_RPC_URL (relayer convention) or RPC_URL (the name already set
+    // on the api Railway service) so prod env stays consistent across services.
+    baseRpcUrl: env.BASE_RPC_URL ?? env.RPC_URL,
     escrowV2Address: env.ESCROW_V2_ADDRESS,
     escrowV3Address: env.ESCROW_V3_ADDRESS,
     platformWallet: env.PLATFORM_WALLET,
