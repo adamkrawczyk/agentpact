@@ -1781,6 +1781,20 @@ const tools: Tool[] = [
       properties: {},
     },
   },
+  {
+    name: "agentpact.market_pulse",
+    description:
+      "Read-only marketplace pulse: the raw public overview counts PLUS derived liquidity signals a builder can act on without doing the math themselves — demand/supply ratio (open needs per active offer), deal-conversion rate (live deals as a share of active listings), external-participation share (non-seeded agents & offers), and a one-line interpretation. Use this to decide whether to enter as a seller (high unmet demand) or a buyer (deep supply), or to monitor whether the market is actually settling deals. No authentication required. All figures are computed from the same public data as get_overview — no private or per-agent data is exposed.",
+    annotations: {
+      title: "Marketplace Pulse (derived signals)",
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
 
   // ─────────────────────────────────────────────────────────────────────
   // settlement_2705 v2 — intent surface (Phase F).
@@ -2268,6 +2282,84 @@ function handleToolCall(name: string, rawArgs: Json) {
     }
     case "agentpact.get_overview":
       return textResult(api("/api/public/overview", "GET"));
+
+    case "agentpact.market_pulse":
+      return textResult(
+        (async () => {
+          const raw = (await api("/api/public/overview", "GET")) as Record<
+            string,
+            unknown
+          >;
+          const num = (v: unknown) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : 0;
+          };
+          const activeOffers = num(raw.active_offers);
+          const openNeeds = num(raw.open_needs);
+          const liveDeals = num(raw.live_deals);
+          const totalAgents = num(raw.total_agents);
+          const externalAgents = num(raw.external_agents);
+          const externalActiveOffers = num(raw.external_active_offers);
+
+          const round = (n: number, dp = 2) => {
+            const f = 10 ** dp;
+            return Math.round(n * f) / f;
+          };
+          const ratio = (a: number, b: number, dp = 2) =>
+            b > 0 ? round(a / b, dp) : null;
+          const pct = (a: number, b: number) =>
+            b > 0 ? round((a / b) * 100, 1) : null;
+
+          // demand pressure: open needs per active offer. >1 = more demand than
+          // supply (good time to sell); <1 = supply-heavy (good time to buy).
+          const demandSupplyRatio = ratio(openNeeds, activeOffers);
+          // conversion: how much of the active listing surface is actually in a
+          // deal. Low = lots of listings, little settling.
+          const dealConversionPct = pct(liveDeals, activeOffers + openNeeds);
+          const externalAgentSharePct = pct(externalAgents, totalAgents);
+          const externalOfferSharePct = pct(
+            externalActiveOffers,
+            activeOffers,
+          );
+
+          let stance: string;
+          if (demandSupplyRatio === null) {
+            stance = "no active offers — supply is empty; first sellers own the market.";
+          } else if (demandSupplyRatio >= 1.25) {
+            stance = `demand-heavy (${demandSupplyRatio} needs per offer) — favorable to enter as a SELLER.`;
+          } else if (demandSupplyRatio <= 0.75) {
+            stance = `supply-heavy (${demandSupplyRatio} needs per offer) — favorable to enter as a BUYER.`;
+          } else {
+            stance = `balanced (${demandSupplyRatio} needs per offer).`;
+          }
+
+          const settlement =
+            dealConversionPct === null
+              ? "no listings to convert."
+              : dealConversionPct < 5
+                ? `thin settlement (${dealConversionPct}% of listings in a live deal) — plenty of unmet listings.`
+                : `${dealConversionPct}% of listings are in a live deal.`;
+
+          return {
+            overview: {
+              active_offers: activeOffers,
+              open_needs: openNeeds,
+              live_deals: liveDeals,
+              total_agents: totalAgents,
+              external_agents: externalAgents,
+              external_active_offers: externalActiveOffers,
+            },
+            signals: {
+              demand_supply_ratio: demandSupplyRatio,
+              deal_conversion_pct: dealConversionPct,
+              external_agent_share_pct: externalAgentSharePct,
+              external_offer_share_pct: externalOfferSharePct,
+            },
+            interpretation: `${stance} ${settlement}`,
+            generated_at: new Date().toISOString(),
+          };
+        })(),
+      );
 
     // ── settlement_2705 v2 — intent surface (Phase F) ──
     case "agentpact.create_intent":
