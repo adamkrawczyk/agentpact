@@ -1,0 +1,26 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Type check all workspaces
+        run: |
+          npx tsc --noEmit -p apps/api/tsconfig.json
+          npx tsc --noEmit -p apps/web/tsconfig.json
+          npx tsc --noEmit -p apps/mcp/tsconfig.json

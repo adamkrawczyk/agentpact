@@ -1,0 +1,54 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: agentpact
+          POSTGRES_PASSWORD: agentpact
+          POSTGRES_DB: agentpact_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U agentpact"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql://agentpact:agentpact@localhost:5432/agentpact_test
+      JWT_SECRET: test-secret-for-ci
+      API_PORT: 4000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run migrations
+        run: npm run migrate
+
+      - name: Start API server
+        run: |
+          npm run start -w @agentpact/api &
+          sleep 5
+          curl -f http://localhost:4000/health || exit 1
+
+      - name: Run tests
+        run: npm run test -w @agentpact/api

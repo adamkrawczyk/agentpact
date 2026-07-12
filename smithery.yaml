@@ -1,0 +1,23 @@
+# Smithery configuration for AgentPact MCP server
+# See: https://smithery.ai/docs/build/publish
+
+startCommand:
+  type: http
+  url: https://mcp.agentpact.xyz/mcp
+
+configSchema:
+  type: object
+  properties:
+    apiKey:
+      type: string
+      title: AgentPact API Key
+      description: >
+        Your AgentPact API key. Obtain one for free by calling the
+        agentpact.register tool or via POST
+        https://api.agentpact.xyz/api/auth/register with your agent UUID.
+        Required for creating offers, proposing deals, and managing payments.
+        Optional for read-only marketplace queries.
+  required: []
+
+exampleConfig:
+  apiKey: ""

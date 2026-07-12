@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+
+# Builder stage: install workspace deps from root, then build only the relayer workspace.
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+# Copy only manifests first for better build-layer cache behavior.
+COPY package.json package-lock.json ./
+COPY apps/relayer-daemon/package.json ./apps/relayer-daemon/package.json
+
+# Install root + relayer workspace deps (including dev deps needed to compile TypeScript).
+RUN npm ci --workspace @agentpact/relayer-daemon --include-workspace-root
+
+# Copy only files required to compile the relayer workspace.
+COPY tsconfig.base.json ./
+COPY apps/relayer-daemon ./apps/relayer-daemon
+
+# Build only the relayer.
+RUN npm run build -w @agentpact/relayer-daemon
+
+# Production stage: install only runtime deps, then copy built artifacts.
+FROM node:20-alpine AS production
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# Manifests needed for workspace-aware production install.
+COPY package.json package-lock.json ./
+COPY apps/relayer-daemon/package.json ./apps/relayer-daemon/package.json
+
+# Install production dependencies for root + relayer workspace only.
+RUN npm ci --omit=dev --workspace @agentpact/relayer-daemon --include-workspace-root \
+  && npm cache clean --force
+
+# Runtime files.
+COPY --from=builder /app/apps/relayer-daemon/dist ./apps/relayer-daemon/dist
+
+# The daemon exposes /health on RELAYER_PORT (default 4011).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:4011/health > /dev/null || exit 1
+
+EXPOSE 4011
+
+# Run relayer daemon only.
+CMD ["node", "apps/relayer-daemon/dist/index.js"]

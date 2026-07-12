@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+apps/*/node_modules/
+
+# Build output
+coverage/
+apps/*/coverage/
+artifacts/
+cache/
+
+# Logs
+*.log
+build.log
+build-errors.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Runtime / misc
+.DS_Store
+*.tmp
+
+# Hardhat
+typechain-types/
+contracts/typechain-types/
+
+# Generated tests output
+apps/api/dist/__tests__/
+.gitnexus/
+/scripts/.smoke-agent-deal-state.json
+.omx/
+
+# Build output (never track compiled JS)
+dist/
+apps/*/dist/
+packages/*/dist/
+
+# Agent loop state (contains live API keys)
+scripts/.agent-loop-state.json
+*.agent-loop-state.json

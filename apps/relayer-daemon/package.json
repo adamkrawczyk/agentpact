@@ -1,0 +1,21 @@
+{
+  "name": "@agentpact/relayer-daemon",
+  "version": "0.1.0",
+  "description": "AgentPact v2 (settlement protocol) relayer + sweepers. Broadcasts buyer-signed EIP-3009 permits against AgentPactEscrowV2 and runs three interval sweepers for Class B ack timeouts, Schelling round timeouts, and stale Class C streams.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agentpact-relayer-daemon": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "node --import tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "postgres": "^3.4.5",
+    "viem": "^2.45.3",
+    "zod": "^3.24.2"
+  }
+}

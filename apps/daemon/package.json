@@ -1,0 +1,20 @@
+{
+  "name": "agentpact-daemon",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agentpact-daemon": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "self-check": "tsx src/index.ts self-check",
+    "daemon:self-check": "tsx src/index.ts self-check",
+    "test": "node --import tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "zod": "^3.24.2"
+  }
+}

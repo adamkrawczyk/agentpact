@@ -1,0 +1,157 @@
+name: Publish SDKs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/api/src/**'
+  workflow_dispatch:
+
+jobs:
+  generate-sdk:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Checkout TS SDK
+        uses: actions/checkout@v4
+        with:
+          repository: adamkrawczyk/agentpact-sdk
+          path: sdk-ts
+          token: ${{ secrets.SDK_GITHUB_TOKEN }}
+
+      - name: Checkout Python SDK
+        uses: actions/checkout@v4
+        with:
+          repository: adamkrawczyk/agentpact-python-sdk
+          path: sdk-python
+          token: ${{ secrets.SDK_GITHUB_TOKEN }}
+
+      - name: Generate SDKs
+        run: |
+          chmod +x scripts/generate-sdks.sh
+          SDK_TS_DIR=sdk-ts SDK_PYTHON_DIR=sdk-python bash scripts/generate-sdks.sh
+
+      - name: Read version
+        id: version
+        run: echo "version=$(node -p "require('./sdk-ts/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Check for changes
+        id: check
+        run: |
+          ts_changed=$(cd sdk-ts && git add -A && git diff --cached --quiet && echo false || echo true)
+          py_changed=$(cd sdk-python && git add -A && git diff --cached --quiet && echo false || echo true)
+          if [ "$ts_changed" = "true" ] || [ "$py_changed" = "true" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit & push TS SDK
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          cd sdk-ts
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "chore: auto-update SDK v${{ steps.version.outputs.version }}"
+          git push
+
+      - name: Commit & push Python SDK
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          cd sdk-python
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "chore: auto-update SDK v${{ steps.version.outputs.version }}"
+          git push
+
+      - name: Upload TS SDK
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-ts
+          path: sdk-ts/
+
+      - name: Upload Python SDK
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-python
+          path: sdk-python/
+
+  publish-npm:
+    needs: generate-sdk
+    if: needs.generate-sdk.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    # the npm package `agentpact` is owned by maintainer `agentpactxyz`.
+    # Until NPM_TOKEN holds a publish-scoped token for that maintainer, npm publish
+    # will 404 (npm's "auth failure" answer for non-owned packages). The SDK source
+    # is still committed to the sister repo by `generate-sdk` above — that's the
+    # primary artefact. Failing the whole workflow on a registry-push problem
+    # gates every push to main; instead, surface the failure as a warning and
+    # keep main green. The job still runs, still attempts publish, still logs
+    # the 404; it just doesn't fail the workflow.
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-ts
+          path: sdk-ts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install, build & publish
+        working-directory: sdk-ts
+        run: |
+          npm install
+          npm run build
+          npm publish --access public || {
+            echo "::warning::npm publish failed — likely NPM_TOKEN auth ."
+            echo "::warning::SDK source is still committed to the agentpact-sdk repo."
+            exit 1
+          }
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-pypi:
+    needs: generate-sdk
+    if: needs.generate-sdk.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    # same logic as publish-npm: keep workflow green when
+    # PyPI auth fails. SDK source is already committed to agentpact-python-sdk.
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-python
+          path: sdk-python
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build & publish
+        working-directory: sdk-python
+        run: |
+          pip install build twine
+          python -m build
+          twine upload dist/* || {
+            echo "::warning::twine upload failed — likely PYPI_TOKEN auth ."
+            echo "::warning::SDK source is still committed to the agentpact-python-sdk repo."
+            exit 1
+          }
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}

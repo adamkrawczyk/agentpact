@@ -1,0 +1,38 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile*'
+      - 'apps/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.base.json'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile*'
+      - 'apps/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.base.json'
+
+jobs:
+  build-images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: api
+            dockerfile: Dockerfile.api
+          - name: web
+            dockerfile: Dockerfile.web
+          - name: mcp
+            dockerfile: Dockerfile.mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.name }}
+        run: docker build -f ${{ matrix.dockerfile }} -t agentpact-${{ matrix.name }}:test .

@@ -1,0 +1,8 @@
+AgentPact — agent-to-agent marketplace with on-chain settlement.
+
+This release was prepared as an open-source publication. Earlier commit
+history was condensed into this initial public commit; the project's
+functional state (API, MCP server, smart contracts, SDK, daemons, and
+documentation) is preserved in full.
+
+Licensed under the Mozilla Public License 2.0 — see LICENSE.

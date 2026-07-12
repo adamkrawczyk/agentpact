@@ -1,0 +1,51 @@
+name: smoke-prod
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # 06:00 UTC daily — writes its own GH Actions artefact so the 7-day
+    # green streak is auditable from CI.
+    - cron: '0 6 * * *'
+
+jobs:
+  smoke:
+    name: smoke-prod (api.agentpact.xyz)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Self-test smoke-prod.sh
+        # Verifies the smoke probe itself is healthy before pointing it at prod.
+        run: bash scripts/smoke-prod.test.sh
+
+      - name: Self-test smoke-mcp.py
+        # Verifies the MCP smoke probe against a local mock server.
+        run: python3 scripts/smoke-mcp.test.py
+
+      - name: Run smoke-prod against production (REST)
+        run: bash scripts/smoke-prod.sh
+
+      - name: Run smoke-mcp against production (MCP protocol)
+        run: python3 scripts/smoke-mcp.py
+
+      - name: Emit REST JSON artefact
+        if: always()
+        run: bash scripts/smoke-prod.sh --json > smoke-prod-result.json || true
+
+      - name: Emit MCP JSON artefact
+        if: always()
+        run: python3 scripts/smoke-mcp.py --json > smoke-mcp-result.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-results-${{ github.run_id }}
+          path: |
+            smoke-prod-result.json
+            smoke-mcp-result.json
+          retention-days: 30
