@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import type { Deps } from "./types.js";
 import { createNeedSchema, parseAndValidateTags, validateAndTruncateQuery } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey, withBrowseStatementTimeout, checkListingPayable } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, withBrowseStatementTimeout, checkListingPayable, enrichNeedRow } from "./utils.js";
 
 const DEFAULT_BROWSE_LIMIT = 200;
 const MAX_BROWSE_LIMIT = 200;
@@ -74,13 +74,13 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         agent_id, title, description_md, category, tags, budget_min, budget_max, currency, acceptance_criteria, deadline_at, fulfillment_type, location, accepted_payment_methods
       ) VALUES (
         ${body.agentId}, ${body.title}, ${body.descriptionMd}, ${body.category}, ${body.tags},
-        ${budgetMin}, ${budgetMax}, ${body.currency}, ${JSON.stringify(body.acceptanceCriteria)}::jsonb, ${deadlineAt}, ${body.fulfillmentType}, ${location as any}::jsonb, ${body.acceptedPaymentMethods}
+        ${budgetMin}, ${budgetMax}, ${body.currency}, ${body.acceptanceCriteria as any}::jsonb, ${deadlineAt}, ${body.fulfillmentType}, ${location as any}::jsonb, ${body.acceptedPaymentMethods}
       ) RETURNING *
     `;
 
     await audit(sql, body.agentId, "need.create", "need", need.id, idem, body);
     scheduleRecompute();
-    return reply.code(201).send(need);
+    return reply.code(201).send(enrichNeedRow(need as Record<string, unknown>));
   });
 
   app.patch("/api/needs/:id", async (request, reply) => {
@@ -107,7 +107,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const tags = body.tags ?? null;
     const budgetMin = body.budgetMin ?? null;
     const budgetMax = body.budgetMax ?? null;
-    const acceptanceCriteria = body.acceptanceCriteria ? JSON.stringify(body.acceptanceCriteria) : null;
+    const acceptanceCriteria = body.acceptanceCriteria ?? null;
     const deadlineAt = body.deadlineAt ?? null;
     const fulfillmentType = body.fulfillmentType ?? null;
     const location = body.location ?? null;
@@ -120,7 +120,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         tags = COALESCE(${tags}, tags),
         budget_min = COALESCE(${budgetMin}, budget_min),
         budget_max = COALESCE(${budgetMax}, budget_max),
-        acceptance_criteria = COALESCE(${acceptanceCriteria}::jsonb, acceptance_criteria),
+        acceptance_criteria = COALESCE(${acceptanceCriteria as any}::jsonb, acceptance_criteria),
         deadline_at = COALESCE(${deadlineAt}, deadline_at),
         fulfillment_type = COALESCE(${fulfillmentType}, fulfillment_type),
         location = COALESCE(${location as any}::jsonb, location),
@@ -130,7 +130,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       RETURNING *
     `;
     scheduleRecompute();
-    return need;
+    return enrichNeedRow(need as Record<string, unknown>);
   });
 
   app.post("/api/needs/:id/archive", async (request, reply) => {
@@ -142,7 +142,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       return reply.code(403).send({ error: "Not authorized" });
     }
     const [need] = await sql`UPDATE needs SET status = 'archived', updated_at = NOW() WHERE id = ${id} RETURNING *`;
-    return need;
+    return enrichNeedRow(need as Record<string, unknown>);
   });
 
   app.get("/api/needs", async (request, reply) => {
@@ -183,13 +183,13 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       limit,
       offset,
     }).catch((err) => app.log.warn({ err }, "audit insert failed"));
-    return rows;
+    return rows.map((row) => enrichNeedRow(row as Record<string, unknown>));
   });
 
   app.get("/api/needs/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     const [need] = await sql`SELECT * FROM needs WHERE id = ${id}`;
     if (!need) return reply.code(404).send({ error: "Need not found" });
-    return need;
+    return enrichNeedRow(need as Record<string, unknown>);
   });
 }

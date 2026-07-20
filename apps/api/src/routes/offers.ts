@@ -213,11 +213,11 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
             body.currency,
             body.maxPriceDeltaPct,
             body.slaDays,
-            JSON.stringify(body.proofs),
+            body.proofs,
             body.fulfillmentType,
             maxRespondents,
             timeLimitMinutes,
-            location ? JSON.stringify(location) : null,
+            location,
             body.acceptedPaymentMethods,
           ],
         );
@@ -237,7 +237,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
     await audit(sql, body.agentId, "offer.create", "offer", String(offer.id), idem, body);
     scheduleRecompute();
-    return reply.code(201).send(offer);
+    return reply.code(201).send(enrichOfferRow(offer as Record<string, unknown>));
   });
 
   app.patch("/api/offers/:id", async (request, reply) => {
@@ -267,7 +267,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const basePrice = body.basePrice ?? null;
     const maxPriceDeltaPct = body.maxPriceDeltaPct ?? null;
     const slaDays = body.slaDays ?? null;
-    const proofsJson = body.proofs ? JSON.stringify(body.proofs) : null;
+    const proofsJson = body.proofs ?? null;
     const fulfillmentType = body.fulfillmentType ?? null;
     const maxRespondents = body.maxRespondents ?? null;
     const timeLimitMinutes = body.timeLimitMinutes ?? null;
@@ -301,7 +301,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       RETURNING *
     `;
     scheduleRecompute();
-    return offer;
+    return enrichOfferRow(offer as Record<string, unknown>);
   });
 
   app.post("/api/offers/:id/archive", async (request, reply) => {
@@ -313,7 +313,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       return reply.code(403).send({ error: "Not authorized" });
     }
     const [offer] = await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${id} RETURNING *`;
-    return offer;
+    return enrichOfferRow(offer as Record<string, unknown>);
   });
 
   app.get("/api/offers", async (request, reply) => {

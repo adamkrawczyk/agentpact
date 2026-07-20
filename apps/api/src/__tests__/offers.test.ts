@@ -229,4 +229,64 @@ describe("Offers API", () => {
       expect(body.status).toBe("archived");
     });
   });
+
+  // Regression: proofs_json is stored JSONB, same class of double-encode bug
+  // as needs.acceptance_criteria (a manually JSON.stringify()'d value bound
+  // with an explicit ::jsonb cast gets encoded twice by postgres.js). Every
+  // read path must hand consumers a real JSON array, not the string "[]".
+  describe("proofs_json is a real JSON array (not a stringified string)", () => {
+    it("POST /api/offers returns proofs_json as a list, empty-array case", async () => {
+      const { app } = await createTestApp();
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/offers",
+        headers: authHeaders,
+        payload: generateTestOffer(agentId) // proofs: []
+      });
+
+      expect(response.statusCode).toBe(201);
+      const body = JSON.parse(response.body) as { proofs_json: unknown };
+      expect(Array.isArray(body.proofs_json)).toBe(true);
+      expect(body.proofs_json).toEqual([]);
+    });
+
+    it("GET /api/offers returns proofs_json as a list for every row", async () => {
+      const { app } = await createTestApp();
+      await app.inject({ method: "POST", url: "/api/offers", headers: authHeaders, payload: generateTestOffer(agentId) });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/offers",
+        headers: authHeaders
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as Array<{ proofs_json: unknown }>;
+      expect(body.length).toBeGreaterThanOrEqual(1);
+      for (const offer of body) {
+        expect(Array.isArray(offer.proofs_json)).toBe(true);
+      }
+    });
+
+    it("GET /api/offers/:id returns proofs_json as a list", async () => {
+      const { app } = await createTestApp();
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/offers",
+        headers: authHeaders,
+        payload: generateTestOffer(agentId)
+      });
+      const { id } = JSON.parse(createRes.body) as { id: string };
+
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/offers/${id}`,
+        headers: authHeaders
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as { proofs_json: unknown };
+      expect(Array.isArray(body.proofs_json)).toBe(true);
+    });
+  });
 });
