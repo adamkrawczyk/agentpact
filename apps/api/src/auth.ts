@@ -65,7 +65,9 @@ export async function initAuth(
   app: FastifyInstance,
   injectedDb?: AuthSqlClient
 ): Promise<void> {
-  const db = injectedDb ?? (postgres(DATABASE_URL, { max: 3 }) as unknown as AuthSqlClient);
+  // prepare:false — auth queries also run through the Supavisor txn-mode pooler;
+  // without it they intermittently throw PG 26000 (see index.ts #76 rationale).
+  const db = injectedDb ?? (postgres(DATABASE_URL, { max: 3, prepare: false }) as unknown as AuthSqlClient);
 
   await app.register(fastifyJWT, { secret: JWT_SECRET });
 

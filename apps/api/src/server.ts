@@ -44,6 +44,7 @@ async function runMigrations() {
     idle_timeout: 20,
     connect_timeout: 10,
     onnotice: () => {}, // silence the expected IF-NOT-EXISTS/IF-EXISTS NOTICEs
+    prepare: false,     // Supavisor pooler-safe (PG 26000); consistent with the app pools
   });
 
   try {
