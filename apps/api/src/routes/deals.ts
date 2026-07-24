@@ -26,12 +26,18 @@ async function createDealProposal(
 ): Promise<Record<string, unknown>> {
   const isFreeTier = isZeroPrice(proposal.negotiatedTotal);
   const taskContract = (proposal as any).task_contract ?? null;
+  const deliverableHashHex = (proposal as any).deliverableHash ?? null;
+  // deals.deliverable_hash is BYTEA; decode the 0x hex string to a Buffer so the
+  // accept-deal auto-mint guard (deal.deliverable_hash != null) fires for gasless deals.
+  const deliverableHashBuf = deliverableHashHex
+    ? Buffer.from((deliverableHashHex as string).slice(2), "hex")
+    : null;
   const result = await sql.begin(async (txn) => {
     const [deal] = await txn.unsafe(
       `
         INSERT INTO deals (
-          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days, is_free_tier, task_contract, max_revisions, parent_deal_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'USDC', $7, $8, $9, $10::jsonb, $11, $12)
+          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days, is_free_tier, task_contract, max_revisions, parent_deal_id, deliverable_hash
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'USDC', $7, $8, $9, $10::jsonb, $11, $12, $13)
         RETURNING *
       `,
       [
@@ -47,6 +53,7 @@ async function createDealProposal(
         taskContract ? JSON.stringify(taskContract) : null,
         proposal.maxRevisions ?? null,
         (proposal as any).parentDealId ?? null,
+        deliverableHashBuf,
       ]
     );
 
@@ -283,7 +290,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (!needOwner || needOwner.agent_id !== body.buyerAgentId) {
       return reply.code(403).send({ error: "Not authorized" });
     }
-    // payment-methods rolloutc — payability propose gate (Layer 2). The deal will fund
+    // tillopen_0306/P1c — payability propose gate (Layer 2). The deal will fund
     // on the EFFECTIVE rail = the intersection of what both parties accept AND
     // can actually service. Stripe is gated off (P1d), so today the only fundable
     // rail is usdc → both parties need a valid wallet. This re-checks live at
@@ -448,7 +455,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
           [id, body.actorAgentId, JSON.stringify(body)]
         );
 
-        // ── autoclose rollout Change 1: auto-mint a Class-A intent ───────────────
+        // ── autoclose_0614 Change 1: auto-mint a Class-A intent ───────────────
         // When an accepted deal is paid (negotiated_total > 0), settled in USDC,
         // both parties hold a wallet, and the deal carries a deliverable_hash
         // commitment, mint a hash-preimage Class-A intent in 'awaiting_funding'.
@@ -492,7 +499,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
                 max_price_usdc, status, expires_at, deal_id
               ) VALUES (
                 NULL, $1, $2, $2,
-                'A', 'hash-preimage-v1', $3::jsonb,
+                'A', 'hash-preimage-v1', $3::text::jsonb,
                 $4, 'awaiting_funding', NOW() + INTERVAL '7 days', $5
               )
               RETURNING id
@@ -521,7 +528,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     return { ok: true, ...updatedDeal };
   });
 
-  // ── autoclose rollout Change 2: buyer queues an EIP-3009 funding authorization ──
+  // ── autoclose_0614 Change 2: buyer queues an EIP-3009 funding authorization ──
   // The buyer signs USDC's receiveWithAuthorization off-chain and POSTs the
   // signature components here. The relayer daemon's FUND sweep consumes the
   // 'queued' row and broadcasts createIntentWithAuthorization on EscrowV3,

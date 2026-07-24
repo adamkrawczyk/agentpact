@@ -3,7 +3,7 @@ import { parseBooleanish } from "./utils.js";
 
 export const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]);
 
-// payment-methods rollout — per-listing payment preference (Q1 dual-rail).
+// tillopen_0306/P1 — per-listing payment preference (Q1 dual-rail).
 // 'usdc' = on-chain escrow only; 'stripe' = fiat application-fee only;
 // 'both' (default) = either rail acceptable. A deal is viable only where
 // buyer-payable ∩ seller-acceptable ≠ ∅.
@@ -50,7 +50,7 @@ const baseOfferSchema = z.object({
   maxRespondents: z.number().int().positive().max(20).optional(),
   timeLimitMinutes: z.number().int().positive().max(7 * 24 * 60).optional(),
   location: locationSchema,
-  // payment-methods rolloutc — default to the LIVE rail. Stripe is "coming soon"
+  // tillopen_0306/P1c — default to the LIVE rail. Stripe is "coming soon"
   // (gated by STRIPE_RAIL_ENABLED, P1d), so defaulting to 'both' would make the
   // default listing un-creatable. Default 'usdc' until the Stripe rail lights up.
   acceptedPaymentMethods: paymentMethodSchema.default("usdc"),
@@ -113,7 +113,7 @@ export const createNeedSchema = z.object({
   deadlineAt: z.string().datetime().optional(),
   fulfillmentType: fulfillmentTypeSchema.optional().default("generic"),
   location: locationSchema,
-  // payment-methods rolloutc — default to the LIVE rail (usdc); stripe is coming soon.
+  // tillopen_0306/P1c — default to the LIVE rail (usdc); stripe is coming soon.
   acceptedPaymentMethods: paymentMethodSchema.default("usdc"),
 });
 
@@ -135,6 +135,15 @@ export const proposeDealSchema = z.object({
   maxRevisions: z.number().int().min(1).max(20).optional(),
   task_contract: taskContractSchema.optional(),
   parentDealId: z.string().uuid().optional(),
+  // Gasless (Class-A) commitment: keccak256 of the deliverable preimage, as a
+  // 0x-prefixed 32-byte hex string. When present on a paid USDC deal, accepting
+  // the deal auto-mints the Class-A intent that the relayer settles gaslessly.
+  // Without it the auto-mint guard (deals route) never fires. Optional so
+  // non-gasless deals are unaffected.
+  deliverableHash: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{64}$/, "deliverableHash must be a 0x-prefixed 32-byte hex string")
+    .optional(),
 });
 
 export const decomposeDealSchema = z.object({
