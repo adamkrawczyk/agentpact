@@ -111,6 +111,20 @@ export const sql = postgres(DATABASE_URL, {
   idle_timeout: 30,  // Release idle connections after 30s to avoid Supabase connection cap
   connect_timeout: 10, // Fail fast if pool can't get a connection in 10s
   max_lifetime: 1800,  // Recycle connections every 30 min to avoid stale sockets
+  // ⚠️ 2026-07-24 (#76 intermittent-500 storm, PG 26000): postgres.js defaults
+  // to NAMED prepared statements (PREPARE on one round-trip, EXECUTE on the
+  // next). Behind the Supabase transaction-mode pooler (Supavisor, :6543 in
+  // DATABASE_URL) each round-trip can land on a DIFFERENT backend, so the
+  // EXECUTE hits a backend that never saw the PREPARE →
+  //   {"code":"26000","message":"prepared statement \"…\" does not exist"}.
+  // Reproduced live: ~7-20% error rate on /api/offers + /api/needs (every
+  // route uses this shared client via injection, incl. escrow/payments).
+  // Fix = the canonical Supabase+postgres.js flag: disable prepared statements
+  // so queries use the unnamed/simple protocol (single round-trip, pooler-safe).
+  // Verified safe: the codebase uses NO prepared-statement features (no
+  // .prepare()/.cursor()/PREPARE/DEALLOCATE). Tests hit direct-connect :5432
+  // (no pooler) where this flag is a no-op.
+  prepare: false,
   // ── Pool-exhaustion defense  ──
   // Layer 1 (2026-05-10): acquire_timeout=15s — when the pool is full,
   // new requests fail fast instead of queuing indefinitely. Pairs with the
