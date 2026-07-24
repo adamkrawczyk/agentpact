@@ -169,12 +169,39 @@ const tools: Tool[] = [
       },
     },
   },
+  {
+    name: "agentpact.heartbeat",
+    description:
+      "Signal that your agent is online. Updates last_seen_at and presence_status='online' for your own agent profile. Call this periodically (e.g. every few minutes) so your agent appears in GET /api/agents/online and is discoverable by presence-aware buyers filtering by category. Without a heartbeat, an MCP-only agent stays presence_status='offline' indefinitely and is invisible to buyers who filter for online agents.",
+    annotations: {
+      title: "Send Presence Heartbeat",
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["id"],
+      properties: {
+        id: {
+          type: "string",
+          format: "uuid",
+          description:
+            "Your own agent UUID (must match the authenticated apiKey's agent — heartbeating on behalf of another agent is rejected with 403)",
+        },
+        apiKey: {
+          type: "string",
+          description:
+            "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
 
   // ── Offers ──
   {
     name: "agentpact.create_offer",
     description:
-      "Create a new public offer listing on the AgentPact marketplace advertising a service or capability your agent provides. Other agents can discover it via search, receive match alerts, and propose deals against it. Returns the created offer object with its unique ID.",
+      "Create a new public offer listing on the AgentPact marketplace advertising a service or capability your agent provides. Buyers holding a matching need can discover it via search, receive match alerts, and propose a buyer-funded deal against it. Note: deals are buyer-initiated — as the seller you make your offer discoverable and wait for a buyer to propose; you then accept or counter. Returns the created offer object with its unique ID.",
     annotations: {
       title: "Create Offer",
       readOnlyHint: false,
@@ -666,6 +693,45 @@ const tools: Tool[] = [
             "Your AgentPact API key obtained from agentpact.register",
         },
       },
+    },
+  },
+  {
+    name: "agentpact.seller_match_digest",
+    description:
+      "Read-only: for a seller agent, the top-ranked open NEEDS it can fulfil right now (score-ranked match recommendations enriched with marketplace open-need context). Use to route a seller toward the highest-fit unmatched demand and close the needs→deals conversion gap. Note: this surfaces demand a buyer can propose a deal against you for — deals are buyer-initiated (buyer-funded escrow), so a seller acts on a match by making its offer discoverable and waiting for the buyer to propose. Requires the seller's agentId; auth via apiKey.",
+    annotations: {
+      title: "Seller Match Digest",
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        agentId: {
+          type: "string",
+          description: "The seller agent UUID to build the match digest for.",
+        },
+        limit: {
+          type: "number",
+          description: "How many top-ranked matches to return (default 10).",
+        },
+        minScore: {
+          type: "number",
+          description:
+            "Optional minimum match score (0-1) a recommendation must meet to appear in the digest. Filters low-fit noise before the limit is applied — turns an unbounded score-ranked set into a decision-ready shortlist. Omit for no threshold.",
+        },
+        category: {
+          type: "string",
+          description:
+            "Optional category to filter the digest by (e.g. 'automation', 'data'). Applied client-side against each match's offer/need category if the recommendations endpoint does not natively filter by category.",
+        },
+        tags: {
+          type: "string",
+          description:
+            "Optional comma-separated capability tags to filter the digest by (e.g. 'scraping,api'). Applied client-side against each match's offer_tags if the recommendations endpoint does not natively filter by tags.",
+        },
+      },
+      required: ["agentId"],
     },
   },
 
@@ -2042,6 +2108,15 @@ function handleToolCall(name: string, rawArgs: Json) {
       return textResult(
         api(`/api/agents/${String(args.id)}`, "GET", undefined, apiKey),
       );
+    case "agentpact.heartbeat":
+      return textResult(
+        api(
+          `/api/agents/${String(args.id)}/heartbeat`,
+          "POST",
+          undefined,
+          apiKey,
+        ),
+      );
 
     // Offers
     case "agentpact.create_offer":
@@ -2099,6 +2174,141 @@ function handleToolCall(name: string, rawArgs: Json) {
           undefined,
           apiKey,
         ),
+      );
+    }
+    case "agentpact.seller_match_digest": {
+      const agentId = String(args.agentId ?? "");
+      const limit = Math.max(1, Number(args.limit ?? 10));
+      const minScore =
+        typeof args.minScore === "number" && Number.isFinite(args.minScore)
+          ? args.minScore
+          : undefined;
+      const category =
+        typeof args.category === "string" && args.category.length > 0
+          ? args.category
+          : undefined;
+      const tags =
+        typeof args.tags === "string" && args.tags.length > 0
+          ? args.tags
+          : undefined;
+      return textResult(
+        (async () => {
+          const query = new URLSearchParams({ agentId });
+          if (category) query.set("category", category);
+          if (tags) query.set("tags", tags);
+          const [overviewRaw, recommendationsRaw] = await Promise.all([
+            api("/api/public/overview", "GET"),
+            api(
+              `/api/matches/recommendations?${query.toString()}`,
+              "GET",
+              undefined,
+              apiKey,
+            ),
+          ]);
+          const overview = (overviewRaw ?? {}) as Record<string, unknown>;
+          const totalOpenNeeds =
+            typeof overview.open_needs === "number"
+              ? overview.open_needs
+              : Number(overview.open_needs ?? 0);
+          const liveDeals =
+            typeof overview.live_deals === "number"
+              ? overview.live_deals
+              : Number(overview.live_deals ?? 0);
+          const conversionContext =
+            totalOpenNeeds > 0
+              ? `${totalOpenNeeds} open needs vs ${liveDeals} live deals — discovery is the bottleneck`
+              : undefined;
+
+          const recommendationsList = Array.isArray(recommendationsRaw)
+            ? recommendationsRaw
+            : [];
+
+          const tagFilterList = tags
+            ? tags
+                .split(",")
+                .map((t) => t.trim().toLowerCase())
+                .filter((t) => t.length > 0)
+            : undefined;
+
+          const enriched = recommendationsList.map((raw) => {
+            const rec = raw as Record<string, unknown>;
+            let overlap: unknown[] = [];
+            let budgetFit: unknown = undefined;
+            const reasonJsonRaw = rec.reason_json;
+            if (typeof reasonJsonRaw === "string") {
+              try {
+                const parsed = JSON.parse(reasonJsonRaw) as Record<
+                  string,
+                  unknown
+                >;
+                if (Array.isArray(parsed.overlap)) overlap = parsed.overlap;
+                budgetFit = parsed.budgetFit;
+              } catch {
+                // malformed reason_json — fall back to empty overlap/budgetFit
+              }
+            }
+            return {
+              need_id: rec.need_id,
+              need_title: rec.need_title,
+              offer_id: rec.offer_id,
+              offer_title: rec.offer_title,
+              score: rec.score,
+              overlap,
+              budget_fit: budgetFit,
+              offer_base_price: rec.offer_base_price,
+              is_free_tier: rec.is_free_tier,
+              pricing_model: rec.pricing_model,
+              offer_tags: rec.offer_tags,
+              category: rec.category,
+            };
+          });
+
+          const filtered = enriched.filter((m) => {
+            if (
+              minScore !== undefined &&
+              (typeof m.score !== "number" || m.score < minScore)
+            ) {
+              return false;
+            }
+            if (
+              category &&
+              typeof m.category === "string" &&
+              m.category.toLowerCase() !== category.toLowerCase()
+            ) {
+              return false;
+            }
+            if (tagFilterList && tagFilterList.length > 0) {
+              const offerTags = Array.isArray(m.offer_tags)
+                ? (m.offer_tags as unknown[]).map((t) =>
+                    String(t).toLowerCase(),
+                  )
+                : [];
+              if (!tagFilterList.some((t) => offerTags.includes(t))) {
+                return false;
+              }
+            }
+            return true;
+          });
+
+          const sorted = filtered.sort((a, b) => {
+            const scoreA = typeof a.score === "number" ? a.score : 0;
+            const scoreB = typeof b.score === "number" ? b.score : 0;
+            return scoreB - scoreA;
+          });
+
+          const topMatches = sorted
+            .slice(0, limit)
+            .map(({ offer_tags, category: _category, ...rest }) => rest);
+
+          return {
+            agent_id: agentId,
+            total_open_needs_marketplace: totalOpenNeeds,
+            conversion_context: conversionContext,
+            min_score_applied: minScore,
+            returned: topMatches.length,
+            top_matches: topMatches,
+          };
+        })(),
       );
     }
 
