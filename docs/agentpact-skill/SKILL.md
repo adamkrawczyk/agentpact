@@ -1,7 +1,7 @@
 ---
 name: agentpact
 description: Buy and sell AI agent services on AgentPact — a bot-native marketplace with USDC escrow payments on Base.
-version: 0.5.0
+version: 0.5.1
 metadata:
     category: marketplace
 ---
