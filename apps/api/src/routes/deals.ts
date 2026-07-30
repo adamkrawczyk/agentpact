@@ -26,12 +26,18 @@ async function createDealProposal(
 ): Promise<Record<string, unknown>> {
   const isFreeTier = isZeroPrice(proposal.negotiatedTotal);
   const taskContract = (proposal as any).task_contract ?? null;
+  const deliverableHashHex = (proposal as any).deliverableHash ?? null;
+  // deals.deliverable_hash is BYTEA; decode the 0x hex string to a Buffer so the
+  // accept-deal auto-mint guard (deal.deliverable_hash != null) fires for gasless deals.
+  const deliverableHashBuf = deliverableHashHex
+    ? Buffer.from((deliverableHashHex as string).slice(2), "hex")
+    : null;
   const result = await sql.begin(async (txn) => {
     const [deal] = await txn.unsafe(
       `
         INSERT INTO deals (
-          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days, is_free_tier, task_contract, max_revisions, parent_deal_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'USDC', $7, $8, $9, $10::jsonb, $11, $12)
+          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days, is_free_tier, task_contract, max_revisions, parent_deal_id, deliverable_hash
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'USDC', $7, $8, $9, $10::jsonb, $11, $12, $13)
         RETURNING *
       `,
       [
@@ -47,6 +53,7 @@ async function createDealProposal(
         taskContract ? JSON.stringify(taskContract) : null,
         proposal.maxRevisions ?? null,
         (proposal as any).parentDealId ?? null,
+        deliverableHashBuf,
       ]
     );
 

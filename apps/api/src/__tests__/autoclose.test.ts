@@ -38,6 +38,10 @@ async function createAcceptedDeal(options: {
   buyerWallet?: string | null;
   sellerWallet?: string | null;
   amount?: number;
+  // When true, the deliverable hash is supplied through the PUBLIC API
+  // (propose_deal payload) instead of a raw SQL UPDATE. This exercises the
+  // producer half of the gasless path — the half an agent actually calls.
+  hashViaApi?: boolean;
 }) {
   const {
     withDeliverableHash = true,
@@ -45,6 +49,7 @@ async function createAcceptedDeal(options: {
     buyerWallet = "0x1111111111111111111111111111111111111111",
     sellerWallet = "0x2222222222222222222222222222222222222222",
     amount = 50,
+    hashViaApi = false,
   } = options;
 
   const { app, sql } = await createTestApp();
@@ -102,6 +107,10 @@ async function createAcceptedDeal(options: {
           acceptanceCriteria: ["Deliver work"],
         },
       ],
+      // Producer path: the gasless commitment travels in the propose payload.
+      ...(withDeliverableHash && hashViaApi
+        ? { deliverableHash: DELIVERABLE_HASH_HEX }
+        : {}),
     },
   });
   expect(proposeRes.statusCode).toBe(201);
@@ -109,7 +118,7 @@ async function createAcceptedDeal(options: {
 
   // Set deliverable_hash on deal (simulating the buyer/seller setting it
   // at propose/accept time — seeder pattern per spec).
-  if (withDeliverableHash) {
+  if (withDeliverableHash && !hashViaApi) {
     const hashBuf = Buffer.from(DELIVERABLE_HASH_HEX.slice(2), "hex");
     await sql`UPDATE deals SET deliverable_hash = ${hashBuf} WHERE id = ${dealId}`;
   }
@@ -179,6 +188,81 @@ describe("autoclose — Change 1: auto-mint Class-A intent on deal accept", () =
     expect(params.hash!.toLowerCase()).toBe(DELIVERABLE_HASH_HEX.toLowerCase());
     // on_chain_id must be NULL at auto-mint time (relayer fills it after broadcast)
     expect(intent.on_chain_id).toBeNull();
+  });
+
+  it("mints the intent when deliverableHash is supplied via the PUBLIC propose API (producer path)", async () => {
+    const { sql, dealId } = await createAcceptedDeal({
+      withDeliverableHash: true,
+      hashViaApi: true,
+      freeTier: false,
+    });
+
+    // The commitment must have been persisted by the propose route itself —
+    // no raw SQL seeding involved in this test.
+    const [deal] = await sql<Array<{
+      deliverable_hash: Buffer | null;
+      intent_id: string | null;
+    }>>`
+      SELECT deliverable_hash, intent_id FROM deals WHERE id = ${dealId}
+    `;
+    expect(deal.deliverable_hash).not.toBeNull();
+    expect("0x" + Buffer.from(deal.deliverable_hash as Buffer).toString("hex")).toBe(
+      DELIVERABLE_HASH_HEX,
+    );
+    // ...and the auto-mint guard must have fired off the API-supplied value.
+    expect(deal.intent_id).not.toBeNull();
+
+    const [intent] = await sql<Array<{ status: string; settlement_class: string }>>`
+      SELECT status, settlement_class FROM intents WHERE id = ${deal.intent_id}
+    `;
+    expect(intent.status).toBe("awaiting_funding");
+    expect(intent.settlement_class).toBe("A");
+  });
+
+  it("rejects a malformed deliverableHash on propose (400, not a silent null)", async () => {
+    const { app } = await createTestApp();
+    const buyerId = randomUUID();
+    const sellerId = randomUUID();
+    const buyerHeaders = await getAuthHeadersForAgent(buyerId, {
+      walletAddress: "0x1111111111111111111111111111111111111111",
+    });
+    const sellerHeaders = await getAuthHeadersForAgent(sellerId, {
+      walletAddress: "0x2222222222222222222222222222222222222222",
+    });
+
+    const offerRes = await app.inject({
+      method: "POST",
+      url: "/api/offers",
+      headers: sellerHeaders,
+      payload: generateTestOffer(sellerId),
+    });
+    const offerId = (JSON.parse(offerRes.body) as { id: string }).id;
+    const needRes = await app.inject({
+      method: "POST",
+      url: "/api/needs",
+      headers: buyerHeaders,
+      payload: generateTestNeed(buyerId),
+    });
+    const needId = (JSON.parse(needRes.body) as { id: string }).id;
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/deals/propose",
+      headers: buyerHeaders,
+      payload: {
+        buyerAgentId: buyerId,
+        sellerAgentId: sellerId,
+        offerId,
+        needId,
+        negotiatedTotal: 50,
+        maxPriceDeltaPct: 20,
+        milestones: [
+          { idx: 1, title: "Milestone 1", amount: 50, acceptanceCriteria: ["Deliver work"] },
+        ],
+        deliverableHash: "0xdeadbeef", // too short — must be 32 bytes
+      },
+    });
+    expect(res.statusCode).toBe(400);
   });
 
   it("does NOT mint an intent for a free-tier deal (negotiated_total=0)", async () => {

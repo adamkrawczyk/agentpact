@@ -135,6 +135,15 @@ export const proposeDealSchema = z.object({
   maxRevisions: z.number().int().min(1).max(20).optional(),
   task_contract: taskContractSchema.optional(),
   parentDealId: z.string().uuid().optional(),
+  // Gasless (Class-A) commitment: keccak256 of the deliverable preimage, as a
+  // 0x-prefixed 32-byte hex string. When present on a paid USDC deal, accepting
+  // the deal auto-mints the Class-A intent that the relayer settles gaslessly.
+  // Without it the auto-mint guard in the accept-deal route never fires.
+  // Optional so non-gasless deals are unaffected.
+  deliverableHash: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{64}$/, "deliverableHash must be a 0x-prefixed 32-byte hex string")
+    .optional(),
 });
 
 export const decomposeDealSchema = z.object({
