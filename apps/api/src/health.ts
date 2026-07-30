@@ -1,6 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { FastifyInstance, FastifyReply } from "fastify";
+import { isIntentCreationDisabled } from "./routes/utils.js";
 
 function envMs(name: string, fallback: number): number {
   const parsed = Number(process.env[name] ?? fallback);
@@ -120,6 +121,24 @@ function checkRegistrationPath(): HealthCheck {
   };
 }
 
+// Surfaces the settlement-protocol emergency brake. An operator who trips
+// INTENT_CREATION_DISABLED must be able to CONFIRM it took effect without
+// attempting a real mint — a kill switch you cannot observe is a kill switch you
+// cannot trust. Informational only: a tripped brake is `degraded`, never a 503,
+// because the API is deliberately healthy-but-restricted in that state.
+function checkIntentCreationPath(): HealthCheck {
+  const intentionallyDisabled = isIntentCreationDisabled();
+  return {
+    status: intentionallyDisabled ? "degraded" : "healthy",
+    enabled: !intentionallyDisabled,
+    intentionallyDisabled,
+    route: "/api/intents",
+    note: intentionallyDisabled
+      ? "Intent creation is disabled (both POST /api/intents and the deal-accept auto-mint). In-flight intents remain fundable, revealable, claimable, and cancellable."
+      : undefined,
+  };
+}
+
 async function checkRouteInventory(routeInventoryPath: string): Promise<HealthCheck> {
   const requiredRoutes = [
     "`/api/health`",
@@ -197,6 +216,7 @@ export function registerHealthChecks(
     ]);
     const matching = checkMatching(options.matchingQueueStatus);
     const registration = checkRegistrationPath();
+    const intentCreation = checkIntentCreationPath();
     const testDatabase = {
       status: process.env.TEST_DATABASE_URL ? "healthy" : "degraded",
       configured: Boolean(process.env.TEST_DATABASE_URL),
@@ -210,11 +230,13 @@ export function registerHealthChecks(
       browseSmoke,
       matching,
       registration,
+      intentCreation,
       routeInventory,
       testDatabase,
     };
     // ok = true only when core runtime health is confirmed.
-    // informational checks (registration intentionally disabled, routeInventory staleness,
+    // informational checks (registration intentionally disabled, intentCreation
+    // intentionally disabled, routeInventory staleness,
     // testDatabase not configured) do not block agent operations and must not cause 503.
     const matchingStuck = Boolean(matching.stuck);
     const ok =
@@ -235,10 +257,16 @@ export function registerHealthChecks(
     const checks: Record<string, HealthCheck | string> = {
       api: { status: "healthy" },
       database,
+      // Emergency-brake state. Present on BOTH /health and /health/detailed:
+      // an operator tripping the brake under pressure should not have to know
+      // which of the two endpoints carries it.
+      intentCreation: checkIntentCreationPath(),
       timestamp: nowIso(),
     };
 
     return sendByHealth(reply, {
+      // A tripped brake must NOT make this endpoint unhealthy — it is an
+      // intentional, healthy-but-restricted state, not an outage.
       ok: database.status === "healthy",
       checks,
     });

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { encodeAbiParameters } from "viem";
 import type { Deps } from "./types.js";
 import { proposeDealSchema, counterDealSchema, consultationResponseSchema, decomposeDealSchema } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber, expandPaymentRails, STRIPE_RAIL_ENABLED, isPayableWalletAddress } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber, expandPaymentRails, STRIPE_RAIL_ENABLED, isPayableWalletAddress, isIntentCreationDisabled } from "./utils.js";
 
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
   await sql`
@@ -464,7 +464,13 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         // Idempotent: skip if the deal already has an intent_id.
         const negotiatedTotal = Number(deal.negotiated_total ?? 0);
         const dealCurrency = String(deal.currency ?? "USDC");
+        // Kill switch: when the brake is on, the deal still ACCEPTS normally — it
+        // simply stays a manual-settlement deal (no auto-minted intent), exactly
+        // as if it carried no deliverable_hash. Failing the whole accept here
+        // would halt ordinary commerce, which the brake is not meant to do.
+        const intentCreationDisabled = isIntentCreationDisabled();
         const eligible =
+          !intentCreationDisabled &&
           !deal.intent_id &&
           negotiatedTotal > 0 &&
           dealCurrency === "USDC" &&
@@ -491,6 +497,17 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
             seller_target: deal.seller_wallet,
           });
           // Class-A intents auto-expire 7 days out if never funded/claimed.
+          //
+          // NOTE the `$3::text::jsonb` double cast — do NOT "simplify" it to
+          // `$3::jsonb`. `predicateParams` is a JS string from JSON.stringify,
+          // and a bare `::jsonb` lets Postgres infer $3's type FROM the cast,
+          // which diverges between a direct connection and a transaction-mode
+          // pooler (Supavisor / PgBouncer). Declaring text first, then casting,
+          // pins the parameter type so both paths agree. This exact double cast
+          // ran in production for 6 days before reaching git; our test DB is a
+          // DIRECT Postgres, so the pooler-only failure mode is invisible to the
+          // suite — the tests passing is not evidence that `::jsonb` is safe.
+          // See skill `postgres-transaction-pooler-compat`.
           const [mintedIntent] = await txn.unsafe(
             `
               INSERT INTO intents (
@@ -499,7 +516,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
                 max_price_usdc, status, expires_at, deal_id
               ) VALUES (
                 NULL, $1, $2, $2,
-                'A', 'hash-preimage-v1', $3::jsonb,
+                'A', 'hash-preimage-v1', $3::text::jsonb,
                 $4, 'awaiting_funding', NOW() + INTERVAL '7 days', $5
               )
               RETURNING id

@@ -25,7 +25,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
-import { getRequesterAgentId, idempotencyKey } from "./utils.js";
+import {
+  getRequesterAgentId,
+  idempotencyKey,
+  isIntentCreationDisabled,
+  INTENT_CREATION_DISABLED_RESPONSE,
+} from "./utils.js";
 
 // ── Validation schemas ──────────────────────────────────────────────────────
 
@@ -132,6 +137,12 @@ export async function registerRoutes(
     "/api/intents",
     { preHandler: app.authenticate },
     async (request, reply) => {
+      // Kill switch (see isIntentCreationDisabled in ./utils). Checked FIRST —
+      // before parsing, auth-matching, or any DB round-trip — so a tripped brake
+      // costs one env read. In-flight intents are unaffected; only NEW mints stop.
+      if (isIntentCreationDisabled()) {
+        return reply.code(503).send(INTENT_CREATION_DISABLED_RESPONSE);
+      }
       const body = createIntentSchema.parse(request.body);
       const idem = idempotencyKey(request.headers as Record<string, unknown>);
       const requesterAgentId = getRequesterAgentId(request, reply);

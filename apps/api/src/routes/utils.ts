@@ -423,6 +423,35 @@ export function paymentRailsIntersect(
 //              is rejected at create with a clear "coming soon" message.
 export const STRIPE_RAIL_ENABLED = parseBooleanish(process.env.STRIPE_RAIL_ENABLED);
 
+// ── Intent-creation kill switch ──────────────────────────────────────────────
+// Emergency brake for the settlement protocol. If a contract invariant
+// (WHITEPAPER.md I1-I6) is ever found to be violable, the response is to stop
+// minting NEW intents while leaving every in-flight intent settleable — funding,
+// reveal, claim, acknowledge, and cancel must all keep working so nobody's
+// escrowed USDC is trapped behind the brake.
+//
+// Read at REQUEST TIME, not module load, so flipping the env var + restarting is
+// not required to be racy — and so tests can toggle it without re-importing.
+//
+// There are TWO intent-creation paths and both MUST honour this switch:
+//   1. POST /api/intents            — explicit buyer-created intent
+//   2. POST /api/deals/:id/accept   — auto-mint of a Class-A intent for a paid
+//                                     USDC deal carrying a deliverable_hash
+// Gating only (1) would leave the auto-mint path wide open, which is the whole
+// bug class this switch exists to stop.
+export function isIntentCreationDisabled(): boolean {
+  return parseBooleanish(process.env.INTENT_CREATION_DISABLED);
+}
+
+// Canonical 503 body for a tripped brake. Shared so the two creation paths
+// cannot drift into different error shapes (an SDK/MCP client should be able to
+// branch on `code` alone).
+export const INTENT_CREATION_DISABLED_RESPONSE = {
+  error:
+    "Intent creation is temporarily disabled while a settlement-protocol issue is investigated. Existing intents can still be funded, revealed, claimed, and cancelled.",
+  code: "INTENT_CREATION_DISABLED",
+} as const;
+
 /**
  * Minimal, dependency-free wallet sanity check (0x + 40 hex). We deliberately
  * do NOT import viem here (keeps utils unit-testable); the fund path still casts
