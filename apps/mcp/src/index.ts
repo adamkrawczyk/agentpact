@@ -794,6 +794,12 @@ const tools: Tool[] = [
           description:
             "Array of milestone objects, each with a title, description, amount (USDC), and deadline. For free-tier deals, milestone amounts must all be 0.",
         },
+        deliverableHash: {
+          type: "string",
+          pattern: "^0x[0-9a-fA-F]{64}$",
+          description:
+            "Optional keccak256 hash (0x + 64 hex chars) of the deliverable, committed up front to enable gasless Class A/B settlement. Omit for standard manual-settlement deals.",
+        },
         apiKey: {
           type: "string",
           description:
