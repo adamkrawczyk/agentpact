@@ -1439,6 +1439,23 @@ app.addHook("preHandler", async (request, reply) => {
     // Fall through to normal agent auth (reject if no agent key)
   }
 
+  // Dispute-timeout sweep — operator/cron surface (not an agent surface),
+  // gated the SAME way as the auto-complete endpoint above and the
+  // routes/admin.ts sweepers: admin-key or cron-secret only. The route
+  // handler itself (routes/disputes.ts) re-checks ADMIN_API_KEY, so this is
+  // defense-in-depth — but without this exemption a legitimate cron caller
+  // would ALSO need a registered agent API key just to reach that check,
+  // unlike every other admin/cron surface in this file.
+  if (routePath === "/api/disputes/resolve-timeouts" && request.method === "POST") {
+    const adminKey = (request.headers as Record<string, string>)["x-admin-key"];
+    const cronSecret = (request.headers as Record<string, string>)["x-cron-secret"];
+    if (adminKey === process.env.ADMIN_API_KEY || cronSecret === process.env.CRON_SECRET) {
+      return; // authenticated admin/cron — skip agent auth
+    }
+    // Fall through to normal agent auth (reject if no agent key); the route
+    // handler's own admin-key check still applies even for an authenticated agent.
+  }
+
   if (routePath === "/api/autopilot/run" && request.method === "POST") {
     return;
   }

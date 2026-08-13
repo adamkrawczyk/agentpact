@@ -509,14 +509,36 @@ export async function registerRoutes(
       try {
         const onChainStatus = await getMilestoneStatus(intent.milestone_id);
         if (onChainStatus.exists && onChainStatus.status === "Disputed") {
-          const { txHash } = await resolveDisputeOnChain(intent.milestone_id, true);
+          // SECURITY: do NOT auto-adjudicate in the buyer's favor on the
+          // buyer's own request. Previously this branch called
+          // resolveDisputeOnChain(milestoneId, true) here, which meant an
+          // authenticated buyer could open a dispute on themselves
+          // (AgentPactEscrow.sol openDispute is buyer-callable) and
+          // immediately have the PLATFORM key sign a refund with zero
+          // seller consent, no evidence review, and no time window — the
+          // buyer could take delivery and then claw the money back alone.
+          //
+          // A disputed milestone now falls into the SAME pending_refund
+          // hold as the non-disputed case below: the payment intent is
+          // marked pending_refund and an operator/admin resolves the
+          // underlying dispute out-of-band (same mechanism as
+          // /api/admin/force-release, which already signs
+          // resolveDisputeOnChain(milestoneId, false) for the seller-favor
+          // case). There is deliberately no automatic buyer-favor
+          // resolution path here — that would require its own admin
+          // adjudication endpoint, which is out of scope for this fix.
           await sql`
             UPDATE payment_intents
-            SET status = 'refunded', updated_at = NOW(), tx_hash = ${txHash}
+            SET status = 'pending_refund', updated_at = NOW()
             WHERE id = ${body.paymentIntentId}
           `;
-          await sql`UPDATE milestones SET status = 'cancelled' WHERE id = ${intent.milestone_id}`;
-          return { ok: true, mode, txHash, action: "refunded_on_chain" };
+          return {
+            ok: true,
+            mode,
+            action: "pending_refund",
+            message:
+              "Milestone is disputed on-chain. A platform-signed refund requires admin/operator adjudication (seller consent / evidence review) — it is not granted automatically to the buyer who opened the dispute.",
+          };
         }
 
         await sql`
