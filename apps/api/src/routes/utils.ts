@@ -552,3 +552,40 @@ export function checkListingPayable(
 
   return { ok: true };
 }
+
+/**
+ * Admin/cron authorization gate for operator surfaces.
+ *
+ * FAILS CLOSED: when ADMIN_API_KEY is unset this returns 503 rather than
+ * allowing the request through. That property is load-bearing — the global
+ * preHandler in index.ts exempts a handful of operator routes from agent auth
+ * by comparing a request header against process.env, and when the env var is
+ * unset that comparison is `undefined === undefined`, i.e. TRUE. Any route
+ * behind such an exemption is therefore unauthenticated unless it re-checks
+ * here. See issue #103.
+ *
+ * Accepts the key via `x-admin-key` or `Authorization: Bearer <key>`.
+ *
+ * Single source of truth: `routes/admin.ts` previously carried TWO byte-identical
+ * local copies (`checkAdminKey` and `requireAdminKey`, 8 and 2 callers). Both now
+ * delegate here. Do not reintroduce a local copy — a second implementation of an
+ * auth gate is how one of them drifts.
+ */
+export function requireAdminKey(
+  request: { headers: Record<string, string | string[] | undefined> },
+  reply: { code: (n: number) => { send: (v: unknown) => unknown } },
+): boolean {
+  const adminKey = process.env.ADMIN_API_KEY;
+  if (!adminKey) {
+    reply.code(503).send({ error: "Admin API not configured" });
+    return false;
+  }
+  const authHeader =
+    (request.headers["x-admin-key"] as string | undefined) ||
+    String(request.headers["authorization"] ?? "").replace("Bearer ", "");
+  if (authHeader !== adminKey) {
+    reply.code(403).send({ error: "Invalid admin key" });
+    return false;
+  }
+  return true;
+}

@@ -13,7 +13,7 @@ import {
   confirmDeliverySchema,
   revokeFulfillmentSchema,
 } from "./schemas.js";
-import { getRequesterAgentId, idempotencyKey, asRecord, FULFILLMENT_TYPES, toNumber } from "./utils.js";
+import { getRequesterAgentId, idempotencyKey, asRecord, FULFILLMENT_TYPES, toNumber, requireAdminKey } from "./utils.js";
 import {
   ensureCredentialVaultSchema,
   vaultStore,
@@ -769,6 +769,13 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
   // ── Auto-complete timed-out delivered deals (cron-friendly) ─────────
   app.post("/api/deals/:id/fulfillment/auto-complete", async (request, reply) => {
+    // Issue #103 — operator/cron surface. index.ts exempts this route from the
+    // global agent-auth preHandler by comparing a request header against
+    // process.env; when ADMIN_API_KEY is unset that comparison is
+    // `undefined === undefined` and the exemption lets an UNAUTHENTICATED caller
+    // straight through to completeDealMilestones() below. This route-level gate
+    // is the real check, and it fails CLOSED (503) when the key is unset.
+    if (!requireAdminKey(request, reply)) return;
     const { id } = request.params as { id: string };
     const [deal] = await sql`
       SELECT id, status, buyer_agent_id, seller_agent_id, offer_id, acceptance_timeout_days, updated_at

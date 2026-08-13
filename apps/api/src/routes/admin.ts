@@ -3,50 +3,19 @@ import { z } from "zod";
 import { sql } from "../db.js";
 import { completeDealMilestones } from "../shared/deal-helpers.js";
 import { notifyAgents } from "../webhooks.js";
-import { PLATFORM_FEE_PCT } from "./utils.js";
+import { PLATFORM_FEE_PCT, requireAdminKey } from "./utils.js";
 import {
   isOnChainMode,
   resolveDisputeOnChain,
 } from "../chain.js";
 
 export default async function adminRoutes(app: FastifyInstance) {
-  function checkAdminKey(
-    request: { headers: Record<string, string | string[] | undefined> },
-    reply: { code: (n: number) => { send: (v: unknown) => unknown } },
-  ): boolean {
-    const adminKey = process.env.ADMIN_API_KEY;
-    if (!adminKey) {
-      reply.code(503).send({ error: "Admin API not configured" });
-      return false;
-    }
-    const authHeader =
-      (request.headers["x-admin-key"] as string | undefined) ||
-      String(request.headers["authorization"] ?? "").replace("Bearer ", "");
-    if (authHeader !== adminKey) {
-      reply.code(403).send({ error: "Invalid admin key" });
-      return false;
-    }
-    return true;
-  }
+  // Both local copies of this gate were deleted; `checkAdminKey` (8 call sites)
+  // and `requireAdminKey` (2) were byte-identical. Both names now resolve to the
+  // single shared implementation in ./utils.js so they cannot drift apart.
+  const checkAdminKey = requireAdminKey;
 
-  function requireAdminKey(
-    request: { headers: Record<string, string | string[] | undefined> },
-    reply: { code: (n: number) => { send: (v: unknown) => unknown } },
-  ): boolean {
-    const adminKey = process.env.ADMIN_API_KEY;
-    if (!adminKey) {
-      reply.code(503).send({ error: "Admin API not configured" });
-      return false;
-    }
-    const authHeader =
-      (request.headers["x-admin-key"] as string | undefined) ||
-      String(request.headers["authorization"] ?? "").replace("Bearer ", "");
-    if (authHeader !== adminKey) {
-      reply.code(403).send({ error: "Invalid admin key" });
-      return false;
-    }
-    return true;
-  }
+
 
   function conversion(from: string, to: string, fromCount: number, toCount: number) {
     return {
@@ -399,10 +368,16 @@ export default async function adminRoutes(app: FastifyInstance) {
   app.post("/api/admin/expire-stale-proposals", async (request, reply) => {
     if (!checkAdminKey(request, reply)) return;
 
+    // Issue #104 — 'countered' MUST be swept too. Countering sets
+    // status='countered' (routes/deals.ts) without touching expires_at, and
+    // accept permits BOTH ('proposed','countered'), so a countered proposal is
+    // still a live, acceptable offer that now never expires. Sweeping only
+    // 'proposed' left the exact lifecycle leak this sweeper exists to close,
+    // one counter-offer away.
     const staleProposals = await sql`
-      SELECT id, buyer_agent_id, seller_agent_id
+      SELECT id, buyer_agent_id, seller_agent_id, status
       FROM deals
-      WHERE status = 'proposed'
+      WHERE status IN ('proposed', 'countered')
         AND expires_at IS NOT NULL
         AND expires_at < NOW()
     `;
@@ -412,7 +387,7 @@ export default async function adminRoutes(app: FastifyInstance) {
       try {
         const [updated] = await sql`
           UPDATE deals SET status = 'cancelled', updated_at = NOW()
-          WHERE id = ${deal.id} AND status = 'proposed'
+          WHERE id = ${deal.id} AND status = ${deal.status}
           RETURNING id
         `;
         if (!updated) {
@@ -441,94 +416,29 @@ export default async function adminRoutes(app: FastifyInstance) {
 
     return { processed: results.length, results };
   });
+      // DEFECT D (intent/deal divergence) — DELIBERATELY NOT IMPLEMENTED HERE.
+      //
+      // A POST /api/admin/reconcile-expired-intents route was added in #102 and
+      // is REMOVED again here (issue #104) because it was unsafe and dormant:
+      //
+      //   * UNSAFE: it selected every expired, non-terminal intent and cancelled
+      //     the parent deal on a clock comparison alone, with no chain read. The
+      //     relayer's autoclose sweeper BROADCASTS `claimIntent` and only THEN
+      //     performs its status CAS (apps/relayer-daemon/src/autoclose-sweeper.ts).
+      //     A reconciliation sweep landing inside that window marks the deal
+      //     'cancelled' while the claim succeeds on-chain — the database and the
+      //     chain permanently disagree about who was paid. That is strictly worse
+      //     than the wedged-'active' deal it set out to fix: a stuck deal is
+      //     visible and recoverable; a false 'cancelled' over a real on-chain
+      //     payout is neither.
+      //
+      //   * DORMANT: nothing invoked it. No cron, no daemon, no test, no doc.
+      //
+      // Whatever replaces it MUST read chain state (or coordinate with the
+      // relayer's CAS) before writing a terminal deal status, and must carry its
+      // own RED-proof for the broadcast-window race. A clock comparison is not
+      // sufficient evidence that a settlement is dead.
 
-  // DEFECT D fix — intent/deal state divergence, no reconciliation.
-  // Verified live: of 14 intent-backed deals, ALL are still 'active' — 6 have
-  // EXPIRED intents (predicate_type hash-preimage-v1, Class A), 3
-  // awaiting_funding, 2 reveal_ready, 3 open. The relayer's autoclose-sweeper
-  // (apps/relayer-daemon/src/autoclose-sweeper.ts) only reconciles the SUCCESS
-  // direction — it flips deals.status = 'completed' after a successful CLAIM.
-  // Nothing reconciles the FAILURE direction: an intent whose expires_at has
-  // passed without ever being claimed leaves its parent deal wedged 'active'
-  // forever, even though the settlement path is dead.
-  //
-  // WHERE this lives (deliberate choice, not the relayer):
-  //   The relayer's sweepers are pure functions over `sql` + a live `chain`
-  //   client — every existing sweeper in autoclose-sweeper.ts either reads
-  //   intents to BROADCAST a transaction (FUND, CLAIM) or, as a side effect of
-  //   a successful chain call, writes `deals.status`. Recognizing an EXPIRED
-  //   intent needs no chain call at all — it is a pure clock comparison against
-  //   `intents.expires_at`, exactly the shape of the existing
-  //   auto-complete-timeouts / expire-stale-proposals admin sweepers (also a
-  //   clock comparison against a deals/intents column, also no chain call).
-  //   Putting a chain-free reconciliation in the relayer would be the odd one
-  //   out there; putting it here keeps every "walk a deadline column, flip a
-  //   status, notify" sweeper in one file with one auth pattern.
-  //
-  // Mirrors auto-complete-timeouts: same auth (checkAdminKey), same response
-  // shape ({ processed, results }), same per-row try/catch.
-  //
-  // Note: intents.status has no CHECK constraint (migration 039_intents.sql —
-  // `status TEXT NOT NULL DEFAULT 'open'`, unconstrained), so introducing
-  // 'expired' here does not violate any DB constraint. deals.status='cancelled'
-  // is an existing, already-reachable value (the manual /api/deals/:id/cancel
-  // route already permits proposed/countered/accepted/active/funded/delivered/
-  // disputed → cancelled), so the web UI's generic status rendering needs no
-  // new case, and this reuses the exact terminal state a human cancel produces.
-  app.post("/api/admin/reconcile-expired-intents", async (request, reply) => {
-    if (!checkAdminKey(request, reply)) return;
-
-    const staleIntents = await sql`
-      SELECT i.id AS intent_id, i.status AS intent_status, i.deal_id,
-             d.buyer_agent_id, d.seller_agent_id, d.status AS deal_status
-      FROM intents i
-      JOIN deals d ON d.id = i.deal_id
-      WHERE i.deal_id IS NOT NULL
-        AND i.status NOT IN ('claimed', 'stream_cancelled', 'expired')
-        AND i.expires_at < NOW()
-        AND d.status NOT IN ('completed', 'cancelled')
-    `;
-
-    const results = [];
-    for (const row of staleIntents) {
-      try {
-        const [updatedIntent] = await sql`
-          UPDATE intents SET status = 'expired', updated_at = NOW()
-          WHERE id = ${row.intent_id} AND status = ${row.intent_status}
-          RETURNING id
-        `;
-        if (!updatedIntent) {
-          results.push({ intentId: row.intent_id, dealId: row.deal_id, reconciled: false, reason: "intent status changed concurrently" });
-          continue;
-        }
-        const [updatedDeal] = await sql`
-          UPDATE deals SET status = 'cancelled', updated_at = NOW()
-          WHERE id = ${row.deal_id} AND status = ${row.deal_status}
-          RETURNING id
-        `;
-        if (!updatedDeal) {
-          results.push({ intentId: row.intent_id, dealId: row.deal_id, reconciled: false, reason: "deal status changed concurrently" });
-          continue;
-        }
-        await sql`
-          INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-          VALUES (${row.deal_id}, ${row.buyer_agent_id}, 'cancel', ${JSON.stringify({ reason: "settlement_intent_expired_unclaimed", automated: true, intentId: row.intent_id })}::jsonb)
-        `;
-        notifyAgents(sql, [row.buyer_agent_id, row.seller_agent_id], "deal.cancelled", {
-          dealId: String(row.deal_id),
-          cancelledBy: null,
-          reason: "settlement_intent_expired_unclaimed",
-          automated: true,
-        });
-        results.push({ intentId: row.intent_id, dealId: row.deal_id, reconciled: true });
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        results.push({ intentId: row.intent_id, dealId: row.deal_id, reconciled: false, error: message });
-      }
-    }
-
-    return { processed: results.length, results };
-  });
 
   app.post("/api/admin/force-close", async (request, reply) => {
     if (!checkAdminKey(request, reply)) return;
@@ -638,6 +548,89 @@ export default async function adminRoutes(app: FastifyInstance) {
       mode,
       txHash,
       reason: body.reason || "admin force-release",
+    };
+  });
+
+  // ── Admin-adjudicated buyer-favor refund ─────────────────────────
+  // Issue #104 — the missing counterpart to force-release.
+  //
+  // #99 correctly closed the hole where a BUYER could open their own on-chain
+  // dispute and then make the platform key sign `resolveDispute(..., true)` on
+  // their own request — no seller consent, no evidence, no review. But closing
+  // it left NO caller anywhere passing refundBuyer=true: every remaining
+  // production call site passes `false` (force-release here, plus the two
+  // completion tails in deal-helpers.ts / index.ts). A genuine buyer-win
+  // adjudication had no execution path at all, so escrowed funds could not be
+  // returned through the application — the dispute simply parked at
+  // `pending_refund` forever.
+  //
+  // The fix is NOT to relax the buyer-facing route. It is to give the operator
+  // an explicit, admin-gated decision surface, exactly mirroring force-release:
+  // same auth, same on-chain-first ordering, same refusal to touch the DB when
+  // the chain call fails.
+  app.post("/api/admin/force-refund", async (request, reply) => {
+    if (!checkAdminKey(request, reply)) return;
+
+    const body = z
+      .object({
+        milestoneId: z.string().uuid(),
+        reason: z.string().optional(),
+      })
+      .parse(request.body);
+
+    const [milestone] = await sql`
+      SELECT m.*, d.id AS deal_id, d.status AS deal_status, d.buyer_agent_id, d.seller_agent_id
+      FROM milestones m
+      JOIN deals d ON d.id = m.deal_id
+      WHERE m.id = ${body.milestoneId}
+    `;
+    if (!milestone) return reply.code(404).send({ error: "Milestone not found" });
+
+    const mode = isOnChainMode() ? "on-chain" : "simulation";
+    let txHash: string | null = null;
+
+    if (mode === "on-chain") {
+      try {
+        // refundBuyer = true — the ONLY place in the codebase that does this,
+        // and it is reachable only with the admin key.
+        const result = await resolveDisputeOnChain(body.milestoneId, true);
+        txHash = result.txHash;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[admin/force-refund] On-chain resolveDispute failed: ${message}`);
+        // Same invariant as force-release: never update the DB when the chain
+        // call failed, or the database claims a refund that never happened.
+        return reply.code(502).send({ error: "On-chain refund failed; DB not updated", reason: message });
+      }
+    }
+
+    await sql`UPDATE milestones SET status = 'cancelled' WHERE id = ${body.milestoneId}`;
+    await sql`UPDATE deals SET status = 'cancelled', updated_at = NOW() WHERE id = ${milestone.deal_id}`;
+    await sql`
+      UPDATE payment_intents
+      SET status = 'refunded', updated_at = NOW(), tx_hash = ${txHash}
+      WHERE milestone_id = ${body.milestoneId} AND status IN ('funded', 'pending_refund')
+    `;
+
+    notifyAgents(sql, [milestone.buyer_agent_id, milestone.seller_agent_id], "payment.refunded", {
+      dealId: String(milestone.deal_id),
+      milestoneId: body.milestoneId,
+      mode,
+      txHash,
+      reason: body.reason || "admin force-refund",
+    });
+
+    console.log(
+      `[admin/force-refund] Milestone ${body.milestoneId} refunded to buyer. Reason: ${body.reason || "admin action"}. TxHash: ${txHash || "N/A"}`
+    );
+
+    return {
+      ok: true,
+      milestoneId: body.milestoneId,
+      dealId: milestone.deal_id,
+      mode,
+      txHash,
+      reason: body.reason || "admin force-refund",
     };
   });
 

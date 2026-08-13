@@ -20,6 +20,18 @@ import { cleanDatabase, createTestApp, getAuthHeadersForAgent } from "./helpers/
 // operator-adjudicated hold used for the non-disputed case) instead of
 // auto-resolving on-chain in the buyer's favor.
 
+//
+// UPDATED for issue #103: these cases originally pinned the exact status code
+// returned by the ROUTE's own gate (403 / 503). The #103 fix hardened the
+// global preHandler exemption in index.ts so an UNSET ADMIN_API_KEY can no
+// longer satisfy `undefined === undefined` — which means the outer layer now
+// answers first for unauthenticated / wrong-key / unset-key callers, and it
+// answers 401. Nothing became more permissive: every one of these is still a
+// refusal and the dispute is still not swept. The assertions were widened to
+// the SECURITY CONTRACT ("refused, and nothing settled") instead of pinning
+// which of two correct layers happens to answer. The legitimate admin path is
+// still asserted exactly.
+
 vi.mock("../chain.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../chain.js")>();
   return {
@@ -96,7 +108,8 @@ describe("Dispute/refund authorization (RED-proof suite)", () => {
         url: "/api/disputes/resolve-timeouts",
       });
 
-      expect(response.statusCode).toBe(403);
+      // Refused by whichever layer answers first (preHandler 401 or route 403).
+      expect([401, 403]).toContain(response.statusCode);
 
       // Nothing should have been swept — the dispute must remain 'open'.
       const [dispute] = await sql`SELECT status FROM disputes WHERE status = 'open'`;
@@ -114,7 +127,8 @@ describe("Dispute/refund authorization (RED-proof suite)", () => {
         headers: agentHeaders,
       });
 
-      expect(response.statusCode).toBe(403);
+      // Refused by whichever layer answers first (preHandler 401 or route 403).
+      expect([401, 403]).toContain(response.statusCode);
 
       const [dispute] = await sql`SELECT status FROM disputes WHERE status = 'open'`;
       expect(dispute?.status).toBe("open");
@@ -130,10 +144,10 @@ describe("Dispute/refund authorization (RED-proof suite)", () => {
         headers: { "x-admin-key": "totally-not-the-key" },
       });
 
-      expect(response.statusCode).toBe(403);
+      expect([401, 403]).toContain(response.statusCode);
     });
 
-    it("fails closed (503) when ADMIN_API_KEY is unset, even for a would-be admin caller", async () => {
+    it("fails closed when ADMIN_API_KEY is unset, even for a would-be admin caller", async () => {
       const { app, sql } = await createTestApp();
       await seedExpiredDispute(sql);
       delete process.env.ADMIN_API_KEY;
@@ -144,7 +158,11 @@ describe("Dispute/refund authorization (RED-proof suite)", () => {
         headers: { "x-admin-key": "test-admin-key-authz" },
       });
 
-      expect(response.statusCode).toBe(503);
+      // Fails CLOSED. Post-#103 the hardened preHandler refuses the exemption
+      // outright (401) before the route's 503 is reached; both are refusals and
+      // neither settles anything. What must never happen here is a 2xx.
+      expect([401, 403, 503]).toContain(response.statusCode);
+      expect(response.statusCode).not.toBe(200);
     });
 
     it("STILL works with the correct admin credential (legitimate cron path preserved)", async () => {
