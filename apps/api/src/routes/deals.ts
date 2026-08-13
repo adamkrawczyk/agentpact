@@ -727,7 +727,15 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         ? Math.min(Math.floor(requestedLimit), MAX_LIMIT)
         : DEFAULT_LIMIT;
     const requestedOffset = Number(q.offset);
-    const offset = Number.isFinite(requestedOffset) && requestedOffset > 0 ? Math.floor(requestedOffset) : 0;
+    // Issue #104 — clamp the offset too. An unbounded OFFSET lets a public
+    // caller request an arbitrarily deep skip (Postgres still walks every
+    // skipped row), and a value beyond BIGINT range errors outright. 100k rows
+    // at the 200/page cap is 500 pages — far past any legitimate browse.
+    const MAX_OFFSET = 100_000;
+    const offset =
+      Number.isFinite(requestedOffset) && requestedOffset > 0
+        ? Math.min(Math.floor(requestedOffset), MAX_OFFSET)
+        : 0;
 
     const rows = await sql`
       SELECT d.*,

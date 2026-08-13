@@ -1425,7 +1425,29 @@ app.addHook("preHandler", async (request, reply) => {
   if (routePath.match(/^\/api\/deals\/[^/]+\/fulfillment\/auto-complete$/) && request.method === "POST") {
     const adminKey = (request.headers as Record<string, string>)["x-admin-key"];
     const cronSecret = (request.headers as Record<string, string>)["x-cron-secret"];
-    if (adminKey === process.env.ADMIN_API_KEY || cronSecret === process.env.CRON_SECRET) {
+    // Issue #103, part 1 — the env var MUST be set for the comparison to count.
+    // Without the truthiness guard, an unset ADMIN_API_KEY plus a missing
+    // header is `undefined === undefined` => TRUE => agent auth skipped for an
+    // unauthenticated caller. Never compare a header directly to a possibly
+    // unset env var.
+    //
+    // Issue #103, part 2 — this exemption must accept the SAME credential
+    // shapes as requireAdminKey() in routes/utils.ts, which the route handlers
+    // use as the real gate. That helper also accepts
+    // `Authorization: Bearer <key>`; before the truthiness guard above, a
+    // Bearer-only operator slipped through the exemption anyway (because the
+    // undefined comparison passed for everyone) and was then admitted by the
+    // route. Closing the bypass without teaching the exemption about Bearer
+    // would have silently broken every Bearer-authenticated cron caller —
+    // caught by dispute-authz.test.ts.
+    const bearerKey = String(
+      (request.headers as Record<string, string>)["authorization"] ?? "",
+    ).replace("Bearer ", "");
+    if (
+      (process.env.ADMIN_API_KEY &&
+        (adminKey === process.env.ADMIN_API_KEY || bearerKey === process.env.ADMIN_API_KEY)) ||
+      (process.env.CRON_SECRET && cronSecret === process.env.CRON_SECRET)
+    ) {
       return; // authenticated admin/cron — skip agent auth
     }
     // Fall through to normal agent auth (reject if no agent key)
@@ -1441,7 +1463,29 @@ app.addHook("preHandler", async (request, reply) => {
   if (routePath === "/api/disputes/resolve-timeouts" && request.method === "POST") {
     const adminKey = (request.headers as Record<string, string>)["x-admin-key"];
     const cronSecret = (request.headers as Record<string, string>)["x-cron-secret"];
-    if (adminKey === process.env.ADMIN_API_KEY || cronSecret === process.env.CRON_SECRET) {
+    // Issue #103, part 1 — the env var MUST be set for the comparison to count.
+    // Without the truthiness guard, an unset ADMIN_API_KEY plus a missing
+    // header is `undefined === undefined` => TRUE => agent auth skipped for an
+    // unauthenticated caller. Never compare a header directly to a possibly
+    // unset env var.
+    //
+    // Issue #103, part 2 — this exemption must accept the SAME credential
+    // shapes as requireAdminKey() in routes/utils.ts, which the route handlers
+    // use as the real gate. That helper also accepts
+    // `Authorization: Bearer <key>`; before the truthiness guard above, a
+    // Bearer-only operator slipped through the exemption anyway (because the
+    // undefined comparison passed for everyone) and was then admitted by the
+    // route. Closing the bypass without teaching the exemption about Bearer
+    // would have silently broken every Bearer-authenticated cron caller —
+    // caught by dispute-authz.test.ts.
+    const bearerKey = String(
+      (request.headers as Record<string, string>)["authorization"] ?? "",
+    ).replace("Bearer ", "");
+    if (
+      (process.env.ADMIN_API_KEY &&
+        (adminKey === process.env.ADMIN_API_KEY || bearerKey === process.env.ADMIN_API_KEY)) ||
+      (process.env.CRON_SECRET && cronSecret === process.env.CRON_SECRET)
+    ) {
       return; // authenticated admin/cron — skip agent auth
     }
     // Fall through to normal agent auth (reject if no agent key); the route
