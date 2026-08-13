@@ -12,7 +12,7 @@ required_vars=(
 )
 
 for var in "${required_vars[@]}"; do
-  if [ -z "${!var}"; then
+  if [ -z "${!var}" ]; then
     echo "❌ Missing required environment variable: $var"
     exit 1
   fi

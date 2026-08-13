@@ -32,3 +32,22 @@ jobs:
 
       - name: Route dedup guard (FST_ERR_DUPLICATED_ROUTE)
         run: bash scripts/lint-routes.sh
+
+  shell-lint:
+    # `bash -n` does NOT catch a malformed `[ ... ` test — `[` is a command,
+    # not shell syntax, so the failure only appears at runtime. That is how
+    # deploy.sh's env-var preflight guard shipped inert: with every required
+    # variable unset it printed "Environment variables validated" and carried
+    # on to build/migrate/start. ShellCheck catches the class (SC1072/SC1073).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: ShellCheck (error severity) on shipped scripts and hooks
+        run: shellcheck -S error scripts/*.sh .githooks/*
+
+      - name: Deploy preflight guard self-test
+        run: bash scripts/deploy-preflight.test.sh
