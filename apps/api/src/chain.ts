@@ -12,6 +12,7 @@ import {
   encodeFunctionData,
   parseUnits,
   formatUnits,
+  parseEventLogs,
   type Hex,
   type Address,
   type TransactionReceipt,
@@ -126,6 +127,21 @@ export const ESCROW_ABI = [
     stateMutability: "view",
     inputs: [],
     outputs: [{ name: "", type: "uint256" }],
+  },
+  // Events — required for verifyFunding() to bind a tx receipt to the specific
+  // milestone/deal/buyer/seller/amount it claims to fund. Without this in the
+  // ABI, decodeEventLog/parseEventLogs cannot decode MilestoneCreated logs.
+  {
+    name: "MilestoneCreated",
+    type: "event",
+    anonymous: false,
+    inputs: [
+      { name: "milestoneId", type: "bytes32", indexed: true },
+      { name: "dealId", type: "bytes32", indexed: true },
+      { name: "buyer", type: "address", indexed: false },
+      { name: "seller", type: "address", indexed: false },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
   },
 ] as const;
 
@@ -258,11 +274,35 @@ export function generateFundingTransaction(
 }
 
 /**
- * Verify that a transaction hash corresponds to a successful createMilestone call.
- * Waits for 2 confirmations, then inspects the receipt for MilestoneCreated events.
+ * Verify that a transaction hash corresponds to a successful createMilestone call
+ * that funded THIS SPECIFIC milestone.
+ *
+ * Waits for 2 confirmations, then decodes the receipt's logs looking for a
+ * `MilestoneCreated` event emitted BY the escrow contract. The decoded
+ * milestoneId/dealId/buyer/seller/amount are returned, and — critically — if an
+ * `expected` binding is supplied, ANY mismatch against it (wrong milestone, wrong
+ * buyer, wrong seller, wrong amount) is rejected with `verified:false` and a
+ * `reason`. This closes the custody hole where any successful past transaction
+ * sent to the escrow address (e.g. someone else's funding, or an unrelated
+ * milestone's funding) could be replayed as "proof" of funding a different
+ * payment intent — the caller only ever checked `receipt.to`, never *what* was
+ * funded.
+ *
+ * A receipt with no MilestoneCreated log at all (e.g. wrong tx, unrelated escrow
+ * call) is always `verified:false`.
  */
-export async function verifyFunding(txHash: Hex): Promise<{
+export async function verifyFunding(
+  txHash: Hex,
+  expected?: {
+    milestoneId: string; // UUID or bytes32 hex — converted via uuidToBytes32 if not already 0x-prefixed
+    dealId?: string;
+    buyer?: Address;
+    seller?: Address;
+    amountRaw?: bigint;
+  },
+): Promise<{
   verified: boolean;
+  reason?: string;
   milestoneId?: Hex;
   dealId?: Hex;
   buyer?: Address;
@@ -278,17 +318,90 @@ export async function verifyFunding(txHash: Hex): Promise<{
     });
 
     if (receipt.status !== "success") {
-      return { verified: false };
+      return { verified: false, reason: "Transaction did not succeed on-chain" };
     }
 
     // Check that the transaction was to the escrow contract
     if (receipt.to?.toLowerCase() !== ESCROW_ADDRESS.toLowerCase()) {
-      return { verified: false };
+      return { verified: false, reason: "Transaction was not sent to the escrow contract" };
     }
 
-    return { verified: true, receipt };
-  } catch {
-    return { verified: false };
+    // Decode only logs emitted BY the escrow contract itself — a receipt could
+    // in principle contain logs from other contracts (e.g. the USDC transfer
+    // inside the same tx); we must not accept a MilestoneCreated-shaped log
+    // that didn't actually come from the escrow.
+    const escrowLogs = receipt.logs.filter(
+      (log) => log.address.toLowerCase() === ESCROW_ADDRESS.toLowerCase(),
+    );
+
+    const decoded = parseEventLogs({
+      abi: ESCROW_ABI,
+      eventName: "MilestoneCreated",
+      logs: escrowLogs,
+    });
+
+    const created = decoded[0];
+    if (!created) {
+      return {
+        verified: false,
+        reason: "No MilestoneCreated event found in this transaction's receipt",
+      };
+    }
+
+    // Every field is a required (non-indexed-optional) part of the event ABI
+    // above, so decoding a match always yields all five — the `| undefined`
+    // TS sees is viem's generic decode signature, not a real runtime case.
+    const milestoneId = created.args.milestoneId as Hex;
+    const dealId = created.args.dealId as Hex;
+    const buyer = created.args.buyer as Address;
+    const seller = created.args.seller as Address;
+    const amount = created.args.amount as bigint;
+
+    if (expected) {
+      const expectedMilestoneBytes32 = expected.milestoneId.startsWith("0x")
+        ? (expected.milestoneId as Hex)
+        : uuidToBytes32(expected.milestoneId);
+
+      if (milestoneId.toLowerCase() !== expectedMilestoneBytes32.toLowerCase()) {
+        return {
+          verified: false,
+          reason: "On-chain MilestoneCreated event does not name the milestone being confirmed — this tx funded a DIFFERENT milestone",
+        };
+      }
+
+      if (expected.dealId) {
+        const expectedDealBytes32 = expected.dealId.startsWith("0x")
+          ? (expected.dealId as Hex)
+          : uuidToBytes32(expected.dealId);
+        if (dealId.toLowerCase() !== expectedDealBytes32.toLowerCase()) {
+          return { verified: false, reason: "On-chain MilestoneCreated event does not match the expected deal" };
+        }
+      }
+
+      if (expected.buyer && buyer.toLowerCase() !== expected.buyer.toLowerCase()) {
+        return { verified: false, reason: "On-chain MilestoneCreated buyer does not match the expected buyer" };
+      }
+
+      if (expected.seller && seller.toLowerCase() !== expected.seller.toLowerCase()) {
+        return { verified: false, reason: "On-chain MilestoneCreated seller does not match the expected seller" };
+      }
+
+      if (expected.amountRaw !== undefined && amount !== expected.amountRaw) {
+        return { verified: false, reason: "On-chain MilestoneCreated amount does not match the expected amount" };
+      }
+    }
+
+    return {
+      verified: true,
+      milestoneId,
+      dealId,
+      buyer,
+      seller,
+      amount: unitsToUsdc(amount),
+      receipt,
+    };
+  } catch (err) {
+    return { verified: false, reason: err instanceof Error ? err.message : "Verification failed" };
   }
 }
 

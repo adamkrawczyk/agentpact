@@ -16,6 +16,7 @@ import {
   getMilestoneStatus,
   resolveChainFromAddress,
   validateWalletAddress,
+  usdcToUnits,
   CHAIN_CONFIG,
   ESCROW_ADDRESS,
   USDC_ADDRESS,
@@ -299,10 +300,25 @@ export async function registerRoutes(
       return reply.code(400).send({ error: `Intent status is ${intent.status}, expected created` });
     }
 
-    const verification = await verifyFunding(body.txHash as Hex);
+    // CUSTODY BINDING: verifyFunding must confirm the on-chain MilestoneCreated
+    // event actually names THIS milestone/buyer/seller/amount — not merely that
+    // *some* successful transaction was once sent to the escrow contract. Without
+    // this, a buyer could replay any old (their own or someone else's) escrow tx
+    // hash against a different, unfunded payment intent and have it accepted.
+    // buyer/seller wallet addresses were recorded on the intent itself at
+    // create-intent time (see generateFundingTransaction / the INSERT above),
+    // so no extra join is needed to source the expected binding.
+    const verification = await verifyFunding(body.txHash as Hex, {
+      milestoneId: intent.milestone_id,
+      buyer: intent.buyer_wallet_address as Address,
+      seller: intent.seller_wallet_address as Address,
+      amountRaw: usdcToUnits(toNumber(intent.amount)),
+    });
 
     if (!verification.verified) {
-      return reply.code(400).send({ error: "Transaction not verified on-chain — failed or not confirmed" });
+      return reply.code(400).send({
+        error: `Transaction not verified on-chain: ${verification.reason ?? "failed or not confirmed"}`,
+      });
     }
 
     await sql.begin(async (txn) => {
