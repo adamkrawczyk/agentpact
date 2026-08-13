@@ -199,7 +199,26 @@ export async function enforceDealDelta(dealId: string, negotiatedTotal: number):
   }
 }
 
-export async function releaseMilestonePayment(milestoneId: string): Promise<void> {
+// Discriminated result for a single-milestone release. Mirrors the action
+// vocabulary already established by completeDealMilestones() below
+// ("released" | "buyer_sign_required" | ...) rather than inventing a
+// competing one — callers that already branch on completeDealMilestones()'s
+// action strings can treat this the same way.
+export type ReleaseMilestonePaymentResult = {
+  mode: "simulation" | "on-chain";
+  action: "released" | "buyer_sign_required";
+  paymentIntentId?: string;
+  txHash?: string;
+  gross?: number;
+  sellerAmount?: number;
+  feeAmount?: number;
+};
+
+export async function releaseMilestonePayment(
+  milestoneId: string,
+  opts: { releaseTxHash?: string } = {},
+): Promise<ReleaseMilestonePaymentResult> {
+  const mode = isOnChainMode() ? "on-chain" : "simulation";
   const [payment] = await sql`
     SELECT pi.*, d.seller_agent_id, d.buyer_agent_id, d.id AS deal_id
     FROM payment_intents pi
@@ -211,24 +230,49 @@ export async function releaseMilestonePayment(milestoneId: string): Promise<void
 
   if (!payment) {
     // No funded payment intent — still transition the milestone and deal to completed
-    // so the state machine is not left stuck at 'delivered'.
+    // so the state machine is not left stuck at 'delivered'. Nothing to fabricate:
+    // there is no money to (mis)represent as released.
     await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = ${milestoneId} AND status != 'accepted'`;
     await sql`
       UPDATE deals SET status = 'completed', updated_at = NOW()
       WHERE id = (SELECT deal_id FROM milestones WHERE id = ${milestoneId})
         AND status != 'completed'
     `;
-    return;
+    return { mode, action: "released" };
+  }
+
+  // ── settlement-integrity gate ────────────────────────────────────────────
+  // payment_provider != 'stripe' means this intent is a USDC on-chain escrow
+  // funding — real USDC is sitting in the escrow contract. In on-chain mode
+  // the ONLY honest way to mark it released is a real on-chain release
+  // transaction: either one a caller already performed and passed in via
+  // opts.releaseTxHash, or none. We must NEVER synthesize a `sim_release_*`
+  // hash here and flip payment_intents/milestones/deals to
+  // released/accepted/completed while the contract still holds the funds —
+  // that is the exact "DB says paid, chain says otherwise" defect this test
+  // suite exists to prevent (see silent-zero-complete-guard.test.ts).
+  // Stripe-funded intents have no on-chain escrow to fake-release from (the
+  // fiat capture already moved real money at create-intent time), so they
+  // are exempt from this gate in both modes.
+  const isOnChainEscrowFunded = payment.payment_provider !== "stripe";
+  const hasRealReleaseTx = Boolean(opts.releaseTxHash) && !opts.releaseTxHash!.startsWith("sim_");
+
+  if (mode === "on-chain" && isOnChainEscrowFunded && !hasRealReleaseTx) {
+    console.warn(
+      `[releaseMilestonePayment] buyer_sign_required: milestone ${milestoneId} has a funded on-chain USDC escrow intent but no real on-chain release tx was provided. Refusing to fabricate a sim_release_* hash — payment_intents stays 'funded', milestone/deal state is untouched.`,
+    );
+    return { mode, action: "buyer_sign_required", paymentIntentId: String(payment.id) };
   }
 
   const gross = toNumber(payment.amount);
   const sellerAmount = Number((gross * (100 - PLATFORM_FEE_PCT)) / 100).toFixed(6);
   const feeAmount = Number((gross - Number(sellerAmount)).toFixed(6));
+  const txHash = hasRealReleaseTx ? opts.releaseTxHash! : `sim_release_${randomUUID().slice(0, 8)}`;
 
   await sql.begin(async (txn) => {
     await txn.unsafe(
       `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW(), tx_hash = $1 WHERE id = $2`,
-      [`sim_release_${randomUUID().slice(0, 8)}`, payment.id]
+      [txHash, payment.id]
     );
     await txn.unsafe(`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = $1`, [milestoneId]);
     await txn.unsafe(
@@ -243,7 +287,7 @@ export async function releaseMilestonePayment(milestoneId: string): Promise<void
     await txn.unsafe(
       `INSERT INTO audit_log (action, object_type, object_id, payload_json)
        VALUES ('payment.release', 'milestone', $1, $2::jsonb)`,
-      [milestoneId, JSON.stringify({ gross, sellerAmount, feeAmount, platformWallet: PLATFORM_WALLET })]
+      [milestoneId, JSON.stringify({ gross, sellerAmount, feeAmount, platformWallet: PLATFORM_WALLET, txHash })]
     );
   });
 
@@ -254,6 +298,16 @@ export async function releaseMilestonePayment(milestoneId: string): Promise<void
     sellerAmount,
     feeAmount,
   });
+
+  return {
+    mode,
+    action: "released",
+    paymentIntentId: String(payment.id),
+    txHash,
+    gross,
+    sellerAmount: Number(sellerAmount),
+    feeAmount,
+  };
 }
 
 export async function completeDealMilestones(
@@ -453,8 +507,27 @@ export async function completeDealMilestones(
     }
   }
 
+  // Defensive: by construction, every milestone reaching this tail is either
+  // unfunded (nothing to fabricate), stripe-backed (no on-chain escrow to
+  // fake-release), or we're in simulation mode — the settlement-integrity
+  // gate inside releaseMilestonePayment() only refuses on-chain USDC-escrow
+  // releases, which are handled above via resolveDisputeOnChain(). Still,
+  // never blindly force-complete if the gate ever DOES refuse here — that
+  // would recreate the exact phantom-complete bug this guard exists to stop.
+  let anyRefused = false;
   for (const milestone of milestones) {
-    await releaseMilestonePayment(String(milestone.id));
+    const result = await releaseMilestonePayment(String(milestone.id));
+    if (result.action === "buyer_sign_required") {
+      anyRefused = true;
+    }
+  }
+
+  if (anyRefused) {
+    console.warn(
+      `[completeDealMilestones] settlement_pending: deal ${dealId} had a milestone refuse release (buyer_sign_required) in the fall-through tail. Holding, not force-completing.`,
+    );
+    await sql`UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
+    return { mode, action: "settlement_pending" };
   }
 
   // Ensure deal and milestones are always transitioned to completed/accepted,

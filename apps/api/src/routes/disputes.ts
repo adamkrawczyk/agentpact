@@ -14,7 +14,9 @@ export async function registerRoutes(
   app: FastifyInstance,
   sql: Sql<Record<string, unknown>>,
   deps: Deps,
-  releaseMilestonePayment: (milestoneId: string) => Promise<void>,
+  releaseMilestonePayment: (
+    milestoneId: string,
+  ) => Promise<{ mode: "simulation" | "on-chain"; action: "released" | "buyer_sign_required"; paymentIntentId?: string; txHash?: string }>,
 ): Promise<void> {
   const { notifyAgents } = deps;
 
@@ -168,7 +170,12 @@ export async function registerRoutes(
       WHERE m.id = ${body.milestoneId}
     `;
 
-    await releaseMilestonePayment(body.milestoneId);
+    const releaseResult = await releaseMilestonePayment(body.milestoneId);
+    // settlement-integrity: honest response. When the shared helper refuses
+    // (funded on-chain USDC escrow, no real release tx), payoutReleased must
+    // say so rather than lying with `true`. Breaking-change note: this route
+    // previously always returned payoutReleased:true unconditionally — see PR body.
+    const payoutReleased = releaseResult.action === "released";
 
     if (milestoneInfo) {
       notifyAgents(sql, [milestoneInfo.buyer_agent_id], "milestone.completed", {
@@ -178,7 +185,7 @@ export async function registerRoutes(
       });
     }
 
-    return { accepted: true, payoutReleased: true };
+    return { accepted: true, payoutReleased, releaseAction: releaseResult.action };
   });
 
   app.post("/api/disputes/open", async (request, reply) => {
@@ -240,10 +247,20 @@ export async function registerRoutes(
       RETURNING *
     `;
 
+    let releasedCount = 0;
+    let releasePendingCount = 0;
     for (const dispute of expired) {
-      await releaseMilestonePayment(dispute.milestone_id);
+      const releaseResult = await releaseMilestonePayment(dispute.milestone_id);
+      if (releaseResult.action === "released") {
+        releasedCount += 1;
+      } else {
+        releasePendingCount += 1;
+      }
     }
 
-    return { timedOutDisputes: expired.length };
+    // settlement-integrity: report honestly how many timed-out disputes actually
+    // settled vs. were deferred (funded on-chain USDC escrow, no real release tx).
+    // Additive fields only — timedOutDisputes is unchanged for backward compat.
+    return { timedOutDisputes: expired.length, releasedCount, releasePendingCount };
   });
 }
