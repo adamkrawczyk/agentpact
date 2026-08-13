@@ -80,6 +80,38 @@ if (process.env.NODE_ENV === "production" && !process.env.PLATFORM_PRIVATE_KEY) 
   process.exit(1);
 }
 
+// DEFECT C fix (GitHub issue #91) — zero-address predicate default.
+// routes/deals.ts's accept-deal auto-mint (the gasless Class-A intent path)
+// used to fall back to the zero address whenever HASH_PREIMAGE_PREDICATE_ADDRESS
+// was unset: `(process.env.HASH_PREIMAGE_PREDICATE_ADDRESS as ...) ?? "0x000…0"`.
+// Confirmed in production data: two live intents
+// (3d786cd7-b49a-49f9-8048-61a42736e1c7, dec204fb-f359-489d-adfd-6de04b8b761b)
+// carry that zero verifier. AgentPactEscrowV3.sol:280 rejects an unapproved
+// verifier BEFORE pulling funds, so the outcome is an unfundable/stalled deal,
+// NOT locked funds — but it is still a dead-on-arrival intent nobody can claim.
+// Any accepted paid-USDC deal that carries a deliverable_hash commitment can
+// trigger this mint in production (it is deal-data-driven, not behind a
+// separate feature flag), so — mirroring the ADMIN_API_KEY / PLATFORM_PRIVATE_KEY
+// pattern above — refuse to boot in production without a real predicate
+// address configured. Local/dev is unaffected: this check only fires when
+// NODE_ENV === "production", exactly like its two neighbours above.
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+if (
+  process.env.NODE_ENV === "production" &&
+  (!process.env.HASH_PREIMAGE_PREDICATE_ADDRESS ||
+    process.env.HASH_PREIMAGE_PREDICATE_ADDRESS.toLowerCase() === ZERO_ADDRESS)
+) {
+  console.error(
+    "[fatal] HASH_PREIMAGE_PREDICATE_ADDRESS is unset or the zero address in " +
+    "production — refusing to boot. Accepting a paid USDC deal that carries a " +
+    "deliverable_hash auto-mints a gasless Class-A intent against this verifier; " +
+    "a zero/missing address mints an intent AgentPactEscrowV3 will always reject " +
+    "(unfundable, unclaimable). Set HASH_PREIMAGE_PREDICATE_ADDRESS in the " +
+    "Railway environment and redeploy."
+  );
+  process.exit(1);
+}
+
 // ── Trust Tier definitions (informational only — no deal limits) ─────
 const TRUST_TIERS = [
   { tier: "gold",   label: "Gold",   minDeals: 25, minReputation: 4.0, color: "#FFD700" },

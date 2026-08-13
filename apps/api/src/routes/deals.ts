@@ -13,6 +13,21 @@ async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, 
   `;
 }
 
+// DEFECT B fix (issue #90) — proposals never expire.
+// deals.expires_at already exists in the schema (migration 001) but nothing
+// ever wrote to it, so every proposal sat with expires_at = NULL forever and
+// the only way out of 'proposed' was a manual accept/counter/cancel. Give
+// every new proposal a concrete acceptance deadline so the sweeper added
+// below (POST /api/admin/expire-stale-proposals) has something to act on.
+// Configurable so ops can tune it without a redeploy; 14 days is a generous
+// default that will not surprise slow-moving negotiations.
+const DEAL_PROPOSAL_EXPIRY_DAYS = Number(process.env.DEAL_PROPOSAL_EXPIRY_DAYS ?? 14);
+
+// DEFECT C fix (issue #91) — shared with the defensive check at the mint site
+// below. index.ts has its own copy for the boot-time assertion (separate
+// module, no shared import surface for this one constant).
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
 async function createDealProposal(
   sql: Sql<Record<string, unknown>>,
   proposal: z.infer<typeof proposeDealSchema>,
@@ -32,12 +47,20 @@ async function createDealProposal(
   const deliverableHashBuf = deliverableHashHex
     ? Buffer.from((deliverableHashHex as string).slice(2), "hex")
     : null;
+  // DEFECT B fix (issue #90) — always set a concrete expires_at. Explicit
+  // override via the propose payload wins; otherwise default out
+  // DEAL_PROPOSAL_EXPIRY_DAYS from now. Never leave it NULL — a NULL expiry
+  // is exactly the state that let ≥200 deals sit in 'proposed' forever.
+  const explicitExpiresAt = (proposal as any).expiresAt ?? null;
+  const expiresAt = explicitExpiresAt
+    ? new Date(explicitExpiresAt)
+    : new Date(Date.now() + DEAL_PROPOSAL_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
   const result = await sql.begin(async (txn) => {
     const [deal] = await txn.unsafe(
       `
         INSERT INTO deals (
-          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days, is_free_tier, task_contract, max_revisions, parent_deal_id, deliverable_hash
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'USDC', $7, $8, $9, $10::jsonb, $11, $12, $13)
+          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days, is_free_tier, task_contract, max_revisions, parent_deal_id, deliverable_hash, expires_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'USDC', $7, $8, $9, $10::jsonb, $11, $12, $13, $14)
         RETURNING *
       `,
       [
@@ -54,6 +77,7 @@ async function createDealProposal(
         proposal.maxRevisions ?? null,
         (proposal as any).parentDealId ?? null,
         deliverableHashBuf,
+        expiresAt,
       ]
     );
 
@@ -486,44 +510,67 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
           //              verify() strictly decodes exactly one bytes32
           //  - seller_target: the seller's wallet (intent is targeted to them)
           //  - hash: retained for human/debug inspection
-          const HASH_PREIMAGE_PREDICATE =
-            (process.env.HASH_PREIMAGE_PREDICATE_ADDRESS as `0x${string}`) ??
-            "0x0000000000000000000000000000000000000000";
-          const encodedParams = encodeAbiParameters([{ type: "bytes32" }], [hashHex]);
-          const predicateParams = JSON.stringify({
-            hash: hashHex,
-            verifier: HASH_PREIMAGE_PREDICATE,
-            params: encodedParams,
-            seller_target: deal.seller_wallet,
-          });
-          // Class-A intents auto-expire 7 days out if never funded/claimed.
           //
-          // NOTE the `$3::text::jsonb` double cast — do NOT "simplify" it to
-          // `$3::jsonb`. `predicateParams` is a JS string from JSON.stringify,
-          // and a bare `::jsonb` lets Postgres infer $3's type FROM the cast,
-          // which diverges between a direct connection and a transaction-mode
-          // pooler (Supavisor / PgBouncer). Declaring text first, then casting,
-          // pins the parameter type so both paths agree. This exact double cast
-          // ran in production for 6 days before reaching git; our test DB is a
-          // DIRECT Postgres, so the pooler-only failure mode is invisible to the
-          // suite — the tests passing is not evidence that `::jsonb` is safe.
-          // See skill `postgres-transaction-pooler-compat`.
-          const [mintedIntent] = await txn.unsafe(
-            `
-              INSERT INTO intents (
-                on_chain_id, buyer_agent_id, seller_agent_id, seller_target_agent_id,
-                settlement_class, predicate_type, predicate_params,
-                max_price_usdc, status, expires_at, deal_id
-              ) VALUES (
-                NULL, $1, $2, $2,
-                'A', 'hash-preimage-v1', $3::text::jsonb,
-                $4, 'awaiting_funding', NOW() + INTERVAL '7 days', $5
-              )
-              RETURNING id
-            `,
-            [deal.buyer_agent_id, deal.seller_agent_id, predicateParams, negotiatedTotal, id]
-          );
-          await txn.unsafe("UPDATE deals SET intent_id = $1 WHERE id = $2", [mintedIntent.id, id]);
+          // DEFECT C fix (issue #91) — never silently default to the zero
+          // address. It used to be `?? "0x000…0"`, which minted an intent
+          // AgentPactEscrowV3.sol:280 will ALWAYS reject (unapproved verifier,
+          // checked before funds move) — confirmed live on two intents
+          // (3d786cd7-b49a-49f9-8048-61a42736e1c7, dec204fb-f359-489d-adfd-
+          // 6de04b8b761b), both expired with no on-chain id, parent deal stuck
+          // 'active'. Boot-time refuses to start in production without a real
+          // address (index.ts); this is the defense-in-depth twin for any
+          // environment that boots anyway (dev/test with NODE_ENV unset) —
+          // refuse to MINT, not to accept. Same shape as the intent-creation
+          // kill switch: the deal still accepts and degrades to manual
+          // settlement instead of accept failing or a dead intent being minted.
+          const rawPredicateAddress = process.env.HASH_PREIMAGE_PREDICATE_ADDRESS;
+          const isZeroOrMissingPredicate =
+            !rawPredicateAddress || rawPredicateAddress.toLowerCase() === ZERO_ADDRESS;
+          if (isZeroOrMissingPredicate) {
+            app.log.error(
+              { dealId: id },
+              "gasless auto-mint refused: HASH_PREIMAGE_PREDICATE_ADDRESS is unset or the zero address — " +
+                "minting would produce an intent AgentPactEscrowV3 can never fund. Deal accepted normally " +
+                "as a manual-settlement deal instead.",
+            );
+          } else {
+            const HASH_PREIMAGE_PREDICATE = rawPredicateAddress as `0x${string}`;
+            const encodedParams = encodeAbiParameters([{ type: "bytes32" }], [hashHex]);
+            const predicateParams = JSON.stringify({
+              hash: hashHex,
+              verifier: HASH_PREIMAGE_PREDICATE,
+              params: encodedParams,
+              seller_target: deal.seller_wallet,
+            });
+            // Class-A intents auto-expire 7 days out if never funded/claimed.
+            //
+            // NOTE the `$3::text::jsonb` double cast — do NOT "simplify" it to
+            // `$3::jsonb`. `predicateParams` is a JS string from JSON.stringify,
+            // and a bare `::jsonb` lets Postgres infer $3's type FROM the cast,
+            // which diverges between a direct connection and a transaction-mode
+            // pooler (Supavisor / PgBouncer). Declaring text first, then casting,
+            // pins the parameter type so both paths agree. This exact double cast
+            // ran in production for 6 days before reaching git; our test DB is a
+            // DIRECT Postgres, so the pooler-only failure mode is invisible to the
+            // suite — the tests passing is not evidence that `::jsonb` is safe.
+            // See skill `postgres-transaction-pooler-compat`.
+            const [mintedIntent] = await txn.unsafe(
+              `
+                INSERT INTO intents (
+                  on_chain_id, buyer_agent_id, seller_agent_id, seller_target_agent_id,
+                  settlement_class, predicate_type, predicate_params,
+                  max_price_usdc, status, expires_at, deal_id
+                ) VALUES (
+                  NULL, $1, $2, $2,
+                  'A', 'hash-preimage-v1', $3::text::jsonb,
+                  $4, 'awaiting_funding', NOW() + INTERVAL '7 days', $5
+                )
+                RETURNING id
+              `,
+              [deal.buyer_agent_id, deal.seller_agent_id, predicateParams, negotiatedTotal, id]
+            );
+            await txn.unsafe("UPDATE deals SET intent_id = $1 WHERE id = $2", [mintedIntent.id, id]);
+          }
         }
       });
     } catch (err) {
@@ -659,7 +706,29 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.get("/api/deals", async (request) => {
-    const q = request.query as { buyerAgentId?: string; sellerAgentId?: string; status?: string };
+    const q = request.query as {
+      buyerAgentId?: string;
+      sellerAgentId?: string;
+      status?: string;
+      limit?: string | number;
+      offset?: string | number;
+    };
+    // DEFECT A fix: limit/offset were parsed off the query but never wired
+    // into the SQL — every caller silently got the newest 200 rows regardless
+    // of what they asked for, making /api/deals un-auditable beyond the first
+    // page. Now actually applied, with a clamp so an unbounded `?limit=` can't
+    // turn this into an unpaginated full-table scan. Default (200) unchanged
+    // so existing callers who never passed limit see identical behavior.
+    const DEFAULT_LIMIT = 200;
+    const MAX_LIMIT = 200;
+    const requestedLimit = Number(q.limit);
+    const limit =
+      Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(Math.floor(requestedLimit), MAX_LIMIT)
+        : DEFAULT_LIMIT;
+    const requestedOffset = Number(q.offset);
+    const offset = Number.isFinite(requestedOffset) && requestedOffset > 0 ? Math.floor(requestedOffset) : 0;
+
     const rows = await sql`
       SELECT d.*,
         (SELECT json_agg(m ORDER BY m.idx) FROM milestones m WHERE m.deal_id = d.id) AS milestones
@@ -668,7 +737,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         AND (${q.sellerAgentId ?? null}::uuid IS NULL OR d.seller_agent_id = ${q.sellerAgentId ?? null}::uuid)
         AND (${q.status ?? null}::text IS NULL OR d.status = ${q.status ?? null}::text)
       ORDER BY d.created_at DESC
-      LIMIT 200
+      LIMIT ${limit}
+      OFFSET ${offset}
     `;
     return rows;
   });

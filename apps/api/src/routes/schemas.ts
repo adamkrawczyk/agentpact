@@ -135,6 +135,10 @@ export const proposeDealSchema = z.object({
   maxRevisions: z.number().int().min(1).max(20).optional(),
   task_contract: taskContractSchema.optional(),
   parentDealId: z.string().uuid().optional(),
+  // DEFECT B fix (issue #90) — explicit acceptance-deadline override. Optional;
+  // when omitted, createDealProposal() applies DEAL_PROPOSAL_EXPIRY_DAYS from
+  // the current time so every proposal always has a concrete expiry.
+  expiresAt: z.string().datetime().optional(),
   // Gasless (Class-A) commitment: keccak256 of the deliverable preimage, as a
   // 0x-prefixed 32-byte hex string. When present on a paid USDC deal, accepting
   // the deal auto-mints the Class-A intent that the relayer settles gaslessly.

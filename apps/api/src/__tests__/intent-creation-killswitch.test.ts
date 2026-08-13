@@ -103,6 +103,11 @@ async function seedProposedDeal() {
 describe("INTENT_CREATION_DISABLED — settlement-protocol emergency brake", () => {
   beforeEach(async () => {
     setBrake(undefined);
+    // DEFECT C fix (issue #91) — the accept-deal auto-mint refuses to mint
+    // when HASH_PREIMAGE_PREDICATE_ADDRESS is unset/zero. This suite's
+    // "mints normally" negative controls need a real predicate address
+    // configured to keep exercising the mint path.
+    process.env.HASH_PREIMAGE_PREDICATE_ADDRESS = "0x542535b7804E54877E5cd45695a3D6d50182D976";
     await cleanDatabase();
   });
 

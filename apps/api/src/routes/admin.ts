@@ -382,6 +382,154 @@ export default async function adminRoutes(app: FastifyInstance) {
     return { processed: results.length, results };
   });
 
+  // DEFECT B fix (GitHub issue #90) — proposals never expire.
+  // Verified live: ≥200 deals sat in 'proposed' (oldest since 2026-04-27); 112
+  // of 138 sampled had no expires_at at all, and 26 were already past their
+  // deadline yet still 'proposed'. The only transitions out of 'proposed' were
+  // accept/counter/cancel — nothing swept the timeout direction. This mirrors
+  // /api/admin/auto-complete-timeouts exactly: same auth (checkAdminKey), same
+  // response shape ({ processed, results }), same per-row try/catch so one bad
+  // row can't abort the batch.
+  //
+  // Deliberately does NOT auto-accept on the seller's behalf — AGENTS.md /
+  // product doctrine rules that out. A stale proposal just dies (cancelled),
+  // same terminal state a manual cancel produces, so nothing downstream (web
+  // UI status rendering, the deals_status_check CHECK constraint) needs to
+  // learn a new status value.
+  app.post("/api/admin/expire-stale-proposals", async (request, reply) => {
+    if (!checkAdminKey(request, reply)) return;
+
+    const staleProposals = await sql`
+      SELECT id, buyer_agent_id, seller_agent_id
+      FROM deals
+      WHERE status = 'proposed'
+        AND expires_at IS NOT NULL
+        AND expires_at < NOW()
+    `;
+
+    const results = [];
+    for (const deal of staleProposals) {
+      try {
+        const [updated] = await sql`
+          UPDATE deals SET status = 'cancelled', updated_at = NOW()
+          WHERE id = ${deal.id} AND status = 'proposed'
+          RETURNING id
+        `;
+        if (!updated) {
+          // Lost a race with a manual accept/counter/cancel between SELECT and
+          // UPDATE — leave it alone, it is no longer stale.
+          results.push({ dealId: deal.id, expired: false, reason: "status changed concurrently" });
+          continue;
+        }
+        await sql`UPDATE milestones SET status = 'cancelled' WHERE deal_id = ${deal.id} AND status = 'pending'`;
+        await sql`
+          INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+          VALUES (${deal.id}, ${deal.buyer_agent_id}, 'cancel', ${JSON.stringify({ reason: "acceptance_deadline_expired", automated: true })}::jsonb)
+        `;
+        notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.cancelled", {
+          dealId: String(deal.id),
+          cancelledBy: null,
+          reason: "acceptance_deadline_expired",
+          automated: true,
+        });
+        results.push({ dealId: deal.id, expired: true });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        results.push({ dealId: deal.id, expired: false, error: message });
+      }
+    }
+
+    return { processed: results.length, results };
+  });
+
+  // DEFECT D fix — intent/deal state divergence, no reconciliation.
+  // Verified live: of 14 intent-backed deals, ALL are still 'active' — 6 have
+  // EXPIRED intents (predicate_type hash-preimage-v1, Class A), 3
+  // awaiting_funding, 2 reveal_ready, 3 open. The relayer's autoclose-sweeper
+  // (apps/relayer-daemon/src/autoclose-sweeper.ts) only reconciles the SUCCESS
+  // direction — it flips deals.status = 'completed' after a successful CLAIM.
+  // Nothing reconciles the FAILURE direction: an intent whose expires_at has
+  // passed without ever being claimed leaves its parent deal wedged 'active'
+  // forever, even though the settlement path is dead.
+  //
+  // WHERE this lives (deliberate choice, not the relayer):
+  //   The relayer's sweepers are pure functions over `sql` + a live `chain`
+  //   client — every existing sweeper in autoclose-sweeper.ts either reads
+  //   intents to BROADCAST a transaction (FUND, CLAIM) or, as a side effect of
+  //   a successful chain call, writes `deals.status`. Recognizing an EXPIRED
+  //   intent needs no chain call at all — it is a pure clock comparison against
+  //   `intents.expires_at`, exactly the shape of the existing
+  //   auto-complete-timeouts / expire-stale-proposals admin sweepers (also a
+  //   clock comparison against a deals/intents column, also no chain call).
+  //   Putting a chain-free reconciliation in the relayer would be the odd one
+  //   out there; putting it here keeps every "walk a deadline column, flip a
+  //   status, notify" sweeper in one file with one auth pattern.
+  //
+  // Mirrors auto-complete-timeouts: same auth (checkAdminKey), same response
+  // shape ({ processed, results }), same per-row try/catch.
+  //
+  // Note: intents.status has no CHECK constraint (migration 039_intents.sql —
+  // `status TEXT NOT NULL DEFAULT 'open'`, unconstrained), so introducing
+  // 'expired' here does not violate any DB constraint. deals.status='cancelled'
+  // is an existing, already-reachable value (the manual /api/deals/:id/cancel
+  // route already permits proposed/countered/accepted/active/funded/delivered/
+  // disputed → cancelled), so the web UI's generic status rendering needs no
+  // new case, and this reuses the exact terminal state a human cancel produces.
+  app.post("/api/admin/reconcile-expired-intents", async (request, reply) => {
+    if (!checkAdminKey(request, reply)) return;
+
+    const staleIntents = await sql`
+      SELECT i.id AS intent_id, i.status AS intent_status, i.deal_id,
+             d.buyer_agent_id, d.seller_agent_id, d.status AS deal_status
+      FROM intents i
+      JOIN deals d ON d.id = i.deal_id
+      WHERE i.deal_id IS NOT NULL
+        AND i.status NOT IN ('claimed', 'stream_cancelled', 'expired')
+        AND i.expires_at < NOW()
+        AND d.status NOT IN ('completed', 'cancelled')
+    `;
+
+    const results = [];
+    for (const row of staleIntents) {
+      try {
+        const [updatedIntent] = await sql`
+          UPDATE intents SET status = 'expired', updated_at = NOW()
+          WHERE id = ${row.intent_id} AND status = ${row.intent_status}
+          RETURNING id
+        `;
+        if (!updatedIntent) {
+          results.push({ intentId: row.intent_id, dealId: row.deal_id, reconciled: false, reason: "intent status changed concurrently" });
+          continue;
+        }
+        const [updatedDeal] = await sql`
+          UPDATE deals SET status = 'cancelled', updated_at = NOW()
+          WHERE id = ${row.deal_id} AND status = ${row.deal_status}
+          RETURNING id
+        `;
+        if (!updatedDeal) {
+          results.push({ intentId: row.intent_id, dealId: row.deal_id, reconciled: false, reason: "deal status changed concurrently" });
+          continue;
+        }
+        await sql`
+          INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+          VALUES (${row.deal_id}, ${row.buyer_agent_id}, 'cancel', ${JSON.stringify({ reason: "settlement_intent_expired_unclaimed", automated: true, intentId: row.intent_id })}::jsonb)
+        `;
+        notifyAgents(sql, [row.buyer_agent_id, row.seller_agent_id], "deal.cancelled", {
+          dealId: String(row.deal_id),
+          cancelledBy: null,
+          reason: "settlement_intent_expired_unclaimed",
+          automated: true,
+        });
+        results.push({ intentId: row.intent_id, dealId: row.deal_id, reconciled: true });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        results.push({ intentId: row.intent_id, dealId: row.deal_id, reconciled: false, error: message });
+      }
+    }
+
+    return { processed: results.length, results };
+  });
+
   app.post("/api/admin/force-close", async (request, reply) => {
     if (!checkAdminKey(request, reply)) return;
 
