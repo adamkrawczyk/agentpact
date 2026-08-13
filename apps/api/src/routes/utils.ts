@@ -255,10 +255,41 @@ export function normalizeTags(tags: unknown): string[] {
     : [];
 }
 
+// ── JSONB array serialization guard ─────────────────────────────────
+// postgres.js double-encodes JSONB array columns when a caller manually
+// JSON.stringify()s the value before binding it with an explicit ::jsonb
+// cast: the driver's own jsonb serializer (inferred from the cast) then
+// JSON.stringify()s the ALREADY-stringified value a second time, so the
+// column ends up storing (and every SELECT * echoing back) the JSON
+// scalar string "[]" instead of the JSON array []. Verified live on
+// GET /api/needs and GET /api/offers — acceptance_criteria/proofs_json
+// came back as `typeof === "string"` to every SDK/agent consumer, forcing
+// them to double-parse. The root-cause write-side fix (bind the raw JS
+// array/object with ::jsonb, no manual JSON.stringify) stops NEW rows
+// from corrupting, but existing rows already hold the stringified value —
+// there is no schema/data migration in this change, so every read path
+// that can return one of these columns MUST coerce it back to a real
+// array here, defensively, regardless of whether the stored value is
+// (legacy-buggy) a string or (correct) already an array/null.
+export function coerceJsonArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (value === null || value === undefined) return [];
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 export function enrichOfferRow<T extends Record<string, unknown>>(offer: T): T & {
   tags: string[];
   is_free_tier: boolean;
   pricing_model: "paid" | "reputation-only";
+  proofs_json: unknown[];
 } {
   const isFreeTier = isZeroPrice(offer.base_price);
   // Parse JSONB location if it's a string (postgres.js test env)
@@ -270,6 +301,18 @@ export function enrichOfferRow<T extends Record<string, unknown>>(offer: T): T &
     tags: isFreeTier ? withReputationOnlyTag(offer.tags) : normalizeTags(offer.tags),
     is_free_tier: isFreeTier,
     pricing_model: isFreeTier ? "reputation-only" : "paid",
+    proofs_json: coerceJsonArray(offer.proofs_json),
+  };
+}
+
+// Same normalization for needs — acceptance_criteria is stored JSONB and
+// suffers the identical double-encode class of bug described above.
+export function enrichNeedRow<T extends Record<string, unknown>>(need: T): T & {
+  acceptance_criteria: unknown[];
+} {
+  return {
+    ...need,
+    acceptance_criteria: coerceJsonArray(need.acceptance_criteria),
   };
 }
 

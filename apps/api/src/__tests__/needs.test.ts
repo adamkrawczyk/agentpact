@@ -67,4 +67,85 @@ describe("Needs API", () => {
     const archived = JSON.parse(archiveRes.body) as { status: string };
     expect(archived.status).toBe("archived");
   });
+
+  // Regression: acceptance_criteria is stored JSONB. postgres.js double-encodes
+  // a manually JSON.stringify()'d value bound with an explicit ::jsonb cast,
+  // so the column (and every read of it) held the STRING "[]" instead of the
+  // array []. Every consumer — SDKs, MCP clients, raw HTTP callers — must get
+  // a real JSON array back, empty-case included.
+  describe("acceptance_criteria is a real JSON array (not a stringified string)", () => {
+    it("POST /api/needs returns acceptance_criteria as a list, empty-array case", async () => {
+      const { app } = await createTestApp();
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/needs",
+        headers: authHeaders,
+        payload: generateTestNeed(agentId) // acceptanceCriteria: []
+      });
+
+      expect(response.statusCode).toBe(201);
+      const body = JSON.parse(response.body) as { acceptance_criteria: unknown };
+      expect(Array.isArray(body.acceptance_criteria)).toBe(true);
+      expect(body.acceptance_criteria).toEqual([]);
+    });
+
+    it("POST /api/needs returns acceptance_criteria as a list, non-empty case", async () => {
+      const { app } = await createTestApp();
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/needs",
+        headers: authHeaders,
+        payload: { ...generateTestNeed(agentId), acceptanceCriteria: ["Deliver a JSON report", "Include a summary"] }
+      });
+
+      expect(response.statusCode).toBe(201);
+      const body = JSON.parse(response.body) as { acceptance_criteria: unknown };
+      expect(Array.isArray(body.acceptance_criteria)).toBe(true);
+      expect(body.acceptance_criteria).toEqual(["Deliver a JSON report", "Include a summary"]);
+    });
+
+    it("GET /api/needs returns acceptance_criteria as a list for every row", async () => {
+      const { app } = await createTestApp();
+      await app.inject({
+        method: "POST",
+        url: "/api/needs",
+        headers: authHeaders,
+        payload: generateTestNeed(agentId)
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/needs",
+        headers: authHeaders
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as Array<{ acceptance_criteria: unknown }>;
+      expect(body.length).toBeGreaterThanOrEqual(1);
+      for (const need of body) {
+        expect(Array.isArray(need.acceptance_criteria)).toBe(true);
+      }
+    });
+
+    it("GET /api/needs/:id returns acceptance_criteria as a list", async () => {
+      const { app } = await createTestApp();
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/needs",
+        headers: authHeaders,
+        payload: generateTestNeed(agentId)
+      });
+      const { id } = JSON.parse(createRes.body) as { id: string };
+
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/needs/${id}`,
+        headers: authHeaders
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as { acceptance_criteria: unknown };
+      expect(Array.isArray(body.acceptance_criteria)).toBe(true);
+    });
+  });
 });
