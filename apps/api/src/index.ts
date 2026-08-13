@@ -1053,70 +1053,13 @@ async function enforceDealDelta(dealId: string, negotiatedTotal: number): Promis
   }
 }
 
-async function releaseMilestonePayment(milestoneId: string): Promise<void> {
-  const [payment] = await sql`
-    SELECT pi.*, d.seller_agent_id, d.buyer_agent_id, d.id AS deal_id
-    FROM payment_intents pi
-    JOIN milestones m ON m.id = pi.milestone_id
-    JOIN deals d ON d.id = m.deal_id
-    WHERE pi.milestone_id = ${milestoneId} AND pi.status = 'funded'
-    ORDER BY pi.created_at DESC LIMIT 1
-  `;
-
-  if (!payment) return;
-
-  const gross = toNumber(payment.amount);
-  const sellerAmount = Number((gross * (100 - PLATFORM_FEE_PCT) / 100).toFixed(6));
-  const feeAmount = Number((gross - sellerAmount).toFixed(6));
-
-  await sql.begin(async (txn) => {
-    await txn.unsafe(
-      `
-        UPDATE payment_intents
-        SET status = 'released', released_at = NOW(), updated_at = NOW(), tx_hash = $1
-        WHERE id = $2
-      `,
-      [`sim_release_${randomUUID().slice(0, 8)}`, payment.id]
-    );
-    await txn.unsafe(
-      `
-        UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = $1
-      `,
-      [milestoneId]
-    );
-    await txn.unsafe(
-      `
-        UPDATE deals SET status = 'completed', updated_at = NOW()
-        WHERE id = (SELECT deal_id FROM milestones WHERE id = $1)
-      `,
-      [milestoneId]
-    );
-    // Auto-archive the associated offer
-    await txn.unsafe(
-      `
-        UPDATE offers SET status = 'archived', updated_at = NOW()
-        WHERE id = (SELECT offer_id FROM deals WHERE id = (SELECT deal_id FROM milestones WHERE id = $1))
-          AND status = 'active'
-      `,
-      [milestoneId]
-    );
-    await txn.unsafe(
-      `
-        INSERT INTO audit_log (action, object_type, object_id, payload_json)
-        VALUES ('payment.release', 'milestone', $1, $2::jsonb)
-      `,
-      [milestoneId, JSON.stringify({ gross, sellerAmount, feeAmount, platformWallet: PLATFORM_WALLET })]
-    );
-  });
-
-  notifyAgents(sql, [payment.seller_agent_id], "payment.released", {
-    dealId: payment.deal_id,
-    milestoneId,
-    gross,
-    sellerAmount,
-    feeAmount,
-  });
-}
+// settlement-integrity dedup: the divergent local copy of
+// releaseMilestonePayment() that lived here (writing `sim_release_*` hashes
+// unconditionally, with no isOnChainMode() gate) has been deleted. Every
+// caller — including completeDealMilestones() below — now uses the single
+// shared implementation imported as `_releaseMilestonePayment` from
+// ./shared/deal-helpers.js, which refuses to fabricate a release for a
+// funded on-chain USDC escrow intent unless a real release tx happened.
 
 async function completeDealMilestones(
   dealId: string,
@@ -1292,8 +1235,25 @@ async function completeDealMilestones(
     }
   }
 
+  // settlement-integrity dedup: use the single shared implementation (which
+  // refuses to fabricate sim_release_* hashes for on-chain-funded escrow
+  // intents) instead of a local divergent copy. Mirror the same defensive
+  // handling as shared/deal-helpers.ts's completeDealMilestones(): never
+  // force-complete the deal if a milestone release was refused.
+  let anyReleaseRefused = false;
   for (const milestone of milestones) {
-    await releaseMilestonePayment(String(milestone.id));
+    const releaseResult = await _releaseMilestonePayment(String(milestone.id));
+    if (releaseResult.action === "buyer_sign_required") {
+      anyReleaseRefused = true;
+    }
+  }
+
+  if (anyReleaseRefused) {
+    console.warn(
+      `[completeDealMilestones] settlement_pending: deal ${dealId} had a milestone refuse release (buyer_sign_required) in the fall-through tail. Holding, not force-completing.`,
+    );
+    await sql`UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
+    return { mode, action: "settlement_pending" };
   }
 
   // Ensure deal and milestones are always transitioned to completed/accepted,

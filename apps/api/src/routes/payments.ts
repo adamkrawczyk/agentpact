@@ -35,7 +35,9 @@ export async function registerRoutes(
   app: FastifyInstance,
   sql: Sql<Record<string, unknown>>,
   deps: Deps,
-  releaseMilestonePayment: (milestoneId: string) => Promise<void>,
+  releaseMilestonePayment: (
+    milestoneId: string,
+  ) => Promise<{ mode: "simulation" | "on-chain"; action: "released" | "buyer_sign_required"; paymentIntentId?: string; txHash?: string }>,
 ): Promise<void> {
   const { notifyAgents } = deps;
 
@@ -473,8 +475,21 @@ export async function registerRoutes(
       });
     }
 
-    await releaseMilestonePayment(body.milestoneId);
-    return { ok: true, mode };
+    const releaseResult = await releaseMilestonePayment(body.milestoneId);
+    if (releaseResult.action === "buyer_sign_required") {
+      // settlement-integrity: shared helper refused to fabricate a release —
+      // there is a funded on-chain USDC escrow intent with no real release tx.
+      // Tell the truth instead of returning {ok:true}. Response shape is a
+      // breaking change from the prior unconditional {ok:true, mode} for this
+      // (previously buggy) branch — see PR body.
+      return reply.code(200).send({
+        ok: false,
+        mode: releaseResult.mode,
+        action: "buyer_sign_required",
+        message: "Milestone has a funded on-chain USDC escrow intent — release requires a real on-chain transaction. No settlement was recorded.",
+      });
+    }
+    return { ok: true, mode: releaseResult.mode };
   });
 
   app.post("/api/payments/refund", async (request, reply) => {
