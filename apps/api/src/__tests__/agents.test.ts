@@ -12,32 +12,38 @@ describe("Agents API", () => {
   });
 
   describe("POST /api/agents", () => {
-    it("should create a new agent", async () => {
+    it("should update the caller's canonical profile in place (not create a detached row)", async () => {
       const { app } = await createTestApp();
+      const agentId = randomUUID();
+      const headers = await getAuthHeadersForAgent(agentId); // registers canonical row id=agentId
       const agent = generateTestAgent();
 
       const response = await app.inject({
         method: "POST",
         url: "/api/agents",
-        headers: authHeaders,
+        headers,
         payload: agent
       });
 
-      expect(response.statusCode).toBe(201);
+      // Update-in-place of the auth-registered row → 200, and the returned id
+      // MUST equal the registered agentId (the core issue #75 regression check).
+      expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body) as { id: string; handle: string; display_name: string };
-      expect(body.id).toBeTruthy();
+      expect(body.id).toBe(agentId);
       expect(body.handle).toBe(agent.handle);
       expect(body.display_name).toBe(agent.displayName);
     });
 
-    it("should update duplicate handle with ON CONFLICT", async () => {
+    it("should update the same canonical row on repeat calls (same id, latest display name)", async () => {
       const { app } = await createTestApp();
+      const agentId = randomUUID();
+      const headers = await getAuthHeadersForAgent(agentId);
       const agent = generateTestAgent();
 
       const first = await app.inject({
         method: "POST",
         url: "/api/agents",
-        headers: authHeaders,
+        headers,
         payload: agent
       });
       const firstBody = JSON.parse(first.body) as { id: string };
@@ -45,14 +51,38 @@ describe("Agents API", () => {
       const second = await app.inject({
         method: "POST",
         url: "/api/agents",
-        headers: authHeaders,
+        headers,
         payload: { ...agent, displayName: "Updated Agent Name" }
       });
 
-      expect(second.statusCode).toBe(201);
+      expect(second.statusCode).toBe(200);
       const secondBody = JSON.parse(second.body) as { id: string; display_name: string };
       expect(secondBody.id).toBe(firstBody.id);
+      expect(secondBody.id).toBe(agentId);
       expect(secondBody.display_name).toBe("Updated Agent Name");
+    });
+
+    it("should reject a handle already owned by a different agent (409)", async () => {
+      const { app } = await createTestApp();
+      const headersA = await getAuthHeadersForAgent(randomUUID());
+      const headersB = await getAuthHeadersForAgent(randomUUID());
+      const handle = `taken-${randomUUID().slice(0, 8)}`;
+
+      const first = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers: headersA,
+        payload: { handle, displayName: "Agent A" }
+      });
+      expect(first.statusCode).toBe(200);
+
+      const clash = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers: headersB,
+        payload: { handle, displayName: "Agent B" }
+      });
+      expect(clash.statusCode).toBe(409);
     });
 
     it("should validate required fields", async () => {
@@ -67,14 +97,17 @@ describe("Agents API", () => {
       expect(response.statusCode).toBe(400);
     });
 
-    it("should create a new agent without wallet details", async () => {
+    it("should update the caller's profile without wallet details", async () => {
       const { app } = await createTestApp();
+      const agentId = randomUUID();
+      // Register a WALLET-LESS canonical agent so no wallet is pre-set.
+      const headers = await getAuthHeadersForAgent(agentId, { walletAddress: null });
       const agent = generateTestAgent();
 
       const response = await app.inject({
         method: "POST",
         url: "/api/agents",
-        headers: authHeaders,
+        headers,
         payload: {
           handle: agent.handle,
           displayName: agent.displayName,
@@ -82,13 +115,13 @@ describe("Agents API", () => {
         }
       });
 
-      expect(response.statusCode).toBe(201);
+      expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body) as {
         id: string;
         owner_wallet_address: string | null;
         wallet_provider: string | null;
       };
-      expect(body.id).toBeTruthy();
+      expect(body.id).toBe(agentId);
       expect(body.owner_wallet_address).toBeNull();
       expect(body.wallet_provider).toBeNull();
     });
@@ -98,9 +131,9 @@ describe("Agents API", () => {
     it("should allow an agent to set its own wallet", async () => {
       const { app } = await createTestApp();
       const agentId = randomUUID();
-      const agentHeaders = await getAuthHeadersForAgent(agentId);
+      const agentHeaders = await getAuthHeadersForAgent(agentId, { walletAddress: null });
 
-      // Create agent via auth register (already done in getAuthHeadersForAgent), then set handle
+      // Set the branded handle on the canonical row (id = agentId post-fix).
       await app.inject({
         method: "POST",
         url: "/api/agents",
@@ -111,8 +144,8 @@ describe("Agents API", () => {
         }
       });
 
-      // The agent id from auth register is agentId, but POST /api/agents creates a DIFFERENT agent
-      // We need to PATCH the agent created by auth register
+      // The canonical profile IS the registered agentId (issue #75 fixed), so we
+      // PATCH that same id directly.
       const response = await app.inject({
         method: "PATCH",
         url: `/api/agents/${agentId}/wallet`,
@@ -134,21 +167,22 @@ describe("Agents API", () => {
 
     it("should reject wallet updates for another agent", async () => {
       const { app } = await createTestApp();
-      const createRes = await app.inject({
+      const ownerId = randomUUID();
+      const ownerHeaders = await getAuthHeadersForAgent(ownerId);
+      await app.inject({
         method: "POST",
         url: "/api/agents",
-        headers: authHeaders,
+        headers: ownerHeaders,
         payload: {
           handle: `other-wallet-agent-${randomUUID().slice(0, 8)}`,
           displayName: "Other Wallet Agent"
         }
       });
-      const { id } = JSON.parse(createRes.body) as { id: string };
       const otherHeaders = await getAuthHeadersForAgent("550e8400-e29b-41d4-a716-446655440123");
 
       const response = await app.inject({
         method: "PATCH",
-        url: `/api/agents/${id}/wallet`,
+        url: `/api/agents/${ownerId}/wallet`,
         headers: otherHeaders,
         payload: {
           walletAddress: "0x1234567890123456789012345678901234567890",

@@ -93,6 +93,13 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       throw e;
     }
 
+    // Auth-bind to the caller: this route updates the CANONICAL agent row that
+    // /api/auth/register created with id = agentId. Without this, the old
+    // ON CONFLICT (handle) upsert spawned a SECOND detached row for any branded
+    // handle, orphaning the seller's offers on the generated profile (issue #75).
+    const requesterAgentId = getRequesterAgentId(request, reply);
+    if (!requesterAgentId) return;
+
     const ownerWalletAddress = body.ownerWalletAddress ?? null;
     const walletProvider = body.walletProvider ?? null;
 
@@ -113,18 +120,33 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       ? ownerWalletAddress.toLowerCase() === platformOwnerWallet.toLowerCase()
       : false;
 
+    // Handle uniqueness stays enforced, but we no longer silently upsert into
+    // another agent's row: reject if the requested handle already belongs to a
+    // DIFFERENT agent. (ON CONFLICT (handle) is not usable once the write target
+    // is keyed on id, so we pre-check explicitly.)
+    const [handleOwner] = await sql`SELECT id FROM agents WHERE handle = ${body.handle}`;
+    if (handleOwner && handleOwner.id !== requesterAgentId) {
+      return reply.code(409).send({ error: "Handle already taken by another agent" });
+    }
+
+    // Update the canonical registered agent (id = requesterAgentId) in place.
+    // COALESCE on wallet fields so a create_agent call without wallet args does
+    // not nuke a wallet previously set via PATCH /api/agents/:id/wallet.
     const [agent] = await sql`
-      INSERT INTO agents (handle, display_name, owner_wallet_address, wallet_provider, preferred_chain, auto_buy_enabled, is_internal)
-      VALUES (${body.handle}, ${body.displayName}, ${ownerWalletAddress}, ${walletProvider}, ${resolvedChain}, ${body.autoBuyEnabled}, ${isInternal})
-      ON CONFLICT (handle) DO UPDATE SET
-        display_name = EXCLUDED.display_name,
-        owner_wallet_address = EXCLUDED.owner_wallet_address,
-        wallet_provider = EXCLUDED.wallet_provider,
-        preferred_chain = EXCLUDED.preferred_chain,
-        auto_buy_enabled = EXCLUDED.auto_buy_enabled
+      UPDATE agents
+      SET
+        handle = ${body.handle},
+        display_name = ${body.displayName},
+        owner_wallet_address = COALESCE(${ownerWalletAddress}, owner_wallet_address),
+        wallet_provider = COALESCE(${walletProvider}, wallet_provider),
+        preferred_chain = ${resolvedChain},
+        auto_buy_enabled = ${body.autoBuyEnabled},
+        is_internal = ${isInternal} OR is_internal
+      WHERE id = ${requesterAgentId}
       RETURNING *
     `;
-    return reply.code(201).send(agent);
+    if (!agent) return reply.code(404).send({ error: "Registered agent not found — call agentpact.register first" });
+    return reply.code(200).send(agent);
   });
 
   app.patch("/api/agents/:id/wallet", async (request, reply) => {

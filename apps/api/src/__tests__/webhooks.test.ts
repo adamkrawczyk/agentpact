@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import { cleanDatabase, createTestApp, generateTestAgent, generateTestNeed, generateTestOffer, getAuthHeaders, getAuthHeadersForAgent } from "./helpers/testApp.js";
 
 
@@ -45,24 +46,26 @@ describe("Webhook events", () => {
   it("delivers provided/verified/revoked webhook events", async () => {
     const { app } = await createTestApp();
 
+    const buyerId = randomUUID();
+    const sellerId = randomUUID();
+    const buyerHeaders = await getAuthHeadersForAgent(buyerId);
+    const sellerHeaders = await getAuthHeadersForAgent(sellerId);
+
     const buyerRes = await app.inject({
       method: "POST",
       url: "/api/agents",
-      headers: await getAuthHeaders(),
+      headers: buyerHeaders,
       payload: generateTestAgent(),
     });
-    const buyerId = (JSON.parse(buyerRes.body) as { id: string }).id;
+    expect(buyerRes.statusCode).toBe(200);
 
     const sellerRes = await app.inject({
       method: "POST",
       url: "/api/agents",
-      headers: await getAuthHeaders(),
+      headers: sellerHeaders,
       payload: generateTestAgent(),
     });
-    const sellerId = (JSON.parse(sellerRes.body) as { id: string }).id;
-
-    const buyerHeaders = await getAuthHeadersForAgent(buyerId);
-    const sellerHeaders = await getAuthHeadersForAgent(sellerId);
+    expect(sellerRes.statusCode).toBe(200);
 
     const buyerWebhookRes = await app.inject({
       method: "POST",

@@ -1,5 +1,22 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import { cleanDatabase, createTestApp, generateTestAgent, generateTestNeed, generateTestOffer, getAuthHeaders, getAuthHeadersForAgent } from "./helpers/testApp.js";
+
+// Register a distinct canonical agent and set its branded profile in one step.
+// Post issue-#75 fix, POST /api/agents updates the CALLER's canonical row (keyed
+// on the authenticated agent id), so each distinct agent needs its own identity.
+async function makeAgent(app: any, overrides = {}) {
+  const id = randomUUID();
+  const headers = await getAuthHeadersForAgent(id);
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/agents",
+    headers,
+    payload: generateTestAgent(overrides),
+  });
+  expect(res.statusCode).toBe(200);
+  return { id, headers };
+}
 
 
 describe("Concierge Relay", () => {
@@ -14,14 +31,7 @@ describe("Concierge Relay", () => {
       const { app } = await createTestApp();
 
       // Create an agent
-      const agentRes = await app.inject({
-        method: "POST",
-        url: "/api/agents",
-        headers: await getAuthHeaders(),
-        payload: generateTestAgent(),
-      });
-      expect(agentRes.statusCode).toBe(201);
-      const agentId = (JSON.parse(agentRes.body) as { id: string }).id;
+      await makeAgent(app);
 
       // Queue welcome messages
       const res = await app.inject({
@@ -36,13 +46,7 @@ describe("Concierge Relay", () => {
     it("is idempotent — won't double-queue welcome for same agent", async () => {
       const { app } = await createTestApp();
 
-      const agentRes = await app.inject({
-        method: "POST",
-        url: "/api/agents",
-        headers: await getAuthHeaders(),
-        payload: generateTestAgent(),
-      });
-      expect(agentRes.statusCode).toBe(201);
+      await makeAgent(app);
 
       // First queue
       const res1 = await app.inject({
@@ -66,17 +70,8 @@ describe("Concierge Relay", () => {
     it("queues first-transaction suggestions for agents with offers/needs but no deals", async () => {
       const { app, sql } = await createTestApp();
 
-      // Create agent
-      const agentRes = await app.inject({
-        method: "POST",
-        url: "/api/agents",
-        headers: await getAuthHeaders(),
-        payload: generateTestAgent(),
-      });
-      const agentId = (JSON.parse(agentRes.body) as { id: string }).id;
-
-      // Create an offer for this agent
-      const agentHeaders = await getAuthHeadersForAgent(agentId);
+      // Create agent + an offer for it
+      const { id: agentId, headers: agentHeaders } = await makeAgent(app);
       await app.inject({
         method: "POST",
         url: "/api/offers",
@@ -112,12 +107,7 @@ describe("Concierge Relay", () => {
       const { app } = await createTestApp();
 
       // Create agent and queue a welcome
-      const agentRes = await app.inject({
-        method: "POST",
-        url: "/api/agents",
-        headers: await getAuthHeaders(),
-        payload: generateTestAgent(),
-      });
+      await makeAgent(app);
       await app.inject({
         method: "POST",
         url: "/api/concierge/queue-welcome",
@@ -138,12 +128,7 @@ describe("Concierge Relay", () => {
     it("marks messages as sent after relay run", async () => {
       const { app, sql } = await createTestApp();
 
-      const agentRes = await app.inject({
-        method: "POST",
-        url: "/api/agents",
-        headers: await getAuthHeaders(),
-        payload: generateTestAgent(),
-      });
+      await makeAgent(app);
       await app.inject({
         method: "POST",
         url: "/api/concierge/queue-welcome",
@@ -187,13 +172,7 @@ describe("Concierge Relay", () => {
     it("returns concierge messages for authenticated agent", async () => {
       const { app } = await createTestApp();
 
-      const agentRes = await app.inject({
-        method: "POST",
-        url: "/api/agents",
-        headers: await getAuthHeaders(),
-        payload: generateTestAgent(),
-      });
-      const agentId = (JSON.parse(agentRes.body) as { id: string }).id;
+      const { id: agentId, headers: agentHeaders } = await makeAgent(app);
 
       // Queue a welcome message
       await app.inject({
@@ -202,7 +181,6 @@ describe("Concierge Relay", () => {
       });
 
       // Get messages as this agent
-      const agentHeaders = await getAuthHeadersForAgent(agentId);
       const res = await app.inject({
         method: "GET",
         url: "/api/concierge/messages",
@@ -245,23 +223,9 @@ describe("Concierge Relay", () => {
     it("full welcome flow: queue, relay, check status", async () => {
       const { app, sql } = await createTestApp();
 
-      // 1. Create agents
-      const agent1Res = await app.inject({
-        method: "POST",
-        url: "/api/agents",
-        headers: await getAuthHeaders(),
-        payload: generateTestAgent(),
-      });
-      const agent1Id = (JSON.parse(agent1Res.body) as { id: string }).id;
-
-      const agent2Res = await app.inject({
-        method: "POST",
-        url: "/api/agents",
-        headers: await getAuthHeadersForAgent(
-          (JSON.parse(agent1Res.body) as { id: string }).id
-        ),
-        payload: generateTestAgent(),
-      });
+      // 1. Create agents (two DISTINCT canonical agents)
+      const { id: agent1Id } = await makeAgent(app);
+      await makeAgent(app);
 
       // 2. Queue welcome messages
       const queueRes = await app.inject({
@@ -309,30 +273,13 @@ describe("Concierge Relay", () => {
     it("queues all message types and delivers them in one call", async () => {
       const { app, sql } = await createTestApp();
 
-      // Create agents
-      const headers = await getAuthHeaders();
-
+      // Create agents (two DISTINCT canonical agents)
       // Agent 1: brand new, no offers/needs -> gets welcome + activation-nudge
-      const agent1Res = await app.inject({
-        method: "POST",
-        url: "/api/agents",
-        headers,
-        payload: generateTestAgent({ handle: "newbie1" }),
-      });
-      expect(agent1Res.statusCode).toBe(201);
-      const agent1Id = (JSON.parse(agent1Res.body) as { id: string }).id;
+      await makeAgent(app, { handle: "newbie1" });
 
       // Agent 2: has an offer but no deals -> gets first-transaction
-      const agent2Res = await app.inject({
-        method: "POST",
-        url: "/api/agents",
-        headers,
-        payload: generateTestAgent({ handle: "seller1" }),
-      });
-      expect(agent2Res.statusCode).toBe(201);
-      const agent2Id = (JSON.parse(agent2Res.body) as { id: string }).id;
+      const { id: agent2Id, headers: agent2Headers } = await makeAgent(app, { handle: "seller1" });
       // Post an offer for agent 2
-      const agent2Headers = await getAuthHeadersForAgent(agent2Id);
       await app.inject({
         method: "POST",
         url: "/api/offers",

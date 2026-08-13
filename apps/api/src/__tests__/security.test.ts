@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import { cleanDatabase, createTestApp, generateTestAgent, generateTestNeed, generateTestOffer, getAuthHeaders } from "./helpers/testApp.js";
 
 async function getAuthHeadersForAgent(agentId: string): Promise<Record<string, string>> {
@@ -27,33 +28,33 @@ describe("Security ownership checks", () => {
   async function setupDealFixture() {
     const { app, sql } = await createTestApp();
 
-    const buyerRes = await app.inject({
-      method: "POST",
-      url: "/api/agents",
-      headers: bootstrapHeaders,
-      payload: generateTestAgent(),
-    });
-    const buyerId = (JSON.parse(buyerRes.body) as { id: string }).id;
-
-    const sellerRes = await app.inject({
-      method: "POST",
-      url: "/api/agents",
-      headers: bootstrapHeaders,
-      payload: generateTestAgent(),
-    });
-    const sellerId = (JSON.parse(sellerRes.body) as { id: string }).id;
-
-    const attackerRes = await app.inject({
-      method: "POST",
-      url: "/api/agents",
-      headers: bootstrapHeaders,
-      payload: generateTestAgent(),
-    });
-    const attackerId = (JSON.parse(attackerRes.body) as { id: string }).id;
+    // Distinct canonical agents: register each under its own UUID, then set its
+    // branded profile with ITS OWN headers. (Post issue-#75 fix, POST /api/agents
+    // updates the caller's canonical row keyed on the authenticated agent id, so
+    // three profiles require three distinct authenticated identities — not three
+    // calls under one bootstrap header.)
+    const buyerId = randomUUID();
+    const sellerId = randomUUID();
+    const attackerId = randomUUID();
 
     const buyerHeaders = await getAuthHeadersForAgent(buyerId);
     const sellerHeaders = await getAuthHeadersForAgent(sellerId);
     const attackerHeaders = await getAuthHeadersForAgent(attackerId);
+
+    for (const [headers, id] of [
+      [buyerHeaders, buyerId],
+      [sellerHeaders, sellerId],
+      [attackerHeaders, attackerId],
+    ] as const) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers,
+        payload: generateTestAgent(),
+      });
+      expect(res.statusCode).toBe(200);
+      expect((JSON.parse(res.body) as { id: string }).id).toBe(id);
+    }
 
     const offerRes = await app.inject({
       method: "POST",
