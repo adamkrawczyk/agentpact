@@ -212,7 +212,27 @@ export async function registerRoutes(
 
   // NOTE: admin force-release route lives in routes/admin.ts
 
-  app.post("/api/disputes/resolve-timeouts", async () => {
+  // Operator/cron surface, not an agent surface — sweeps ALL expired disputes
+  // globally and triggers settlement (fund release) for parties unrelated to
+  // the caller. Gated with the SAME ADMIN_API_KEY mechanism as the admin
+  // sweeper (routes/admin.ts `/api/admin/auto-complete-timeouts`), copied
+  // verbatim rather than inventing a new auth mechanism. Kept in this file
+  // (not moved to routes/admin.ts) to keep the fix minimal blast-radius — the
+  // path is unchanged, so no public-API break, no SDK regen, no lint-routes
+  // path-ownership violation (AGENTS.md ownership is about route files not
+  // duplicating a path across files, not about the admin/non-admin prefix).
+  app.post("/api/disputes/resolve-timeouts", async (request, reply) => {
+    const adminKey = process.env.ADMIN_API_KEY;
+    if (!adminKey) {
+      return reply.code(503).send({ error: "Admin API not configured" });
+    }
+    const authHeader =
+      (request.headers["x-admin-key"] as string | undefined) ||
+      String(request.headers["authorization"] ?? "").replace("Bearer ", "");
+    if (authHeader !== adminKey) {
+      return reply.code(403).send({ error: "Invalid admin key" });
+    }
+
     const expired = await sql`
       UPDATE disputes
       SET status = 'timed_out', resolved_at = NOW()
