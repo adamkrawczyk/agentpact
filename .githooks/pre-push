@@ -1,0 +1,9 @@
+#!/bin/bash
+# Pre-push hook: guard against FST_ERR_DUPLICATED_ROUTE crashes.
+# Installed automatically via `npm install` (see root package.json "prepare"
+# script -> scripts/install-hooks.sh). Mirrors AGENTS.md "Critical: Route
+# Deduplication" rule 6. See also .github/workflows/lint.yml for the CI mirror.
+set -euo pipefail
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+bash scripts/lint-routes.sh
