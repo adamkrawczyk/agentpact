@@ -24,3 +24,11 @@ jobs:
           npx tsc --noEmit -p apps/api/tsconfig.json
           npx tsc --noEmit -p apps/web/tsconfig.json
           npx tsc --noEmit -p apps/mcp/tsconfig.json
+
+  route-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Route dedup guard (FST_ERR_DUPLICATED_ROUTE)
+        run: bash scripts/lint-routes.sh

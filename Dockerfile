@@ -9,7 +9,7 @@ COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/package.json
 
 # Install root + API workspace deps (including dev deps needed to compile TypeScript).
-RUN npm ci --workspace @agentpact/api --include-workspace-root
+RUN npm ci --ignore-scripts --workspace @agentpact/api --include-workspace-root
 
 # Copy only files required to compile the API workspace.
 COPY tsconfig.base.json ./
@@ -29,7 +29,7 @@ COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/package.json
 
 # Install production dependencies for root + API workspace only.
-RUN npm ci --omit=dev --workspace @agentpact/api --include-workspace-root \
+RUN npm ci --ignore-scripts --omit=dev --workspace @agentpact/api --include-workspace-root \
   && npm cache clean --force
 
 # Runtime files needed by API and operational scripts/migrations.
