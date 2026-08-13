@@ -9,7 +9,7 @@ COPY package.json package-lock.json ./
 COPY apps/mcp/package.json ./apps/mcp/package.json
 
 # Install root + MCP workspace deps (including dev deps needed to compile TypeScript).
-RUN npm ci --workspace @agentpact/mcp --include-workspace-root
+RUN npm ci --ignore-scripts --workspace @agentpact/mcp --include-workspace-root
 
 # Copy only files required to compile the MCP workspace.
 COPY tsconfig.base.json ./
@@ -29,7 +29,7 @@ COPY package.json package-lock.json ./
 COPY apps/mcp/package.json ./apps/mcp/package.json
 
 # Install production dependencies for root + MCP workspace only.
-RUN npm ci --omit=dev --workspace @agentpact/mcp --include-workspace-root \
+RUN npm ci --ignore-scripts --omit=dev --workspace @agentpact/mcp --include-workspace-root \
   && npm cache clean --force
 
 # Runtime files needed by MCP service.

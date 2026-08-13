@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "prepare": "bash scripts/install-hooks.sh",
+    "prepare": "sh scripts/install-hooks.sh",
     "build": "npm run build -w @agentpact/api && npm run build -w @agentpact/mcp && npm run build -w @agentpact/web && npm run build -w agentpact-daemon && npm run build -w agentpact && npm run build -w @agentpact/fulfillment-daemon && npm run build -w @agentpact/relayer-daemon",
     "dev": "concurrently \"npm run dev -w @agentpact/api\" \"npm run dev -w @agentpact/mcp\" \"npm run dev -w @agentpact/web\" \"npm run dev -w agentpact-daemon\"",
     "daemon": "npm run start -w agentpact-daemon",

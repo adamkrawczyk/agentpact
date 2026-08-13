@@ -9,7 +9,7 @@ COPY package.json package-lock.json ./
 COPY apps/relayer-daemon/package.json ./apps/relayer-daemon/package.json
 
 # Install root + relayer workspace deps (including dev deps needed to compile TypeScript).
-RUN npm ci --workspace @agentpact/relayer-daemon --include-workspace-root
+RUN npm ci --ignore-scripts --workspace @agentpact/relayer-daemon --include-workspace-root
 
 # Copy only files required to compile the relayer workspace.
 COPY tsconfig.base.json ./
@@ -29,7 +29,7 @@ COPY package.json package-lock.json ./
 COPY apps/relayer-daemon/package.json ./apps/relayer-daemon/package.json
 
 # Install production dependencies for root + relayer workspace only.
-RUN npm ci --omit=dev --workspace @agentpact/relayer-daemon --include-workspace-root \
+RUN npm ci --ignore-scripts --omit=dev --workspace @agentpact/relayer-daemon --include-workspace-root \
   && npm cache clean --force
 
 # Runtime files.
