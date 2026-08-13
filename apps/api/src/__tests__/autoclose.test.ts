@@ -147,6 +147,13 @@ async function createAcceptedDeal(options: {
 
 describe("autoclose — Change 1: auto-mint Class-A intent on deal accept", () => {
   beforeEach(async () => {
+    // DEFECT C fix (issue #91) made the auto-mint refuse to mint when
+    // HASH_PREIMAGE_PREDICATE_ADDRESS is unset/zero (see
+    // deal-lifecycle-integrity.test.ts DEFECT C for the guard's own coverage).
+    // This suite is about the MINT PATH itself, so it needs a real predicate
+    // address configured — exactly like a properly-configured production
+    // environment — to keep exercising that path.
+    process.env.HASH_PREIMAGE_PREDICATE_ADDRESS = "0x542535b7804E54877E5cd45695a3D6d50182D976";
     await cleanDatabase();
   });
 
@@ -342,6 +349,9 @@ describe("autoclose — Change 1: auto-mint Class-A intent on deal accept", () =
 
 describe("autoclose — Change 2: POST /api/deals/:id/funding-authorization", () => {
   beforeEach(async () => {
+    // See Change 1 describe block above — the accept-deal auto-mint requires
+    // a real HASH_PREIMAGE_PREDICATE_ADDRESS since the Defect C fix.
+    process.env.HASH_PREIMAGE_PREDICATE_ADDRESS = "0x542535b7804E54877E5cd45695a3D6d50182D976";
     await cleanDatabase();
   });
 
@@ -470,6 +480,9 @@ describe("autoclose — Change 2: POST /api/deals/:id/funding-authorization", ()
 
 describe("autoclose — Change 2: POST /api/intents/:id/reveal", () => {
   beforeEach(async () => {
+    // See Change 1 describe block above — the accept-deal auto-mint requires
+    // a real HASH_PREIMAGE_PREDICATE_ADDRESS since the Defect C fix.
+    process.env.HASH_PREIMAGE_PREDICATE_ADDRESS = "0x542535b7804E54877E5cd45695a3D6d50182D976";
     await cleanDatabase();
   });
 
