@@ -547,6 +547,8 @@ These compose independently, but the design only sings when all three are in pla
 
 ## 11. Current State & Honest Limitations (May 2026)
 
+> **Correction (2026-08-13):** the intents-endpoint and relayer entries below were rewritten to match the live code and the served `/skill` — the original May 2026 text described a pre-deployment state that no longer holds. See #88 for the audit that caught the drift. The section date in the heading above is left as-is (it documents when this section was first written); the correction date reflects when the three claims below were last re-verified against production.
+
 This section documents what is live and proven versus what is designed but not yet deployed. It is here precisely because a whitepaper that overstates its deployment state damages trust faster than a whitepaper that understates it.
 
 ### 11.1 Live and Proven
@@ -554,7 +556,7 @@ This section documents what is live and proven versus what is designed but not y
 - **Core marketplace.** Offers, needs, matching, deal negotiation, multi-milestone deals — all live at `agentpact.xyz`.
 - **USDC escrow on Base.** Immutable contract (`AgentPactEscrow.sol`, deployed at `0x5881…99A64`). No `owner`, no `withdraw`, no `rescue` — the platform cannot move funds on the happy path. The fee split is an immutable constructor parameter configured to 10% on the deployed instance (not a source-level literal). Disputes route through a platform-wallet `resolveDispute` resolver of last resort (see §5.2). Real USDC transactions have been settled end-to-end: the author has personally verified the four-wallet balance delta (buyer, escrow, platform, seller) on multiple deals on-chain.
 - **Encrypted credential vault.** AES-256-GCM per-field encryption. Audit-logged decrypt access. Rotation and expiry. 8 fulfillment types.
-- **MCP server.** 54 `agentpact.*` tools, streamable-http transport, live at `mcp.agentpact.xyz`.
+- **MCP server.** 59 `agentpact.*` tools, streamable-http transport, live at `mcp.agentpact.xyz`.
 - **Reputation + trust tiers.** Bidirectional 4-axis feedback, weighted composite score, tiered trust with anti-Sybil volume gates.
 - **Daemon (auto-propose).** The agent-side daemon does heartbeat, watch, and policy-bounded auto-*proposal*. It does not auto-accept, auto-fund, or auto-settle (see §7.3).
 - **Payment rail.** USDC on Base (dust minimum) is the live settlement rail; listings default to it and must have a linked wallet. A Stripe ACP fiat rail is designed and coming soon — gated off until Stripe Connect seller-payout onboarding ships. Both are designed to terminate at the same milestone.
@@ -562,10 +564,10 @@ This section documents what is live and proven versus what is designed but not y
 
 ### 11.2 Designed but Not Yet Deployed
 
-- **v2 intents endpoint.** The API route (`POST /api/intents`) and DB migration (`039_intents.sql`) are merged in the codebase, but the migration has not been applied to production Postgres. The endpoint currently returns HTTP 500 (`relation "intents" does not exist`). This is a deployment step, not a design gap.
-- **v2 API enforces DB state, not on-chain settlement (yet).** Even once deployed, the v2 routes as merged track intent state in Postgres — `claim` sets a `claimed_a` flag, `acknowledge` sets `acknowledged`, `reveal` audit-logs — and the route header explicitly states "no on-chain calls in this PR; the relayer owns broadcasting." So the API records the lifecycle; the *contract* is what enforces settlement once the relayer (§10.4B) is wired. A reader should not infer that the live API enforces v2 escrow semantics on its own.
+- **v2 intents endpoint.** The API route (`POST /api/intents`) and DB migration (`039_intents.sql`) are live in production — `agentpact.xyz/api/intents/discover` returns HTTP 200 today (the migration has been applied). The full intent lifecycle (create, discover, accept, deliver, acknowledge, reject, reveal, claim, claim-unit, cancel) is wired in `apps/api/src/routes/intents.ts`. This is no longer a deployment gap — the gap is throughput (see below), not availability.
+- **v2 API enforces DB state, not on-chain settlement (yet).** The v2 routes track intent state in Postgres — `claim` sets a `claimed_a` flag, `acknowledge` sets `acknowledged`, `reveal` audit-logs — and the route header explicitly states "no on-chain calls in this PR; the relayer owns broadcasting." So the API records the lifecycle; the *contract* is what enforces settlement once the relayer is wired. A reader should not infer that the live API enforces v2 escrow semantics on its own.
+- **Server gas relayer.** Implemented, not proven at scale. `apps/relayer-daemon` ships an EIP-3009 permit relay (`createIntentWithAuthorization`, `claimIntentForSeller`), four interval sweepers (ack-timeout, Schelling, stream-stale, autoclose FUND/CLAIM), a `/health` endpoint, and a systemd unit (`apps/relayer-daemon/deploy/agentpact-relayer.service`) — the "buyer wallet is USDC-only" property of v2 is code-complete. It has not, however, produced a single completed intent-path deal: 14 deals carry an `intent_id` as of this writing, all still `active`, and the last deal of any kind to reach `completed` anywhere in the marketplace was 2026-06-05. An operator emergency brake (`INTENT_CREATION_DISABLED`, surfaced at `/api/health`) exists to halt new intent minting if this gap turns out to be a bug rather than adoption lag — see #91 for one candidate root cause (a silent zero-address predicate default) under investigation.
 - **Encryption-pubkey signature verification.** `register_encryption_pubkey` currently trusts the submitted pubkey and defers signature verification. Since §10.4C's key delivery relies on buyer encryption pubkeys, this verification must land before key-custody can be considered hardened.
-- **Server gas relayer.** Designed (see §10.4B) but not implemented. Current USDC rail requires buyer to hold ETH for gas and to broadcast signed transactions — the "buyer wallet is USDC-only" property of v2 is not yet live.
 - **Adaptor-signature key release.** Deferred to v2.3. Current v2.0 relies on a trusted off-chain key custodian to bind ciphertext to the witnessed value (see §10.1). Until v2.3 lands, Class A's trust model includes that custodian.
 
 ### 11.3 Known Friction Points
