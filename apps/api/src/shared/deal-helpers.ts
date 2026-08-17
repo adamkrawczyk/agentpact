@@ -206,17 +206,32 @@ export async function enforceDealDelta(dealId: string, negotiatedTotal: number):
 // action strings can treat this the same way.
 export type ReleaseMilestonePaymentResult = {
   mode: "simulation" | "on-chain";
-  action: "released" | "buyer_sign_required";
+  action: "released" | "buyer_sign_required" | "not_released";
   paymentIntentId?: string;
   txHash?: string;
   gross?: number;
   sellerAmount?: number;
   feeAmount?: number;
+  // Present when action === "not_released": the payment intent's actual
+  // status when this call determined it did NOT perform (or lose a race to)
+  // a release — e.g. "refunded", "pending_refund". Callers must not treat
+  // "not_released" as a success path; it means this call moved no money and
+  // the intent is not settled in the seller's favor.
+  currentStatus?: string;
 };
 
 export async function releaseMilestonePayment(
   milestoneId: string,
-  opts: { releaseTxHash?: string } = {},
+  opts: {
+    releaseTxHash?: string;
+    // TEST-ONLY instrumentation. Invoked exactly once, right after the
+    // initial `WHERE status = 'funded'` SELECT succeeds and before the CAS
+    // UPDATE transaction begins, so tests can deterministically land a
+    // concurrent write (another release, a refund, ...) in that window
+    // instead of relying on real network/DB timing jitter. Never set by any
+    // production caller.
+    __raceTestHook?: () => Promise<void>;
+  } = {},
 ): Promise<ReleaseMilestonePaymentResult> {
   const mode = isOnChainMode() ? "on-chain" : "simulation";
   const [payment] = await sql`
@@ -229,9 +244,27 @@ export async function releaseMilestonePayment(
   `;
 
   if (!payment) {
-    // No funded payment intent — still transition the milestone and deal to completed
-    // so the state machine is not left stuck at 'delivered'. Nothing to fabricate:
-    // there is no money to (mis)represent as released.
+    // The initial SELECT found no *funded* intent for this milestone. That is
+    // NOT the same fact as "there is no money to (mis)represent" — a payment
+    // intent may exist and simply be in a non-funded, non-released state
+    // (e.g. 'refunded', 'pending_refund') because a concurrent refund landed
+    // before this SELECT ran. Completing the milestone/deal in that case
+    // would tell the same lie defect 1 fixes below, just one step earlier.
+    // Distinguish "genuinely nothing was ever funded / it's already
+    // released" (safe to complete) from "an intent exists in some other
+    // non-terminal-for-us state" (must NOT be reported as released).
+    const [existingIntent] = await sql`
+      SELECT status FROM payment_intents WHERE milestone_id = ${milestoneId}
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    if (existingIntent && existingIntent.status !== "released") {
+      console.warn(
+        `[releaseMilestonePayment] not_released for milestone ${milestoneId}: a payment_intent exists but is '${existingIntent.status}' (not 'funded', not 'released') — refusing to complete the milestone/deal as if a release happened.`,
+      );
+      return { mode, action: "not_released", currentStatus: existingIntent.status };
+    }
+    // Either no intent ever existed (free/unfunded milestone) or it's
+    // already 'released' — nothing to fabricate either way.
     await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = ${milestoneId} AND status != 'accepted'`;
     await sql`
       UPDATE deals SET status = 'completed', updated_at = NOW()
@@ -269,20 +302,25 @@ export async function releaseMilestonePayment(
   const feeAmount = Number((gross - Number(sellerAmount)).toFixed(6));
   const txHash = hasRealReleaseTx ? opts.releaseTxHash! : `sim_release_${randomUUID().slice(0, 8)}`;
 
+  // TEST-ONLY: lets a test force a concurrent write (release or refund) to
+  // land here, between the funded-SELECT above and the CAS UPDATE below,
+  // deterministically instead of hoping Promise.all() timing does it.
+  if (opts.__raceTestHook) {
+    await opts.__raceTestHook();
+  }
+
   // ── idempotency / race guard ─────────────────────────────────────────────
   // The initial SELECT above (`WHERE pi.status = 'funded'`) and this UPDATE
   // are two separate statements — classic TOCTOU. Two concurrent callers for
   // the SAME milestone (a buyer double-submitting POST /api/deliveries/verify,
   // or a buyer's manual verify racing the admin dispute-timeout sweep /
-  // auto-complete sweep — both of which call this exact function) can both
-  // pass the SELECT before either commits its UPDATE. Re-assert the status
-  // predicate INSIDE the UPDATE and check RETURNING: if zero rows come back,
-  // another caller already released this payment intent between our SELECT
-  // and this UPDATE, and we must not touch milestones/deals/offers or write a
-  // second 'payment.release' audit row (which would double-count platform fee
-  // revenue and double-fire seller notifications for one real payment).
-  // Mirrors the existing guarded-UPDATE + zero-rows-means-lost-race pattern
-  // already used by routes/admin.ts's expire-stale-proposals sweep.
+  // auto-complete sweep — both of which call this exact function; OR a buyer
+  // refund racing a release) can both pass the SELECT before either commits.
+  // Re-assert the status predicate INSIDE the UPDATE and check RETURNING: if
+  // zero rows come back, we must not touch milestones/deals/offers or write a
+  // second 'payment.release' audit row. Mirrors the existing guarded-UPDATE +
+  // zero-rows-means-lost-race pattern already used by routes/admin.ts's
+  // expire-stale-proposals sweep.
   const released = await sql.begin(async (txn) => {
     const updatedIntent = await txn.unsafe(
       `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW(), tx_hash = $1 WHERE id = $2 AND status = 'funded' RETURNING id`,
@@ -310,15 +348,30 @@ export async function releaseMilestonePayment(
   });
 
   if (!released) {
-    // Idempotent response: the money already moved (via the concurrent
-    // winner), just not because of this particular call. Report it the same
-    // way a caller who re-checks after the fact would see it — "released" —
-    // without a paymentIntentId/txHash from THIS call, since this call did
-    // not perform the write. Do not notify again; the winning call already did.
+    // We lost the CAS: someone else moved this payment_intent's status away
+    // from 'funded' between our SELECT and our UPDATE. Zero rows proves ONLY
+    // that fact — it does NOT prove "another caller released it". It could
+    // just as easily be a refund (buyer-initiated 'pending_refund'/'refunded'
+    // landing in the same window — see routes/payments.ts's refund route,
+    // which writes those statuses with NO status guard on its own UPDATE).
+    // Re-read the actual current status and report the truth instead of
+    // assuming "released". Only report "released" here if the row genuinely
+    // is released (the concurrent winner really was another release call);
+    // anything else must come back as "not_released" so callers do not
+    // fabricate payoutReleased:true / milestone.completed / releasedCount
+    // for money that was not, in fact, released to the seller.
+    const [current] = await sql`SELECT status FROM payment_intents WHERE id = ${payment.id}`;
+    const currentStatus = current?.status ?? "unknown";
+    if (currentStatus === "released") {
+      console.warn(
+        `[releaseMilestonePayment] lost race for milestone ${milestoneId}: payment_intents ${payment.id} was already released by a concurrent call. Skipping duplicate settlement.`,
+      );
+      return { mode, action: "released" };
+    }
     console.warn(
-      `[releaseMilestonePayment] lost race for milestone ${milestoneId}: payment_intents ${payment.id} was already released by a concurrent call. Skipping duplicate settlement.`,
+      `[releaseMilestonePayment] not_released for milestone ${milestoneId}: lost the CAS on payment_intents ${payment.id}, and its current status is '${currentStatus}' (NOT 'released') — a concurrent refund or other status change won the race, not a release. Refusing to report action:'released'.`,
     );
-    return { mode, action: "released" };
+    return { mode, action: "not_released", paymentIntentId: String(payment.id), currentStatus };
   }
 
   notifyAgents(sql, [payment.seller_agent_id], "payment.released", {
@@ -547,14 +600,19 @@ export async function completeDealMilestones(
   let anyRefused = false;
   for (const milestone of milestones) {
     const result = await releaseMilestonePayment(String(milestone.id));
-    if (result.action === "buyer_sign_required") {
+    if (result.action === "buyer_sign_required" || result.action === "not_released") {
+      // Either the on-chain settlement-integrity gate refused, or this
+      // milestone's payment intent lost a race to something other than a
+      // release (e.g. a concurrent refund) and is NOT actually settled.
+      // Neither case is a completion — do not force-complete the deal on
+      // top of a milestone that did not really release.
       anyRefused = true;
     }
   }
 
   if (anyRefused) {
     console.warn(
-      `[completeDealMilestones] settlement_pending: deal ${dealId} had a milestone refuse release (buyer_sign_required) in the fall-through tail. Holding, not force-completing.`,
+      `[completeDealMilestones] settlement_pending: deal ${dealId} had a milestone refuse release (buyer_sign_required or not_released) in the fall-through tail. Holding, not force-completing.`,
     );
     await sql`UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
     return { mode, action: "settlement_pending" };

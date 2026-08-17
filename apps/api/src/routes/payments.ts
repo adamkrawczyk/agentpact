@@ -38,7 +38,7 @@ export async function registerRoutes(
   deps: Deps,
   releaseMilestonePayment: (
     milestoneId: string,
-  ) => Promise<{ mode: "simulation" | "on-chain"; action: "released" | "buyer_sign_required"; paymentIntentId?: string; txHash?: string }>,
+  ) => Promise<{ mode: "simulation" | "on-chain"; action: "released" | "buyer_sign_required" | "not_released"; paymentIntentId?: string; txHash?: string; currentStatus?: string }>,
 ): Promise<void> {
   const { notifyAgents } = deps;
 
@@ -503,6 +503,18 @@ export async function registerRoutes(
         mode: releaseResult.mode,
         action: "buyer_sign_required",
         message: "Milestone has a funded on-chain USDC escrow intent — release requires a real on-chain transaction. No settlement was recorded.",
+      });
+    }
+    if (releaseResult.action === "not_released") {
+      // settlement-integrity: this call did NOT release money — it lost a
+      // race to something other than a release (e.g. a concurrent refund).
+      // Tell the truth instead of falling through to the success response.
+      return reply.code(200).send({
+        ok: false,
+        mode: releaseResult.mode,
+        action: "not_released",
+        currentStatus: releaseResult.currentStatus,
+        message: `Payment intent was not released by this call — its current status is '${releaseResult.currentStatus}'.`,
       });
     }
     return { ok: true, mode: releaseResult.mode };

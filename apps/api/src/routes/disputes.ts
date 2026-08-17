@@ -16,7 +16,7 @@ export async function registerRoutes(
   deps: Deps,
   releaseMilestonePayment: (
     milestoneId: string,
-  ) => Promise<{ mode: "simulation" | "on-chain"; action: "released" | "buyer_sign_required"; paymentIntentId?: string; txHash?: string }>,
+  ) => Promise<{ mode: "simulation" | "on-chain"; action: "released" | "buyer_sign_required" | "not_released"; paymentIntentId?: string; txHash?: string; currentStatus?: string }>,
 ): Promise<void> {
   const { notifyAgents } = deps;
 
@@ -172,12 +172,18 @@ export async function registerRoutes(
 
     const releaseResult = await releaseMilestonePayment(body.milestoneId);
     // settlement-integrity: honest response. When the shared helper refuses
-    // (funded on-chain USDC escrow, no real release tx), payoutReleased must
-    // say so rather than lying with `true`. Breaking-change note: this route
-    // previously always returned payoutReleased:true unconditionally — see PR body.
+    // (funded on-chain USDC escrow, no real release tx) or reports
+    // "not_released" (this call lost the CAS race to something other than a
+    // release — e.g. a concurrent refund), payoutReleased must say so rather
+    // than lying with `true`. Breaking-change note: this route previously
+    // always returned payoutReleased:true unconditionally — see PR body.
     const payoutReleased = releaseResult.action === "released";
 
-    if (milestoneInfo) {
+    // Only tell the buyer the milestone completed if a release actually
+    // happened. Firing milestone.completed when action is "buyer_sign_required"
+    // or "not_released" (e.g. a concurrent refund won the race) would notify
+    // the buyer of a completion that did not occur.
+    if (milestoneInfo && payoutReleased) {
       notifyAgents(sql, [milestoneInfo.buyer_agent_id], "milestone.completed", {
         dealId: milestoneInfo.deal_id,
         milestoneId: body.milestoneId,
@@ -249,18 +255,29 @@ export async function registerRoutes(
 
     let releasedCount = 0;
     let releasePendingCount = 0;
+    let releaseNotReleasedCount = 0;
     for (const dispute of expired) {
       const releaseResult = await releaseMilestonePayment(dispute.milestone_id);
       if (releaseResult.action === "released") {
         releasedCount += 1;
+      } else if (releaseResult.action === "not_released") {
+        // This call did NOT release money — it lost the CAS race to
+        // something other than a release (e.g. a concurrent refund landed
+        // on this payment intent). Distinct from "buyer_sign_required"
+        // (still fundable/pending on-chain sign-off): this one is a genuine
+        // non-release outcome, not a pending one. Count it separately so the
+        // sweep's summary doesn't misrepresent it as still-pending.
+        releaseNotReleasedCount += 1;
       } else {
         releasePendingCount += 1;
       }
     }
 
     // settlement-integrity: report honestly how many timed-out disputes actually
-    // settled vs. were deferred (funded on-chain USDC escrow, no real release tx).
-    // Additive fields only — timedOutDisputes is unchanged for backward compat.
-    return { timedOutDisputes: expired.length, releasedCount, releasePendingCount };
+    // settled vs. were deferred (funded on-chain USDC escrow, no real release tx)
+    // vs. genuinely did not release (e.g. lost a race to a concurrent refund).
+    // Additive fields only — timedOutDisputes/releasedCount/releasePendingCount
+    // are unchanged shape for backward compat; releaseNotReleasedCount is new.
+    return { timedOutDisputes: expired.length, releasedCount, releasePendingCount, releaseNotReleasedCount };
   });
 }
