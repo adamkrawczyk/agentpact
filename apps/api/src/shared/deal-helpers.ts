@@ -269,11 +269,28 @@ export async function releaseMilestonePayment(
   const feeAmount = Number((gross - Number(sellerAmount)).toFixed(6));
   const txHash = hasRealReleaseTx ? opts.releaseTxHash! : `sim_release_${randomUUID().slice(0, 8)}`;
 
-  await sql.begin(async (txn) => {
-    await txn.unsafe(
-      `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW(), tx_hash = $1 WHERE id = $2`,
+  // ── idempotency / race guard ─────────────────────────────────────────────
+  // The initial SELECT above (`WHERE pi.status = 'funded'`) and this UPDATE
+  // are two separate statements — classic TOCTOU. Two concurrent callers for
+  // the SAME milestone (a buyer double-submitting POST /api/deliveries/verify,
+  // or a buyer's manual verify racing the admin dispute-timeout sweep /
+  // auto-complete sweep — both of which call this exact function) can both
+  // pass the SELECT before either commits its UPDATE. Re-assert the status
+  // predicate INSIDE the UPDATE and check RETURNING: if zero rows come back,
+  // another caller already released this payment intent between our SELECT
+  // and this UPDATE, and we must not touch milestones/deals/offers or write a
+  // second 'payment.release' audit row (which would double-count platform fee
+  // revenue and double-fire seller notifications for one real payment).
+  // Mirrors the existing guarded-UPDATE + zero-rows-means-lost-race pattern
+  // already used by routes/admin.ts's expire-stale-proposals sweep.
+  const released = await sql.begin(async (txn) => {
+    const updatedIntent = await txn.unsafe(
+      `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW(), tx_hash = $1 WHERE id = $2 AND status = 'funded' RETURNING id`,
       [txHash, payment.id]
     );
+    if (updatedIntent.length === 0) {
+      return false;
+    }
     await txn.unsafe(`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = $1`, [milestoneId]);
     await txn.unsafe(
       `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = (SELECT deal_id FROM milestones WHERE id = $1)`,
@@ -289,7 +306,20 @@ export async function releaseMilestonePayment(
        VALUES ('payment.release', 'milestone', $1, $2::jsonb)`,
       [milestoneId, JSON.stringify({ gross, sellerAmount, feeAmount, platformWallet: PLATFORM_WALLET, txHash })]
     );
+    return true;
   });
+
+  if (!released) {
+    // Idempotent response: the money already moved (via the concurrent
+    // winner), just not because of this particular call. Report it the same
+    // way a caller who re-checks after the fact would see it — "released" —
+    // without a paymentIntentId/txHash from THIS call, since this call did
+    // not perform the write. Do not notify again; the winning call already did.
+    console.warn(
+      `[releaseMilestonePayment] lost race for milestone ${milestoneId}: payment_intents ${payment.id} was already released by a concurrent call. Skipping duplicate settlement.`,
+    );
+    return { mode, action: "released" };
+  }
 
   notifyAgents(sql, [payment.seller_agent_id], "payment.released", {
     dealId: payment.deal_id,
