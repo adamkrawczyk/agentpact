@@ -324,7 +324,7 @@ export default async function adminRoutes(app: FastifyInstance) {
     const results = [];
     for (const deal of expiredDeals) {
       try {
-        await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${deal.id} AND status NOT IN ('verified', 'revoked')`;
+        await sql`UPDATE deal_fulfillment SET status = 'verified', verified_at = NOW(), updated_at = NOW() WHERE deal_id = ${deal.id} AND status NOT IN ('verified', 'revoked')`;
         const releaseResult = await completeDealMilestones(String(deal.id), { skipOnChainRelease: false });
         // payment-methods rollout — the guard holds unfunded fee-bearing deals at
         // 'delivered'. This cron selects ('delivered','active','funded') deals, so
@@ -457,7 +457,7 @@ export default async function adminRoutes(app: FastifyInstance) {
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
     if (deal.status === "completed") return { ok: true, alreadyCompleted: true };
 
-    await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${body.dealId} AND status NOT IN ('verified', 'revoked')`;
+    await sql`UPDATE deal_fulfillment SET status = 'verified', verified_at = NOW(), updated_at = NOW() WHERE deal_id = ${body.dealId} AND status NOT IN ('verified', 'revoked')`;
     const releaseResult = await completeDealMilestones(body.dealId, { skipOnChainRelease: false });
 
     // payment-methods rollout — even on an operator force-close, do not archive the

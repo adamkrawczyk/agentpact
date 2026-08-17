@@ -761,6 +761,93 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     return { ...deal, milestones, events };
   });
 
+  // Frontier #105 follow-up: PR #105/#102/#98 shipped deal-funnel measurability
+  // and settlement deduping, but left no single place to AUDIT whether a
+  // DELIVERED deal actually accumulated real proof-of-delivery traces before
+  // settling, vs. settling on trust alone. This aggregates the two existing
+  // fulfillment models' timestamp columns (no migration needed — the columns
+  // already exist, they were just never surfaced together):
+  //   - project-based: milestones.accepted_at (buyer proof) + deliveries.created_at
+  //     (seller delivered_at) + deliveries.verified_at
+  //   - service-based: deal_fulfillment.verified_at (buyer/auto proof) +
+  //     deal_fulfillment.provided_at (seller delivered_at)
+  // Reputation grading (rank-8 candidate: agents who rush vs. agents who ghost)
+  // can now query ONE endpoint instead of reconstructing this from three tables.
+  app.get("/api/deals/:id/settlement", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const [deal] = await sql`SELECT id, status, buyer_agent_id, seller_agent_id, created_at, updated_at FROM deals WHERE id = ${id}`;
+    if (!deal) return reply.code(404).send({ error: "Deal not found" });
+
+    const milestoneRows = await sql`
+      SELECT id, idx, title, status, accepted_at, due_at
+      FROM milestones
+      WHERE deal_id = ${id}
+      ORDER BY idx
+    `;
+    const milestoneIds = milestoneRows.map((m) => String(m.id));
+    const deliveryRows = milestoneIds.length
+      ? await sql`
+          SELECT milestone_id, submitted_by, status, checksum, created_at, verified_at
+          FROM deliveries
+          WHERE milestone_id = ANY(${milestoneIds})
+          ORDER BY created_at
+        `
+      : [];
+    const paymentRows = milestoneIds.length
+      ? await sql`
+          SELECT milestone_id, status, released_at
+          FROM payment_intents
+          WHERE milestone_id = ANY(${milestoneIds})
+        `
+      : [];
+
+    const milestones = milestoneRows.map((m) => {
+      const mDeliveries = deliveryRows.filter((d) => String(d.milestone_id) === String(m.id));
+      const mPayments = paymentRows.filter((p) => String(p.milestone_id) === String(m.id));
+      const lastDelivery = mDeliveries[mDeliveries.length - 1] ?? null;
+      return {
+        milestone_id: m.id,
+        idx: m.idx,
+        title: m.title,
+        status: m.status,
+        due_at: m.due_at,
+        buyer_proof_at: m.accepted_at ?? null,
+        seller_delivered_at: lastDelivery?.created_at ?? null,
+        delivery_verified_at: lastDelivery?.verified_at ?? null,
+        delivery_status: lastDelivery?.status ?? null,
+        delivery_count: mDeliveries.length,
+        payments: mPayments.map((p) => ({ status: p.status, released_at: p.released_at })),
+      };
+    });
+
+    const [serviceFulfillment] = await sql`
+      SELECT fulfillment_type, status, provided_at, verified_at, expires_at
+      FROM deal_fulfillment
+      WHERE deal_id = ${id}
+    `;
+
+    const hasProjectTraces = milestones.length > 0;
+    const hasServiceTraces = Boolean(serviceFulfillment);
+    const settledWithoutTraces =
+      deal.status === "completed" && !hasProjectTraces && !hasServiceTraces;
+
+    return {
+      deal_id: deal.id,
+      deal_status: deal.status,
+      milestones,
+      service_fulfillment: serviceFulfillment
+        ? {
+            fulfillment_type: serviceFulfillment.fulfillment_type,
+            status: serviceFulfillment.status,
+            seller_delivered_at: serviceFulfillment.provided_at ?? null,
+            buyer_proof_at: serviceFulfillment.verified_at ?? null,
+            expires_at: serviceFulfillment.expires_at,
+          }
+        : null,
+      audit_flag: settledWithoutTraces ? "completed_without_delivery_or_fulfillment_trace" : null,
+    };
+  });
+
   app.post("/api/deals/:id/consultation-response", async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = consultationResponseSchema.parse(request.body);

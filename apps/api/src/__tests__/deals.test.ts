@@ -439,6 +439,105 @@ describe("Deals API", () => {
     });
   });
 
+  describe("GET /api/deals/:id/settlement", () => {
+    it("returns 404 for unknown deal", async () => {
+      const { app } = await createTestApp();
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/deals/${randomUUID()}/settlement`
+      });
+      expect(response.statusCode).toBe(404);
+    });
+
+    it("surfaces buyer-proof and seller-delivered timestamps after confirm-delivery (service fulfillment)", async () => {
+      const { app, sql } = await createTestApp();
+
+      const proposeRes = await app.inject({
+        method: "POST",
+        url: "/api/deals/propose",
+        headers: buyerHeaders,
+        payload: {
+          buyerAgentId: buyerId,
+          sellerAgentId: sellerId,
+          offerId,
+          needId,
+          negotiatedTotal: 120,
+          maxPriceDeltaPct: 20,
+          milestones: [{ idx: 1, title: "Delivery", amount: 120, acceptanceCriteria: ["Done"] }]
+        }
+      });
+      const dealId = (JSON.parse(proposeRes.body) as { id: string }).id;
+
+      await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/accept`,
+        headers: sellerHeaders,
+        payload: { actorAgentId: sellerId }
+      });
+
+      const provideRes = await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/fulfillment`,
+        headers: sellerHeaders,
+        payload: {
+          agentId: sellerId,
+          fulfillmentData: { description: "Delivery provided for settlement-audit test" }
+        }
+      });
+      expect(provideRes.statusCode).toBe(200);
+
+      const [milestone] = await sql`SELECT id FROM milestones WHERE deal_id = ${dealId} ORDER BY idx LIMIT 1`;
+      await app.inject({
+        method: "POST",
+        url: "/api/payments/create-intent",
+        headers: buyerHeaders,
+        payload: {
+          provider: "usdc",
+          milestoneId: milestone.id,
+          buyerAgentId: buyerId,
+          walletProvider: "metamask",
+          buyerWalletAddress: "0x1234567890123456789012345678901234567890",
+          chain: "base"
+        }
+      });
+
+      // Before buyer confirms delivery: seller has provided, buyer has not proven receipt yet.
+      const beforeConfirm = await app.inject({ method: "GET", url: `/api/deals/${dealId}/settlement` });
+      expect(beforeConfirm.statusCode).toBe(200);
+      const beforeBody = JSON.parse(beforeConfirm.body) as {
+        deal_status: string;
+        service_fulfillment: { seller_delivered_at: string | null; buyer_proof_at: string | null; status: string } | null;
+        audit_flag: string | null;
+      };
+      expect(beforeBody.service_fulfillment).not.toBeNull();
+      expect(beforeBody.service_fulfillment?.seller_delivered_at).not.toBeNull();
+      expect(beforeBody.service_fulfillment?.buyer_proof_at).toBeNull();
+
+      const confirmRes = await app.inject({
+        method: "POST",
+        url: `/api/deals/${dealId}/confirm-delivery`,
+        headers: buyerHeaders,
+        payload: { agentId: buyerId, rating: 5, notes: "Looks good" }
+      });
+      expect(confirmRes.statusCode).toBe(200);
+
+      // After buyer confirms: both timestamps present, deal completed, no audit flag
+      // (real fulfillment trace exists — this is exactly what the audit_flag guards against).
+      const afterConfirm = await app.inject({ method: "GET", url: `/api/deals/${dealId}/settlement` });
+      expect(afterConfirm.statusCode).toBe(200);
+      const afterBody = JSON.parse(afterConfirm.body) as {
+        deal_status: string;
+        service_fulfillment: { seller_delivered_at: string | null; buyer_proof_at: string | null; status: string } | null;
+        audit_flag: string | null;
+      };
+      expect(afterBody.deal_status).toBe("completed");
+      expect(afterBody.service_fulfillment?.seller_delivered_at).not.toBeNull();
+      expect(afterBody.service_fulfillment?.buyer_proof_at).not.toBeNull();
+      expect(afterBody.service_fulfillment?.status).toBe("verified");
+      expect(afterBody.audit_flag).toBeNull();
+    });
+  });
+
   describe("POST /api/deals/:id/close", () => {
     it("should require verified fulfillment for free-tier deals before close", async () => {
       const { app } = await createTestApp();

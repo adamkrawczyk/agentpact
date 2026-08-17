@@ -230,7 +230,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
           const [pendingDeal] = await sql`SELECT * FROM deals WHERE id = ${id}`;
           return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields, auto_completed: false, settlement_pending: true, deal: pendingDeal, release: releaseResult });
         }
-        await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
+        await sql`UPDATE deal_fulfillment SET status = 'verified', verified_at = NOW(), updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
         await sql`UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
         notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.auto_completed", {
           dealId: id, reason: "acceptance_timeout_days=0 — instant auto-complete on fulfillment",
@@ -595,9 +595,15 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       return reply.code(400).send({ error: `Fulfillment status ${fulfillment.status} cannot be confirmed` });
     }
 
+    // BUG FIX (frontier #105 follow-up, 2026-08-16): this previously set
+    // status='verified' without ever stamping verified_at, so the
+    // proof-of-delivery timestamp GET /api/deals/:id/settlement relies on
+    // was always NULL for every confirmed service-fulfillment deal that ever
+    // ran through this path — the exact reputation-grading gap (rushed vs.
+    // ghosted sellers) the frontier candidate exists to close.
     await sql`
       UPDATE deal_fulfillment
-      SET status = 'verified', updated_at = NOW()
+      SET status = 'verified', verified_at = NOW(), updated_at = NOW()
       WHERE deal_id = ${id}
     `;
 
@@ -719,7 +725,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       }
 
       await sql`
-        UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW()
+        UPDATE deal_fulfillment SET status = 'verified', verified_at = NOW(), updated_at = NOW()
         WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')
       `;
 
@@ -793,7 +799,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       return { ok: false, reason: `Acceptance timeout not reached. Expires at ${expiredAt.toISOString()}`, expiresAt: expiredAt.toISOString() };
     }
 
-    await sql`UPDATE deal_fulfillment SET status = 'verified', updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
+    await sql`UPDATE deal_fulfillment SET status = 'verified', verified_at = NOW(), updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
     const releaseResult = await completeDealMilestones(id, { skipOnChainRelease: false });
     // payment-methods rollout — do not archive the offer, reward the seller, or claim
     // completion when the deal was held at 'delivered' (settlement_pending).
