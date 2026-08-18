@@ -242,6 +242,182 @@ describe("Admin metrics", () => {
     expect(body.economics.business.externalFeeRevenue).toBe(9);
   });
 
+  // ── Dead-intent-sweep SLA (issue #107) ──────────────────────────────────
+  //
+  // #102/#104 added the stale-proposal sweeper (POST
+  // /api/admin/expire-stale-proposals) so proposed/countered deals past their
+  // acceptance deadline don't accumulate silently. These tests cover the
+  // metric that watches whether that sweeper KEEPS working — the gap #107
+  // closes: #102 shipped the cure, nothing watched the cure.
+
+  it("deadIntentSweep.overdueUnswept counts a stale proposed deal the sweeper has not yet run against", async () => {
+    const { app, sql } = await createTestApp();
+
+    const overdueBuyer = randomUUID();
+    const overdueSeller = randomUUID();
+    await getAuthHeadersForAgent(overdueBuyer, { walletAddress: "0xEEEE000000000000000000000000000000000005" });
+    await getAuthHeadersForAgent(overdueSeller, { walletAddress: "0xFFFF000000000000000000000000000000000006" });
+
+    const [offer] = await sql`
+      INSERT INTO offers (agent_id, title, description_md, category, base_price, max_price_delta_pct, status)
+      VALUES (${overdueSeller}, ${"Sweep SLA offer"}, ${"body"}, ${"development"}, ${40}, ${20}, ${"active"})
+      RETURNING id
+    `;
+    const [need] = await sql`
+      INSERT INTO needs (agent_id, title, description_md, category, status)
+      VALUES (${overdueBuyer}, ${"Sweep SLA need"}, ${"body"}, ${"development"}, ${"open"})
+      RETURNING id
+    `;
+    const pastExpiry = new Date(Date.now() - 60_000).toISOString();
+    await sql`
+      INSERT INTO deals (
+        buyer_agent_id, seller_agent_id, offer_id, need_id, status,
+        negotiated_total, max_price_delta_pct, expires_at
+      ) VALUES (
+        ${overdueBuyer}, ${overdueSeller}, ${offer.id}, ${need.id}, 'proposed',
+        40, 20, ${pastExpiry}
+      )
+    `;
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/admin/metrics",
+      headers: { "x-admin-key": "test-admin-key" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body) as {
+      deadIntentSweep: { overdueUnswept: number; sweptLast7d: number; lastSweptAt: string | null; sweptByDay: Array<{ day: string; swept: number }> };
+    };
+    expect(body.deadIntentSweep.overdueUnswept).toBeGreaterThanOrEqual(1);
+  });
+
+  it("deadIntentSweep.overdueUnswept does NOT count a deal the sweeper already cancelled", async () => {
+    const { app, sql } = await createTestApp();
+
+    const swpBuyer = randomUUID();
+    const swpSeller = randomUUID();
+    await getAuthHeadersForAgent(swpBuyer, { walletAddress: "0x1010000000000000000000000000000000000A" });
+    await getAuthHeadersForAgent(swpSeller, { walletAddress: "0x2020000000000000000000000000000000000B" });
+
+    const [offer] = await sql`
+      INSERT INTO offers (agent_id, title, description_md, category, base_price, max_price_delta_pct, status)
+      VALUES (${swpSeller}, ${"Already swept offer"}, ${"body"}, ${"development"}, ${40}, ${20}, ${"active"})
+      RETURNING id
+    `;
+    const [need] = await sql`
+      INSERT INTO needs (agent_id, title, description_md, category, status)
+      VALUES (${swpBuyer}, ${"Already swept need"}, ${"body"}, ${"development"}, ${"open"})
+      RETURNING id
+    `;
+    const pastExpiry = new Date(Date.now() - 60_000).toISOString();
+    const [dealRow] = await sql`
+      INSERT INTO deals (
+        buyer_agent_id, seller_agent_id, offer_id, need_id, status,
+        negotiated_total, max_price_delta_pct, expires_at
+      ) VALUES (
+        ${swpBuyer}, ${swpSeller}, ${offer.id}, ${need.id}, 'proposed',
+        40, 20, ${pastExpiry}
+      )
+      RETURNING id
+    `;
+
+    // Actually run the real sweeper — the sweeper's OWN endpoint, not a stub —
+    // so this test is the RED-proof: it exercises the exact write path
+    // deadIntentSweep reads from.
+    process.env.ADMIN_API_KEY = "test-admin-key";
+    const sweepRes = await app.inject({
+      method: "POST",
+      url: "/api/admin/expire-stale-proposals",
+      headers: { "x-admin-key": "test-admin-key" },
+    });
+    expect(sweepRes.statusCode).toBe(200);
+    const [swept] = await sql`SELECT status FROM deals WHERE id = ${dealRow.id}`;
+    expect(swept.status).toBe("cancelled");
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/admin/metrics",
+      headers: { "x-admin-key": "test-admin-key" },
+    });
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body) as {
+      deadIntentSweep: { overdueUnswept: number; sweptLast7d: number; lastSweptAt: string | null };
+    };
+    // The deal that was just swept is now 'cancelled' — no longer overdue-unswept.
+    expect(body.deadIntentSweep.overdueUnswept).toBe(0);
+    // And it shows up in the throughput counter sourced from the sweeper's own
+    // negotiation_events audit trail.
+    expect(body.deadIntentSweep.sweptLast7d).toBeGreaterThanOrEqual(1);
+    expect(body.deadIntentSweep.lastSweptAt).not.toBeNull();
+  });
+
+  it("funnelProgression reports the escrow rate for deals created within the window", async () => {
+    // beforeEach already seeded one 'completed' deal created "now" (within any
+    // reasonable window), so createdInWindow/reachedEscrowInWindow must be >= 1/1.
+    const { app } = await createTestApp();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/admin/metrics",
+      headers: { "x-admin-key": "test-admin-key" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body) as {
+      funnelProgression: { windowDays: number; createdInWindow: number; reachedEscrowInWindow: number; escrowRate: number | null };
+    };
+    expect(body.funnelProgression.windowDays).toBe(7);
+    expect(body.funnelProgression.createdInWindow).toBeGreaterThanOrEqual(1);
+    expect(body.funnelProgression.reachedEscrowInWindow).toBeGreaterThanOrEqual(1);
+    expect(body.funnelProgression.escrowRate).not.toBeNull();
+    expect(body.funnelProgression.escrowRate as number).toBeGreaterThan(0);
+  });
+
+  it("funnelProgression does NOT count a still-proposed deal as having reached escrow", async () => {
+    const { app, sql } = await createTestApp();
+
+    const progBuyer = randomUUID();
+    const progSeller = randomUUID();
+    await getAuthHeadersForAgent(progBuyer, { walletAddress: "0x3030000000000000000000000000000000000C" });
+    await getAuthHeadersForAgent(progSeller, { walletAddress: "0x4040000000000000000000000000000000000D" });
+
+    const [offer] = await sql`
+      INSERT INTO offers (agent_id, title, description_md, category, base_price, max_price_delta_pct, status)
+      VALUES (${progSeller}, ${"Progression offer"}, ${"body"}, ${"development"}, ${40}, ${20}, ${"active"})
+      RETURNING id
+    `;
+    const [need] = await sql`
+      INSERT INTO needs (agent_id, title, description_md, category, status)
+      VALUES (${progBuyer}, ${"Progression need"}, ${"body"}, ${"development"}, ${"open"})
+      RETURNING id
+    `;
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    await sql`
+      INSERT INTO deals (
+        buyer_agent_id, seller_agent_id, offer_id, need_id, status,
+        negotiated_total, max_price_delta_pct, expires_at
+      ) VALUES (
+        ${progBuyer}, ${progSeller}, ${offer.id}, ${need.id}, 'proposed',
+        40, 20, ${future}
+      )
+    `;
+
+    const before = await app.inject({
+      method: "GET",
+      url: "/api/admin/metrics",
+      headers: { "x-admin-key": "test-admin-key" },
+    });
+    const bodyBefore = JSON.parse(before.body) as {
+      funnelProgression: { createdInWindow: number; reachedEscrowInWindow: number };
+    };
+    // The new 'proposed' deal grows the denominator by 1 but NOT the numerator.
+    expect(bodyBefore.funnelProgression.createdInWindow).toBeGreaterThanOrEqual(2);
+    // reachedEscrowInWindow still only counts the ONE completed deal from
+    // beforeEach — the proposed deal must not inflate it.
+    expect(bodyBefore.funnelProgression.reachedEscrowInWindow).toBe(1);
+  });
+
   it("economics: flagging an agent internal makes the split trustworthy", async () => {
     const { app, sql } = await createTestApp();
     await cleanDatabase();
