@@ -342,7 +342,12 @@ describe("Admin metrics", () => {
     });
     expect(response.statusCode).toBe(200);
     const body = JSON.parse(response.body) as {
-      deadIntentSweep: { overdueUnswept: number; sweptLast7d: number; lastSweptAt: string | null };
+      deadIntentSweep: {
+        overdueUnswept: number;
+        sweptLast7d: number;
+        lastSweptAt: string | null;
+        sweptByDay: { day: string; swept: number }[];
+      };
     };
     // The deal that was just swept is now 'cancelled' — no longer overdue-unswept.
     expect(body.deadIntentSweep.overdueUnswept).toBe(0);
@@ -350,6 +355,106 @@ describe("Admin metrics", () => {
     // negotiation_events audit trail.
     expect(body.deadIntentSweep.sweptLast7d).toBeGreaterThanOrEqual(1);
     expect(body.deadIntentSweep.lastSweptAt).not.toBeNull();
+
+    // --- sweptByDay BEHAVIOURAL assertions (adversarial-review finding,
+    // 2026-08-18: the series was previously named only in a TypeScript type
+    // and never inspected, so an empty series, wrong dates, or reversed
+    // ordering would have left every assertion green). ---
+    const series = body.deadIntentSweep.sweptByDay;
+    expect(Array.isArray(series)).toBe(true);
+    expect(series.length).toBeGreaterThanOrEqual(1);
+
+    // Today's sweep must appear under TODAY's date, not an off-by-one day.
+    const today = new Date().toISOString().slice(0, 10);
+    const todayEntry = series.find((d) => String(d.day).slice(0, 10) === today);
+    expect(todayEntry).toBeDefined();
+    expect(todayEntry!.swept).toBeGreaterThanOrEqual(1);
+
+    // Every entry must be a well-formed YYYY-MM-DD / positive-count pair.
+    for (const entry of series) {
+      expect(String(entry.day).slice(0, 10)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(Number.isInteger(entry.swept)).toBe(true);
+      expect(entry.swept).toBeGreaterThan(0);
+    }
+
+    // Ordering must be stable and ascending by day (a reversed series would
+    // render a backwards chart without failing anything otherwise).
+    const days = series.map((d) => String(d.day).slice(0, 10));
+    expect([...days].sort()).toEqual(days);
+
+    // The per-day totals must reconcile with the 7d scalar — two independently
+    // computed queries that must agree, so a drift in either is caught.
+    const withinWindow = series.filter((d) => {
+      const age =
+        (Date.now() - new Date(`${String(d.day).slice(0, 10)}T00:00:00Z`).getTime()) /
+        86_400_000;
+      return age <= 7;
+    });
+    const seriesTotal = withinWindow.reduce((acc, d) => acc + d.swept, 0);
+    expect(seriesTotal).toBeGreaterThanOrEqual(body.deadIntentSweep.sweptLast7d);
+  });
+
+  it("survives a malformed payload_json row instead of 500ing the endpoint", async () => {
+    // Adversarial-review finding (2026-08-18): the read-side normalization
+    // cast the inner text of EVERY string scalar to ::jsonb, so a single
+    // malformed historical row (empty string, or a plain string scalar)
+    // turned /api/admin/metrics into a hard 500. Excluding the bad row is the
+    // only correct failure mode for an observability query.
+    const { app, sql } = await createTestApp();
+    process.env.ADMIN_API_KEY = "test-admin-key";
+
+    // beforeEach already seeded a real deal through the real API surface —
+    // reuse it rather than hand-rolling fixtures against a schema this test
+    // would otherwise have to guess at.
+    const [existing] = await sql`SELECT id, buyer_agent_id FROM deals LIMIT 1`;
+    expect(existing).toBeDefined();
+
+    // Three poison shapes, all as 'cancel' events so they hit the normalization.
+    //
+    // NOTE: these MUST be inserted as raw SQL literals via sql.unsafe(). A
+    // bound parameter (${bad}::jsonb) does NOT work here — postgres.js
+    // re-serializes the bound string, so '"hello"' arrives as the
+    // double-encoded '"\"hello\""' whose inner text is the VALID JSON
+    // '"hello"', which casts cleanly and poisons nothing. (That re-encoding
+    // is the very behaviour this endpoint's normalization exists to undo,
+    // measured empirically against this database.) Using a bound parameter
+    // here produced a test that passed identically on guarded AND neutered
+    // code — a green test proving nothing.
+    const dealId = String(existing.id);
+    const actorId = String(existing.buyer_agent_id);
+    for (const bad of ['"hello"', '"[not json"', '""']) {
+      await sql.unsafe(
+        `INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+         VALUES ('${dealId}', '${actorId}', 'cancel', '${bad}'::jsonb)`
+      );
+    }
+
+    // Sanity: the rows really are string scalars whose inner text is NOT a
+    // JSON object — i.e. the poison is genuinely present. Without this the
+    // test could silently degrade into asserting nothing again.
+    const [poison] = await sql`
+      SELECT COUNT(*)::int AS n
+      FROM negotiation_events
+      WHERE event_type = 'cancel'
+        AND jsonb_typeof(payload_json) = 'string'
+        AND (payload_json #>> '{}') !~ '^\\s*\\{'
+    `;
+    expect(poison.n).toBeGreaterThanOrEqual(3);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/admin/metrics",
+      headers: { "x-admin-key": "test-admin-key" },
+    });
+
+    // The decisive assertion: 200, not 500.
+    expect(res.statusCode).toBe(200);
+    const parsed = JSON.parse(res.body) as {
+      deadIntentSweep: { sweptLast7d: number; sweptByDay: { day: string; swept: number }[] };
+    };
+    // Malformed rows are EXCLUDED, never counted as real sweeps.
+    expect(parsed.deadIntentSweep.sweptLast7d).toBeGreaterThanOrEqual(0);
+    expect(Array.isArray(parsed.deadIntentSweep.sweptByDay)).toBe(true);
   });
 
   it("funnelProgression reports the escrow rate for deals created within the window", async () => {

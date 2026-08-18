@@ -153,7 +153,17 @@ export default async function adminRoutes(app: FastifyInstance) {
         SELECT
           created_at,
           (CASE
-            WHEN jsonb_typeof(payload_json) = 'string' THEN (payload_json #>> '{}')::jsonb
+            -- Only unwrap when the inner text is actually a JSON OBJECT.
+            -- A bare ::jsonb cast on arbitrary inner text turns ONE malformed
+            -- historical row (an empty string, or a plain string scalar like
+            -- "hello") into a hard 500 for the whole metrics endpoint --
+            -- adversarial review finding, 2026-08-18. Excluding the bad row
+            -- is always the right failure mode for an observability query.
+            WHEN jsonb_typeof(payload_json) = 'string'
+                 AND (payload_json #>> '{}') ~ '^\\s*\\{'
+              THEN (payload_json #>> '{}')::jsonb
+            WHEN jsonb_typeof(payload_json) = 'string'
+              THEN '{}'::jsonb
             ELSE payload_json
           END) AS payload
         FROM negotiation_events
@@ -173,7 +183,17 @@ export default async function adminRoutes(app: FastifyInstance) {
         SELECT
           created_at,
           (CASE
-            WHEN jsonb_typeof(payload_json) = 'string' THEN (payload_json #>> '{}')::jsonb
+            -- Only unwrap when the inner text is actually a JSON OBJECT.
+            -- A bare ::jsonb cast on arbitrary inner text turns ONE malformed
+            -- historical row (an empty string, or a plain string scalar like
+            -- "hello") into a hard 500 for the whole metrics endpoint --
+            -- adversarial review finding, 2026-08-18. Excluding the bad row
+            -- is always the right failure mode for an observability query.
+            WHEN jsonb_typeof(payload_json) = 'string'
+                 AND (payload_json #>> '{}') ~ '^\\s*\\{'
+              THEN (payload_json #>> '{}')::jsonb
+            WHEN jsonb_typeof(payload_json) = 'string'
+              THEN '{}'::jsonb
             ELSE payload_json
           END) AS payload
         FROM negotiation_events
