@@ -6,20 +6,37 @@
 #   /api/needs?limit=1   → 200, <3s, valid JSON
 #   /api/offers?limit=1  → 200, <3s, valid JSON
 #   /api/deals?limit=1   → 200, <3s, valid JSON
+#   FRESHNESS            → prod actually serves the newest shipped routes
 #
 # Designed to run in CI post-deploy AND as a daily cron (durability clock).
 # 7 consecutive green days closes the escrow-safety rollout acceptance gate.
+#
+# ── Why the freshness probe exists (incident 2026-08-20) ────────────────────
+# The four probes above are LIVENESS probes: they only touch routes that have
+# existed since the project's early days. Production ran a build from 2026-07-30
+# for 21 days — missing six merged PRs including a funding-verification security
+# fix (#97) — and these probes stayed green the entire time, because "the API
+# answers" and "the API is running the code we merged" are different questions.
+# Nothing in CI deploys this project, so a merged PR ships only when a human
+# copies it to the box; without a freshness check, that omission is invisible.
+#
+# A freshness probe asserts a route that exists ONLY in a recent build. When it
+# 404s while the liveness probes are green, the diagnosis is unambiguous:
+# production is serving a stale build. Add a new entry here whenever a PR adds a
+# durable, cheaply-probeable route — that is what keeps this gate honest.
 #
 # Usage:
 #   bash scripts/smoke-prod.sh                    # exits 0/1, human output
 #   bash scripts/smoke-prod.sh --json             # JSON output, exits 0/1
 #   API_BASE=https://api.agentpact.xyz bash …     # override base URL
+#   SKIP_FRESHNESS=1 bash …                       # liveness only (pre-deploy)
 
 set -euo pipefail
 
 API_BASE="${API_BASE:-https://api.agentpact.xyz}"
 HEALTH_BUDGET_MS="${HEALTH_BUDGET_MS:-1000}"
 DATA_BUDGET_MS="${DATA_BUDGET_MS:-3000}"
+SKIP_FRESHNESS="${SKIP_FRESHNESS:-0}"
 JSON_OUTPUT=false
 if [[ "${1:-}" == "--json" ]]; then
   JSON_OUTPUT=true
@@ -32,6 +49,17 @@ PROBES=(
   "offers|/api/offers?limit=1|${DATA_BUDGET_MS}"
   "deals|/api/deals?limit=1|${DATA_BUDGET_MS}"
 )
+
+# ── Freshness probes ────────────────────────────────────────────────────────
+# Each row: name|path|shipped_in|expected_http
+# `expected_http` is what a CURRENT build returns for a deliberately absent id.
+# 404 with a JSON error body = route exists and rejected the id (fresh).
+# 404 with Fastify's "Route GET:… not found" = route absent (STALE BUILD).
+# The two are distinguished by body inspection below, not by status code.
+FRESHNESS_PROBES=(
+  "settlement_audit|/api/deals/00000000-0000-0000-0000-000000000000/settlement|PR#106 (2026-08-17)|404"
+)
+
 
 # Color (only if interactive)
 if [[ -t 1 && "$JSON_OUTPUT" == "false" ]]; then
@@ -53,7 +81,6 @@ for probe in "${PROBES[@]}"; do
   url="${API_BASE}${path}"
 
   body_file=$(mktemp)
-  status=0
   http_code=0
   elapsed_ms=0
   json_valid=false
@@ -101,13 +128,63 @@ done
 
 results_json+="]"
 
+# ── Freshness evaluation ────────────────────────────────────────────────────
+# Fastify's built-in not-found handler emits {"message":"Route GET:/… not
+# found","error":"Not Found"}. A route that EXISTS but rejects an unknown id
+# emits the handler's own body ({"error":"Deal not found"}). Both are HTTP 404,
+# so the status code alone cannot tell them apart — we must read the body.
+freshness_json="["
+fresh_first=true
+if [[ "$SKIP_FRESHNESS" != "1" ]]; then
+  for probe in "${FRESHNESS_PROBES[@]}"; do
+    IFS='|' read -r fname fpath fshipped _fexpected <<< "$probe"
+    furl="${API_BASE}${fpath}"
+    fbody=$(mktemp)
+    fcode=$(curl -sS -o "$fbody" -w "%{http_code}" --max-time 15 "$furl" 2>/dev/null || echo 0)
+
+    # Stale iff the body is Fastify's route-not-found shape.
+    stale=false
+    if grep -qE '"message"[[:space:]]*:[[:space:]]*"Route [A-Z]+:[^"]*not found"' "$fbody" 2>/dev/null; then
+      stale=true
+    fi
+
+    fpass=true
+    if [[ "$stale" == "true" ]]; then
+      fpass=false
+      all_pass=false
+      fail_summary+=("STALE_BUILD:${fname} (route from ${fshipped} absent in production)")
+    elif [[ "$fcode" == "000" || "$fcode" == "0" ]]; then
+      fpass=false
+      all_pass=false
+      fail_summary+=("freshness:${fname} unreachable")
+    fi
+
+    if [[ "$JSON_OUTPUT" == "false" ]]; then
+      if [[ "$fpass" == "true" ]]; then
+        printf "  ${C_OK}✓${C_RST}  %-8s  %sroute present${C_RST}  http=%s  %s\n" \
+          "fresh" "$C_DIM" "$fcode" "$fshipped"
+      else
+        printf "  ${C_FAIL}✗${C_RST}  %-8s  %sSTALE BUILD${C_RST}  http=%s  %s missing from prod\n" \
+          "fresh" "$C_DIM" "$fcode" "$fshipped"
+      fi
+    else
+      [[ "$fresh_first" == "false" ]] && freshness_json+=","
+      fresh_first=false
+      freshness_json+=$(printf '{"name":"%s","path":"%s","shipped_in":"%s","http":%s,"stale_build":%s,"pass":%s}' \
+        "$fname" "$fpath" "$fshipped" "${fcode:-0}" "$stale" "$fpass")
+    fi
+    rm -f "$fbody"
+  done
+fi
+freshness_json+="]"
+
 if [[ "$JSON_OUTPUT" == "true" ]]; then
-  printf '{"api_base":"%s","timestamp":"%s","all_pass":%s,"probes":%s}\n' \
-    "$API_BASE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$all_pass" "$results_json"
+  printf '{"api_base":"%s","timestamp":"%s","all_pass":%s,"probes":%s,"freshness":%s}\n' \
+    "$API_BASE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$all_pass" "$results_json" "$freshness_json"
 fi
 
 if [[ "$all_pass" == "true" ]]; then
-  $JSON_OUTPUT || echo -e "${C_OK}smoke-prod: PASS${C_RST}  (4/4 probes within budget)"
+  $JSON_OUTPUT || echo -e "${C_OK}smoke-prod: PASS${C_RST}  (4/4 probes within budget, build fresh)"
   exit 0
 else
   $JSON_OUTPUT || echo -e "${C_FAIL}smoke-prod: FAIL${C_RST}  ${fail_summary[*]}"
