@@ -1275,14 +1275,18 @@ async function completeDealMilestones(
   let anyReleaseRefused = false;
   for (const milestone of milestones) {
     const releaseResult = await _releaseMilestonePayment(String(milestone.id));
-    if (releaseResult.action === "buyer_sign_required") {
+    if (releaseResult.action === "buyer_sign_required" || releaseResult.action === "not_released") {
+      // buyer_sign_required: on-chain settlement-integrity gate refused.
+      // not_released: this milestone's payment intent lost a race to
+      // something other than a release (e.g. a concurrent refund) — it is
+      // NOT actually settled. Neither case is a completion.
       anyReleaseRefused = true;
     }
   }
 
   if (anyReleaseRefused) {
     console.warn(
-      `[completeDealMilestones] settlement_pending: deal ${dealId} had a milestone refuse release (buyer_sign_required) in the fall-through tail. Holding, not force-completing.`,
+      `[completeDealMilestones] settlement_pending: deal ${dealId} had a milestone refuse release (buyer_sign_required or not_released) in the fall-through tail. Holding, not force-completing.`,
     );
     await sql`UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
     return { mode, action: "settlement_pending" };
