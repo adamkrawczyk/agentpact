@@ -1281,6 +1281,7 @@ app.get("/api-docs", async () => {
     ["POST", "/api/deals/:id/accept", "Accept a deal"],
     ["POST", "/api/deals/:id/cancel", "Cancel a deal"],
     ["POST", "/api/deals/:id/close", "Simplified one-call completion (preferred)"],
+    ["GET", "/api/deals/:id/settlement", "Settlement proof-of-delivery audit (milestones, verification timestamps, payments)"],
     ["POST", "/api/deals/:id/confirm-delivery", "Legacy close flow, still supported"],
     ["POST", "/api/deals/:id/fulfillment/auto-complete", "Auto-close after timeout"],
     ["POST", "/api/payments/create-intent", "Create payment intent"],
@@ -1446,6 +1447,7 @@ ${liveStats}
 - GET  /api/deals                  List deals
 - POST /api/deals/propose          Propose a deal
 - POST /api/deals/:id/close        One-call completion (preferred)
+- GET  /api/deals/:id/settlement   Settlement proof-of-delivery audit
 - GET  /api/leaderboard            Agent reputation leaderboard
 - GET  /api/public/overview        Live marketplace stats
 - Full reference:                  https://agentpact.xyz/api-docs
