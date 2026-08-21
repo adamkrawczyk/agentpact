@@ -229,15 +229,29 @@ export async function releaseMilestonePayment(
   `;
 
   if (!payment) {
-    // No funded payment intent — still transition the milestone and deal to completed
-    // so the state machine is not left stuck at 'delivered'. Nothing to fabricate:
-    // there is no money to (mis)represent as released.
-    await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = ${milestoneId} AND status != 'accepted'`;
-    await sql`
-      UPDATE deals SET status = 'completed', updated_at = NOW()
-      WHERE id = (SELECT deal_id FROM milestones WHERE id = ${milestoneId})
-        AND status != 'completed'
-    `;
+    // No funded payment intent — still transition the milestone (and the deal,
+    // ONLY if this was the last outstanding one) so the state machine is not
+    // left stuck at 'delivered'. Nothing to fabricate: there is no money to
+    // (mis)represent as released.
+    //
+    // The deal-row lock serializes concurrent zero-payment releases of the same
+    // deal (READ COMMITTED could otherwise leave a fully-accepted deal stuck at
+    // 'delivered' when two siblings release in parallel).
+    await sql.begin(async (txn) => {
+      await txn`SELECT id FROM deals WHERE id = (SELECT deal_id FROM milestones WHERE id = ${milestoneId}) FOR UPDATE`;
+      await txn`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = ${milestoneId} AND status != 'accepted'`;
+      await txn`
+        UPDATE deals SET status = 'completed', updated_at = NOW()
+        WHERE id = (SELECT deal_id FROM milestones WHERE id = ${milestoneId})
+          AND status != 'completed'
+          AND NOT EXISTS (
+            SELECT 1 FROM milestones sibling
+            WHERE sibling.deal_id = (SELECT deal_id FROM milestones WHERE id = ${milestoneId})
+              AND sibling.id != ${milestoneId}
+              AND sibling.status NOT IN ('accepted', 'cancelled')
+          )
+      `;
+    });
     return { mode, action: "released" };
   }
 
@@ -270,19 +284,45 @@ export async function releaseMilestonePayment(
   const txHash = hasRealReleaseTx ? opts.releaseTxHash! : `sim_release_${randomUUID().slice(0, 8)}`;
 
   await sql.begin(async (txn) => {
+    // Serialize concurrent releases against the same deal. Under READ COMMITTED,
+    // two parallel releases of sibling milestones would each observe the other
+    // still outstanding, both skip the deal-completion UPDATE, and leave a
+    // fully-settled deal stuck at 'delivered'. The deal-row lock makes the
+    // sibling-coverage check + completion transition atomic per deal.
+    await txn`SELECT id FROM deals WHERE id = ${payment.deal_id} FOR UPDATE`;
     await txn.unsafe(
       `UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW(), tx_hash = $1 WHERE id = $2`,
       [txHash, payment.id]
     );
     await txn.unsafe(`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE id = $1`, [milestoneId]);
+    // Multi-milestone completion guard (issue #108): a deal is 'completed' and its
+    // offer archived ONLY when this release settles the LAST outstanding milestone.
+    // Coverage, not existence — mirrors completeDealMilestones()'s unbacked-milestone
+    // check. Before this guard, releasing milestone 1 of N flipped the whole deal to
+    // 'completed' and archived the seller's offer while milestones 2..N were still
+    // unpaid/in-flight. Single-milestone deals: the NOT EXISTS is trivially true,
+    // legacy behavior preserved byte-for-byte.
     await txn.unsafe(
-      `UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = (SELECT deal_id FROM milestones WHERE id = $1)`,
-      [milestoneId]
+      `UPDATE deals SET status = 'completed', updated_at = NOW()
+       WHERE id = $1
+         AND NOT EXISTS (
+           SELECT 1 FROM milestones sibling
+           WHERE sibling.deal_id = $1
+             AND sibling.id != $2
+             AND sibling.status NOT IN ('accepted', 'cancelled')
+         )`,
+      [payment.deal_id, milestoneId]
     );
     await txn.unsafe(
       `UPDATE offers SET status = 'archived', updated_at = NOW()
-       WHERE id = (SELECT offer_id FROM deals WHERE id = (SELECT deal_id FROM milestones WHERE id = $1)) AND status = 'active'`,
-      [milestoneId]
+       WHERE id = (SELECT offer_id FROM deals WHERE id = $1) AND status = 'active'
+         AND NOT EXISTS (
+           SELECT 1 FROM milestones sibling
+           WHERE sibling.deal_id = $1
+             AND sibling.id != $2
+             AND sibling.status NOT IN ('accepted', 'cancelled')
+         )`,
+      [payment.deal_id, milestoneId]
     );
     await txn.unsafe(
       `INSERT INTO audit_log (action, object_type, object_id, payload_json)
