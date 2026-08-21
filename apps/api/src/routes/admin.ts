@@ -107,6 +107,134 @@ export default async function adminRoutes(app: FastifyInstance) {
         AND payload_json ? 'feeAmount'
     `;
 
+    // ── DEAD-INTENT-SWEEP SLA (issue #107) ────────────────────────────────
+    //
+    // #102 added POST /api/admin/expire-stale-proposals: a cron/operator-driven
+    // sweeper that cancels 'proposed'/'countered' deals past their expires_at
+    // deadline before they accumulate silently (the exact defect #102 fixed —
+    // 200+ dead deals, oldest 2026-04-27, that nothing ever swept). #102/#104
+    // shipped the CURE but no metric watches whether the cure keeps working —
+    // a cron that silently stops firing regresses the funnel back to the
+    // pre-#102 state with zero visibility. Two numbers close that gap:
+    //
+    //   overdueUnswept — deals PAST their acceptance deadline that the next
+    //     sweep run has not yet cancelled. This is the SLA number: healthy
+    //     operation keeps it at (or very near) zero between sweep cycles. A
+    //     sustained non-zero value means the sweeper cron is not running, is
+    //     erroring, or a code change reopened the leak — same failure shape
+    //     issue #104 found for the 'countered' status gap.
+    //   sweptLast7d / sweptByDay — actual sweep throughput, sourced from the
+    //     negotiation_events audit trail the sweeper itself writes
+    //     (event_type='cancel', reason='acceptance_deadline_expired',
+    //     automated=true) — no new table, no new write path, purely additive.
+    const [sweepBacklog] = await sql`
+      SELECT COUNT(*)::int AS overdue_unswept
+      FROM deals
+      WHERE status IN ('proposed', 'countered')
+        AND expires_at IS NOT NULL
+        AND expires_at < NOW()
+    `;
+
+    // Defensive read-side normalization: negotiation_events.payload_json can
+    // be DOUBLE-JSON-ENCODED — the sweeper's own INSERT (this file, below)
+    // binds `JSON.stringify(...)::jsonb`, the exact double-encode class
+    // documented in routes/utils.ts (coerceJsonArray / enrichOfferRow):
+    // postgres.js's own jsonb serializer then re-stringifies the already-
+    // stringified value, so the column holds a JSON *string scalar*
+    // containing the JSON text, not a JSON object. `payload->>'reason'` on a
+    // string scalar is NULL, silently zeroing this metric. Rather than touch
+    // the sweeper's write path (out of scope — additive/read-only change),
+    // normalize on read exactly like the existing app-layer pattern: unwrap
+    // the string scalar to its inner jsonb when present, object as-is
+    // otherwise. Works for old AND (if the write path is ever fixed)
+    // correctly-encoded rows alike.
+    const [sweepRecent] = await sql`
+      WITH normalized AS (
+        SELECT
+          created_at,
+          (CASE
+            -- Only unwrap when the inner text is actually a JSON OBJECT.
+            -- A bare ::jsonb cast on arbitrary inner text turns ONE malformed
+            -- historical row (an empty string, or a plain string scalar like
+            -- "hello") into a hard 500 for the whole metrics endpoint --
+            -- adversarial review finding, 2026-08-18. Excluding the bad row
+            -- is always the right failure mode for an observability query.
+            WHEN jsonb_typeof(payload_json) = 'string'
+                 AND (payload_json #>> '{}') ~ '^\\s*\\{'
+              THEN (payload_json #>> '{}')::jsonb
+            WHEN jsonb_typeof(payload_json) = 'string'
+              THEN '{}'::jsonb
+            ELSE payload_json
+          END) AS payload
+        FROM negotiation_events
+        WHERE event_type = 'cancel'
+      )
+      SELECT
+        COUNT(*)::int AS swept_last_7d,
+        MAX(created_at) AS last_swept_at
+      FROM normalized
+      WHERE payload->>'reason' = 'acceptance_deadline_expired'
+        AND (payload->>'automated')::boolean = true
+        AND created_at > NOW() - INTERVAL '7 days'
+    `;
+
+    const sweptByDay = await sql`
+      WITH normalized AS (
+        SELECT
+          created_at,
+          (CASE
+            -- Only unwrap when the inner text is actually a JSON OBJECT.
+            -- A bare ::jsonb cast on arbitrary inner text turns ONE malformed
+            -- historical row (an empty string, or a plain string scalar like
+            -- "hello") into a hard 500 for the whole metrics endpoint --
+            -- adversarial review finding, 2026-08-18. Excluding the bad row
+            -- is always the right failure mode for an observability query.
+            WHEN jsonb_typeof(payload_json) = 'string'
+                 AND (payload_json #>> '{}') ~ '^\\s*\\{'
+              THEN (payload_json #>> '{}')::jsonb
+            WHEN jsonb_typeof(payload_json) = 'string'
+              THEN '{}'::jsonb
+            ELSE payload_json
+          END) AS payload
+        FROM negotiation_events
+        WHERE event_type = 'cancel'
+      )
+      SELECT
+        date_trunc('day', created_at)::date AS day,
+        COUNT(*)::int AS swept
+      FROM normalized
+      WHERE payload->>'reason' = 'acceptance_deadline_expired'
+        AND (payload->>'automated')::boolean = true
+        AND created_at > NOW() - INTERVAL '14 days'
+      GROUP BY 1
+      ORDER BY 1 DESC
+    `;
+
+    // ── FUNNEL-PROGRESSION HEALTH (issue #107) ────────────────────────────
+    // What fraction of deals PROPOSED in the last N days have reached escrow
+    // (funded) as of now? A dropping rate over time is an early silent-decay
+    // signal the point-in-time funnel counts above cannot show, because those
+    // mix deals of every age together. "Reached escrow" mirrors the exact
+    // dealsFunded predicate above (status shortcut OR a funded/released
+    // payment_intent) so this can never disagree with the funnel numbers.
+    const funnelProgressionWindowDays = 7;
+    const [progression] = await sql`
+      SELECT
+        COUNT(*)::int AS created_in_window,
+        COUNT(*) FILTER (
+          WHERE deals.status IN ('funded', 'delivered', 'completed')
+             OR EXISTS (
+               SELECT 1
+               FROM milestones m
+               JOIN payment_intents pi ON pi.milestone_id = m.id
+               WHERE m.deal_id = deals.id
+                 AND pi.status IN ('funded', 'released')
+             )
+        )::int AS reached_escrow_in_window
+      FROM deals
+      WHERE created_at > NOW() - (${funnelProgressionWindowDays} || ' days')::interval
+    `;
+
     // ── ECONOMICS: two HARD-SEPARATED signals (autoclose rollout metrics loop) ──
     //
     // The naive GMV above (SUM negotiated_total WHERE completed) is wash-trade
@@ -206,6 +334,27 @@ export default async function adminRoutes(app: FastifyInstance) {
           conversion("dealsFunded", "dealsCompleted", dealsFunded, dealsCompleted),
         ],
       },
+      // Dead-intent-sweep SLA (issue #107) — is the #102/#104 stale-proposal
+      // sweeper still doing its job? See the getMetrics query comment above.
+      deadIntentSweep: {
+        overdueUnswept: Number(sweepBacklog.overdue_unswept ?? 0),
+        sweptLast7d: Number(sweepRecent.swept_last_7d ?? 0),
+        lastSweptAt: sweepRecent.last_swept_at ? new Date(sweepRecent.last_swept_at).toISOString() : null,
+        sweptByDay: sweptByDay.map((row) => ({
+          day: row.day instanceof Date ? row.day.toISOString().slice(0, 10) : String(row.day),
+          swept: Number(row.swept),
+        })),
+      },
+      // Funnel-progression health (issue #107) — of deals PROPOSED in the
+      // last N days, what fraction have reached escrow (funded+) so far?
+      // Complements the point-in-time funnel above with an age-bounded rate
+      // that can catch a slow decay the all-time funnel numbers smear over.
+      funnelProgression: {
+        windowDays: funnelProgressionWindowDays,
+        createdInWindow: Number(progression.created_in_window ?? 0),
+        reachedEscrowInWindow: Number(progression.reached_escrow_in_window ?? 0),
+        escrowRate: rate(Number(progression.created_in_window ?? 0), Number(progression.reached_escrow_in_window ?? 0)),
+      },
       revenue: {
         gmv,
         platformFeePct: PLATFORM_FEE_PCT,
@@ -262,6 +411,9 @@ export default async function adminRoutes(app: FastifyInstance) {
       ["GMV", `${metrics.revenue.gmv.toFixed(2)} USDC`],
       ["Fee revenue", `${metrics.revenue.platformFeeRevenue.toFixed(2)} USDC`],
       ["Browse p95", `${metrics.browseLatency.overall.p95Ms.toFixed(2)} ms`],
+      ["Overdue unswept intents", metrics.deadIntentSweep.overdueUnswept],
+      ["Swept (7d)", metrics.deadIntentSweep.sweptLast7d],
+      [`Escrow rate (${metrics.funnelProgression.windowDays}d)`, metrics.funnelProgression.escrowRate === null ? "n/a" : `${(metrics.funnelProgression.escrowRate * 100).toFixed(1)}%`],
     ];
     const rows = metrics.browseLatency.byEndpoint
       .map((row) => `<tr><td>${row.endpoint}</td><td>${row.count}</td><td>${row.avgMs}</td><td>${row.p50Ms}</td><td>${row.p95Ms}</td></tr>`)
