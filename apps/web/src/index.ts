@@ -1035,7 +1035,7 @@ const dealsHandler = async (request: any, reply: any) => {
   const cards = data.map(deal => {
     const statusColor = deal.status === "accepted" ? "#00ff41" : deal.status === "disputed" ? "#ff4141" : "#FFD700";
     return `<div class="card">
-  <div class="card-title">Deal ${escapeHtml(safe(deal.id).slice(0, 8))}…</div>
+  <div class="card-title"><a href="/deals/${escapeHtml(deal.id)}">Deal ${escapeHtml(safe(deal.id).slice(0, 8))}…</a></div>
   <div class="card-row"><span class="card-label">status</span><span class="card-value" style="color:${statusColor}">${escapeHtml(safe(deal.status))}</span></div>
   <div class="card-row"><span class="card-label">total</span><span class="card-value price">${formatPrice(deal.negotiated_total ?? 0)} ${escapeHtml(deal.currency ?? "USDC")}</span></div>
   <div class="card-row"><span class="card-label">buyer</span><span class="card-value">${escapeHtml(safe(deal.buyer_agent_id).slice(0, 8))}…</span></div>
@@ -1053,6 +1053,142 @@ const dealsHandler = async (request: any, reply: any) => {
 };
 app.get("/deals", dealsHandler);
 app.get("/deals.json", dealsHandler);
+
+// ── Deal Detail + Settlement Proof ──────────────────────────────────
+// Ships agent-facing visibility for GET /api/deals/:id/settlement (live since
+// PR #106, merged 2026-08-17; documented on /api-docs since PR #113,
+// merged 2026-08-21). Before this route, the endpoint had zero UI surface —
+// agents could curl the proof but the web portal rendered nothing for it.
+type SettlementMilestone = {
+  milestone_id: string;
+  idx: number;
+  title: string;
+  status: string;
+  due_at: string | null;
+  buyer_proof_at: string | null;
+  seller_delivered_at: string | null;
+  delivery_verified_at: string | null;
+  delivery_status: string | null;
+  delivery_count: number;
+  payments: Array<{ status?: string; released_at?: string | null }>;
+};
+type SettlementProof = {
+  deal_id: string;
+  deal_status: string;
+  milestones: SettlementMilestone[];
+  service_fulfillment?: {
+    fulfillment_type?: string;
+    status?: string;
+    seller_delivered_at?: string | null;
+    buyer_proof_at?: string | null;
+    expires_at?: string | null;
+  } | null;
+  audit_flag?: string | null;
+};
+
+function fmtTs(ts: string | null | undefined): string {
+  if (!ts) return "—";
+  return escapeHtml(new Date(ts).toISOString().replace("T", " ").slice(0, 19) + " UTC");
+}
+
+function milestoneStatusColor(status: string): string {
+  if (status === "delivered" || status === "verified" || status === "completed") return "#00ff41";
+  if (status === "disputed" || status === "rejected") return "#ff4141";
+  return "#FFD700";
+}
+
+function renderSettlementProof(proof: SettlementProof): string {
+  const milestoneRows = proof.milestones.map((m) => {
+    const paymentBadges = (m.payments ?? []).length > 0
+      ? m.payments.map((p) => `<span class="tag">payment: ${escapeHtml(safe(p.status))}${p.released_at ? " @ " + fmtTs(p.released_at) : ""}</span>`).join(" ")
+      : `<span class="tag">no payment record yet</span>`;
+    return `<div class="card">
+  <div class="card-title" style="color:${milestoneStatusColor(m.status)}">#${m.idx} ${escapeHtml(m.title)}</div>
+  <div class="card-row"><span class="card-label">status</span><span class="card-value" style="color:${milestoneStatusColor(m.status)}">${escapeHtml(m.status)}</span></div>
+  <div class="card-row"><span class="card-label">delivery</span><span class="card-value">${escapeHtml(safe(m.delivery_status))} (${m.delivery_count} submission${m.delivery_count === 1 ? "" : "s"})</span></div>
+  <div class="card-row"><span class="card-label">seller delivered</span><span class="card-value">${fmtTs(m.seller_delivered_at)}</span></div>
+  <div class="card-row"><span class="card-label">buyer proof</span><span class="card-value">${fmtTs(m.buyer_proof_at)}</span></div>
+  <div class="card-row"><span class="card-label">verified</span><span class="card-value">${fmtTs(m.delivery_verified_at)}</span></div>
+  <div class="card-tags">${paymentBadges}</div>
+</div>`;
+  }).join("\n");
+
+  const fulfillment = proof.service_fulfillment;
+  const fulfillmentBlock = fulfillment
+    ? `<div class="card">
+  <div class="card-title">Service Fulfillment</div>
+  <div class="card-row"><span class="card-label">type</span><span class="card-value">${escapeHtml(safe(fulfillment.fulfillment_type))}</span></div>
+  <div class="card-row"><span class="card-label">status</span><span class="card-value" style="color:${milestoneStatusColor(fulfillment.status ?? "")}">${escapeHtml(safe(fulfillment.status))}</span></div>
+  <div class="card-row"><span class="card-label">seller delivered</span><span class="card-value">${fmtTs(fulfillment.seller_delivered_at)}</span></div>
+  <div class="card-row"><span class="card-label">buyer proof</span><span class="card-value">${fmtTs(fulfillment.buyer_proof_at)}</span></div>
+  <div class="card-row"><span class="card-label">expires</span><span class="card-value">${fmtTs(fulfillment.expires_at)}</span></div>
+</div>`
+    : "";
+
+  const auditFlagBlock = proof.audit_flag
+    ? `<section class="row"><pre style="color:#ff4141">⚠ audit_flag: ${escapeHtml(proof.audit_flag)}</pre></section>`
+    : "";
+
+  return `<div class="detail-section">
+  <h3>🔒 Settlement Proof-of-Delivery</h3>
+  <p class="muted">Verifiable audit trail for this deal's milestones — timestamps and payment status as recorded by the escrow ledger. Source: <code>GET /api/deals/:id/settlement</code>.</p>
+  ${auditFlagBlock}
+  <div class="cards">${milestoneRows || "<p>No milestones recorded.</p>"}</div>
+  ${fulfillmentBlock}
+</div>`;
+}
+
+app.get("/deals/:id", async (request: any, reply: any) => {
+  const { id } = request.params as { id: string };
+  if (wantsJson(request.url, request.headers.accept)) {
+    return reply.send((await getJson(`/api/deals/${id}`)) as Deal);
+  }
+
+  let deal: Deal;
+  try {
+    deal = (await getJson(`/api/deals/${id}`)) as Deal;
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: unknown }).statusCode === "number"
+      ? Number((error as { statusCode?: number }).statusCode)
+      : 503;
+    const title = statusCode === 404 ? "Deal not found" : "Deal temporarily unavailable";
+    const message = statusCode === 404
+      ? "This deal could not be found."
+      : upstreamWarning(`/api/deals/${id}`, error);
+    const body = `<a href="/deals" class="back-link">← back to deals</a>${warningSection(message)}`;
+    return reply.code(statusCode === 404 ? 404 : 503).send(page(title, body));
+  }
+
+  const { data: proof, warning: proofWarning } = await getJsonWithFallback<SettlementProof | null>(
+    `/api/deals/${id}/settlement`,
+    null,
+  );
+
+  const statusColor = deal.status === "accepted" ? "#00ff41" : deal.status === "disputed" ? "#ff4141" : "#FFD700";
+  const dealCanonical = `https://agentpact.xyz/deals/${id}`;
+
+  const proofSection = proof
+    ? renderSettlementProof(proof)
+    : proofWarning
+      ? warningSection(`Settlement proof unavailable: ${proofWarning}`)
+      : "";
+
+  const body = `
+<a href="/deals" class="back-link">← back to deals</a>
+<div class="card">
+  <div class="card-title">Deal ${escapeHtml(safe(deal.id).slice(0, 8))}…</div>
+  <div class="card-row"><span class="card-label">status</span><span class="card-value" style="color:${statusColor}">${escapeHtml(safe(deal.status))}</span></div>
+  <div class="card-row"><span class="card-label">total</span><span class="card-value price">${formatPrice(deal.negotiated_total ?? 0)} ${escapeHtml(deal.currency ?? "USDC")}</span></div>
+  <div class="card-row"><span class="card-label">buyer</span><span class="card-value">${escapeHtml(safe(deal.buyer_agent_id))}</span></div>
+  <div class="card-row"><span class="card-label">seller</span><span class="card-value">${escapeHtml(safe(deal.seller_agent_id))}</span></div>
+</div>
+${proofSection}`;
+
+  return page(`Deal ${id.slice(0, 8)}…`, body, {
+    description: `Settlement proof-of-delivery for AgentPact deal ${id.slice(0, 8)}.`,
+    canonical: dealCanonical,
+  });
+});
 
 // ── Leaderboard ──────────────────────────────────────────────────────
 type LeaderboardEntry = {
