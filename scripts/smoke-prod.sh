@@ -29,11 +29,13 @@
 #   bash scripts/smoke-prod.sh                    # exits 0/1, human output
 #   bash scripts/smoke-prod.sh --json             # JSON output, exits 0/1
 #   API_BASE=https://api.agentpact.xyz bash …     # override base URL
+#   WEB_BASE=https://agentpact.xyz bash …         # override web base URL
 #   SKIP_FRESHNESS=1 bash …                       # liveness only (pre-deploy)
 
 set -euo pipefail
 
 API_BASE="${API_BASE:-https://api.agentpact.xyz}"
+WEB_BASE="${WEB_BASE:-https://agentpact.xyz}"
 HEALTH_BUDGET_MS="${HEALTH_BUDGET_MS:-1000}"
 DATA_BUDGET_MS="${DATA_BUDGET_MS:-3000}"
 SKIP_FRESHNESS="${SKIP_FRESHNESS:-0}"
@@ -59,6 +61,25 @@ PROBES=(
 FRESHNESS_PROBES=(
   "settlement_audit|/api/deals/00000000-0000-0000-0000-000000000000/settlement|PR#106 (2026-08-17)|404"
 )
+
+# ── WEB freshness probes ────────────────────────────────────────────────────
+# The API probes above cannot see the WEB tier at all — they only touch
+# api.agentpact.xyz. That blind spot is why PR #115 (merged 2026-08-23, renders
+# the settlement proof-of-delivery section on the deal detail page) sat undeployed
+# for five days with every smoke run green: liveness on one host says nothing
+# about the freshness of another.
+#
+# Each row: name|path|marker|shipped_in
+#   marker  — a string that a CURRENT web build MUST emit on that path.
+#   absent  → STALE WEB BUILD (or the route regressed). Either way: fail loudly.
+# Add a row whenever a web PR adds a durable, cheaply-probeable surface string.
+WEB_FRESHNESS_PROBES=(
+  "web_build_sha|/health|\"build\"|BUILD_SHA provenance (2026-08-28)"
+)
+
+# The web /health `build` field must ALSO not be the placeholder: an image built
+# without --build-arg BUILD_SHA reports "unknown", which is itself a CD defect.
+WEB_BUILD_PLACEHOLDER="unknown"
 
 
 # Color (only if interactive)
@@ -178,13 +199,63 @@ if [[ "$SKIP_FRESHNESS" != "1" ]]; then
 fi
 freshness_json+="]"
 
+# ── WEB freshness evaluation ────────────────────────────────────────────────
+web_json="["
+web_first=true
+if [[ "$SKIP_FRESHNESS" != "1" ]]; then
+  for probe in "${WEB_FRESHNESS_PROBES[@]}"; do
+    IFS='|' read -r wname wpath wmarker wshipped <<< "$probe"
+    wurl="${WEB_BASE}${wpath}"
+    wbody=$(mktemp)
+    wcode=$(curl -sS -o "$wbody" -w "%{http_code}" --max-time 15 "$wurl" 2>/dev/null || echo 0)
+
+    wpass=false
+    wreason="ok"
+    wbuild=""
+    if [[ "$wcode" != "200" ]]; then
+      wreason="http=${wcode}"
+    elif ! grep -qF -- "$wmarker" "$wbody" 2>/dev/null; then
+      wreason="marker absent (STALE WEB BUILD: ${wshipped})"
+    else
+      wbuild=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('build',''))" "$wbody" 2>/dev/null || echo "")
+      if [[ "$wname" == "web_build_sha" && "$wbuild" == "$WEB_BUILD_PLACEHOLDER" ]]; then
+        wreason="build=unknown (image built without --build-arg BUILD_SHA)"
+      else
+        wpass=true
+      fi
+    fi
+
+    if [[ "$wpass" != "true" ]]; then
+      all_pass=false
+      fail_summary+=("STALE_WEB:${wname} (${wreason})")
+    fi
+
+    if [[ "$JSON_OUTPUT" == "false" ]]; then
+      if [[ "$wpass" == "true" ]]; then
+        printf "  ${C_OK}✓${C_RST}  %-8s  %sweb build %s${C_RST}  http=%s\n" \
+          "web" "$C_DIM" "${wbuild:0:12}" "$wcode"
+      else
+        printf "  ${C_FAIL}✗${C_RST}  %-8s  %sSTALE WEB BUILD${C_RST}  %s\n" \
+          "web" "$C_DIM" "$wreason"
+      fi
+    else
+      [[ "$web_first" == "false" ]] && web_json+=","
+      web_first=false
+      web_json+=$(printf '{"name":"%s","path":"%s","shipped_in":"%s","http":%s,"build":"%s","pass":%s,"reason":"%s"}' \
+        "$wname" "$wpath" "$wshipped" "${wcode:-0}" "$wbuild" "$wpass" "$wreason")
+    fi
+    rm -f "$wbody"
+  done
+fi
+web_json+="]"
+
 if [[ "$JSON_OUTPUT" == "true" ]]; then
-  printf '{"api_base":"%s","timestamp":"%s","all_pass":%s,"probes":%s,"freshness":%s}\n' \
-    "$API_BASE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$all_pass" "$results_json" "$freshness_json"
+  printf '{"api_base":"%s","web_base":"%s","timestamp":"%s","all_pass":%s,"probes":%s,"freshness":%s,"web_freshness":%s}\n' \
+    "$API_BASE" "$WEB_BASE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$all_pass" "$results_json" "$freshness_json" "$web_json"
 fi
 
 if [[ "$all_pass" == "true" ]]; then
-  $JSON_OUTPUT || echo -e "${C_OK}smoke-prod: PASS${C_RST}  (4/4 probes within budget, build fresh)"
+  $JSON_OUTPUT || echo -e "${C_OK}smoke-prod: PASS${C_RST}  (4/4 probes within budget, api+web builds fresh)"
   exit 0
 else
   $JSON_OUTPUT || echo -e "${C_FAIL}smoke-prod: FAIL${C_RST}  ${fail_summary[*]}"

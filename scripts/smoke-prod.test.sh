@@ -17,7 +17,7 @@ cleanup() {
 trap cleanup EXIT
 
 start_mock() {
-  local mode="$1"  # "ok" | "slow" | "fail" | "garbage"
+  local mode="$1"  # "ok" | "slow" | "fail" | "garbage" | "web_stale" | "web_unknown"
   python3 - "$PORT" "$mode" <<'PYEOF' &
 import http.server, json, sys, time
 port = int(sys.argv[1])
@@ -26,6 +26,19 @@ mode = sys.argv[2]
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a, **kw): pass
     def do_GET(self):
+        # Web-freshness probe target. The same mock serves as both API_BASE and
+        # WEB_BASE in these tests, so /health must answer the web shape.
+        if self.path == "/health":
+            if mode == "web_stale":
+                # Pre-2026-08-28 web build: no `build` field at all.
+                body = b'{"ok":true,"service":"web","ts":"2026-08-28T00:00:00Z"}'
+            elif mode == "web_unknown":
+                # Image built without --build-arg BUILD_SHA.
+                body = b'{"ok":true,"service":"web","build":"unknown","ts":"2026-08-28T00:00:00Z"}'
+            else:
+                body = b'{"ok":true,"service":"web","build":"0bbea32deadbeef","ts":"2026-08-28T00:00:00Z"}'
+            self.send_response(200); self.send_header("Content-Type","application/json")
+            self.end_headers(); self.wfile.write(body); return
         if mode == "slow":
             time.sleep(4)
         if mode == "fail":
@@ -65,7 +78,17 @@ stop_mock() {
 }
 
 run_smoke() {
-  API_BASE="http://127.0.0.1:${PORT}" HEALTH_BUDGET_MS=2000 DATA_BUDGET_MS=2000 \
+  API_BASE="http://127.0.0.1:${PORT}" WEB_BASE="http://127.0.0.1:${PORT}" \
+    HEALTH_BUDGET_MS=2000 DATA_BUDGET_MS=2000 SKIP_FRESHNESS=1 \
+    bash "${SCRIPT_DIR}/smoke-prod.sh" "$@"
+}
+
+# Same mock, but WITH freshness evaluation enabled (API freshness probe is
+# tolerant here — the mock returns a JSON body that is not Fastify's
+# route-not-found shape, so it reads as fresh; the web probe is what we assert).
+run_smoke_fresh() {
+  API_BASE="http://127.0.0.1:${PORT}" WEB_BASE="http://127.0.0.1:${PORT}" \
+    HEALTH_BUDGET_MS=2000 DATA_BUDGET_MS=2000 \
     bash "${SCRIPT_DIR}/smoke-prod.sh" "$@"
 }
 
@@ -116,9 +139,54 @@ stop_mock
 echo "▸ test 5: slow server (4s) breaches data budget → exit 1"
 start_mock slow
 out_rc=0
-HEALTH_BUDGET_MS=500 DATA_BUDGET_MS=500 API_BASE="http://127.0.0.1:${PORT}" \
+HEALTH_BUDGET_MS=500 DATA_BUDGET_MS=500 SKIP_FRESHNESS=1 \
+  API_BASE="http://127.0.0.1:${PORT}" WEB_BASE="http://127.0.0.1:${PORT}" \
   bash "${SCRIPT_DIR}/smoke-prod.sh" >/dev/null 2>&1 || out_rc=$?
 assert "exit code 1 on budget breach" "$out_rc" "1"
+stop_mock
+
+# ── Web-freshness regression suite (2026-08-28) ─────────────────────────────
+# These are the RED proofs for the incident this probe exists to catch: PR #115
+# merged and green, live web still serving an old build, every previous probe
+# green. A stale web tier must now fail LOUDLY.
+
+echo "▸ test 6: fresh web build (real BUILD_SHA) → exit 0 and pass reported"
+start_mock ok
+out_rc=0
+json_out=$(run_smoke_fresh --json) || out_rc=$?
+assert "exit code 0 with fresh web build" "$out_rc" "0"
+wpass=$(echo "$json_out" | python3 -c "import json,sys;print(json.load(sys.stdin)['web_freshness'][0]['pass'])")
+assert "web_freshness pass" "$wpass" "True"
+wbuild=$(echo "$json_out" | python3 -c "import json,sys;print(json.load(sys.stdin)['web_freshness'][0]['build'])")
+assert "web build sha surfaced" "$wbuild" "0bbea32deadbeef"
+stop_mock
+
+echo "▸ test 7: STALE web build (no build field) → exit 1"
+start_mock web_stale
+out_rc=0
+out=$(run_smoke_fresh 2>&1) || out_rc=$?
+assert "exit code 1 on stale web build" "$out_rc" "1"
+echo "$out" | grep -q "STALE_WEB" \
+  && assert "STALE_WEB named in failure summary" "yes" "yes" \
+  || assert "STALE_WEB named in failure summary" "no" "yes"
+stop_mock
+
+echo "▸ test 8: web build='unknown' (no --build-arg BUILD_SHA) → exit 1"
+start_mock web_unknown
+out_rc=0
+json_out=$(run_smoke_fresh --json) || out_rc=$?
+assert "exit code 1 on placeholder build sha" "$out_rc" "1"
+wpass=$(echo "$json_out" | python3 -c "import json,sys;print(json.load(sys.stdin)['web_freshness'][0]['pass'])")
+assert "web_freshness fail on unknown" "$wpass" "False"
+stop_mock
+
+echo "▸ test 9: SKIP_FRESHNESS=1 bypasses the web probe entirely (pre-deploy use)"
+start_mock web_stale
+out_rc=0
+json_out=$(run_smoke --json) || out_rc=$?
+assert "exit code 0 when freshness skipped" "$out_rc" "0"
+n_web=$(echo "$json_out" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['web_freshness']))")
+assert "web_freshness empty when skipped" "$n_web" "0"
 stop_mock
 
 echo ""
