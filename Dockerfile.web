@@ -24,6 +24,14 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# Build provenance. Injected by CI (docker build --build-arg BUILD_SHA=$GITHUB_SHA).
+# Surfaced on GET /health so an external probe can prove WHICH commit prod is
+# serving — see scripts/smoke-prod.sh's web-freshness probe. Without this, a
+# merged-but-never-deployed web PR is invisible (incident: PR #115, merged
+# 2026-08-23, still absent from https://agentpact.xyz five days later).
+ARG BUILD_SHA=unknown
+ENV BUILD_SHA=${BUILD_SHA}
+
 # Manifests needed for workspace-aware production install.
 COPY package.json package-lock.json ./
 COPY apps/web/package.json ./apps/web/package.json

@@ -1508,7 +1508,17 @@ app.get("/sitemap.xml", async (_req, reply) => {
 app.get("/health", async (_req, reply) => {
   reply.header("content-type", "application/json");
   reply.header("cache-control", "no-store");
-  return { ok: true, service: "web", ts: new Date().toISOString() };
+  // `build` is the git SHA baked in at image-build time (Dockerfile.web ARG
+  // BUILD_SHA, injected by the CD workflow). It is what makes a STALE WEB BUILD
+  // externally detectable: liveness ("the site answers") and freshness ("the
+  // site runs the code we merged") are different questions, and only the second
+  // one catches a merged-but-undeployed PR.
+  return {
+    ok: true,
+    service: "web",
+    build: process.env.BUILD_SHA || "unknown",
+    ts: new Date().toISOString(),
+  };
 });
 
 // ── llms.txt: machine-discovery index for an agent-native marketplace ────────

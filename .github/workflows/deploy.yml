@@ -1,0 +1,173 @@
+name: Deploy
+
+# ── Why this workflow exists ────────────────────────────────────────────────
+# Before 2026-08-28 this repo had 8 workflows (ci, docker, e2e, lint,
+# publish-sdks, publish, slither, smoke-prod) and NOT ONE of them deployed.
+# docker.yml builds the three images on push to main and stops there, so a
+# merged PR shipped only when a human remembered to SSH to the box. That gap
+# produced the same incident repeatedly (2026-07-25, 07-29, 07-30, 08-20, and
+# again 08-28): PR #115 — "render settlement proof-of-delivery on deal detail
+# page" — merged 2026-08-23 as commit 0bbea32 with the section present at
+# apps/web/src/index.ts:1133, while
+#   curl https://agentpact.xyz/deals/<id> | grep -c 'Settlement Proof-of-Delivery'
+# returned 0 five days later. All three hosts were healthy the whole time; the
+# WEB build was simply old, and nothing in CI could see it.
+#
+# Two halves, both required:
+#   1. this workflow — pull the freshly-built image on the prod host after main
+#      goes green, so a merge deploys itself;
+#   2. the web-freshness probe in scripts/smoke-prod.sh — assert the LIVE web
+#      tier serves the commit we merged, so if half 1 ever silently stops
+#      working the daily smoke goes red instead of staying green.
+#
+# ── Enablement (one-time, needs Adam's key) ─────────────────────────────────
+# This workflow is intentionally INERT until the deploy secrets exist. Without
+# them the `preflight` job reports "not configured" and exits 0 — a missing
+# secret must never look like a broken pipeline (and must never silently look
+# like a successful deploy either; see the smoke gate below).
+#
+# Required repository secrets:
+#   DEPLOY_HOST         prod host (e.g. agentpact.xyz)
+#   DEPLOY_USER         ssh user
+#   DEPLOY_SSH_KEY      private key, PEM, no passphrase
+#   DEPLOY_PATH         absolute path of the checkout on the box (has docker-compose.yml + .env)
+# Optional:
+#   DEPLOY_PORT         ssh port (default 22)
+#
+# Manual dry run:  Actions → Deploy → Run workflow → dry_run = true
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report what would happen; do not touch prod"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: preflight (secrets configured?)
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          missing=()
+          [[ -z "$DEPLOY_HOST"    ]] && missing+=(DEPLOY_HOST)
+          [[ -z "$DEPLOY_USER"    ]] && missing+=(DEPLOY_USER)
+          [[ -z "$DEPLOY_SSH_KEY" ]] && missing+=(DEPLOY_SSH_KEY)
+          [[ -z "$DEPLOY_PATH"    ]] && missing+=(DEPLOY_PATH)
+          if [[ ${#missing[@]} -eq 0 ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "✅ deploy secrets present"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Deploy not configured"
+              echo ""
+              echo "Missing secret(s): \`${missing[*]}\`"
+              echo ""
+              echo "CD is wired but inert. Add the secrets above and the next"
+              echo "green CI run on \`main\` deploys itself. Until then, merges"
+              echo "still require a manual deploy on the box."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  deploy:
+    name: deploy to prod
+    needs: preflight
+    # Only on a GREEN CI run (or an explicit manual dispatch), and only when
+    # the secrets exist. A red CI must never reach prod.
+    if: >-
+      needs.preflight.outputs.configured == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Resolve deploy SHA
+        id: sha
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Deploying $SHA"
+
+      - name: Set up SSH
+        if: ${{ !inputs.dry_run }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${{ secrets.DEPLOY_PORT || 22 }}" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy (pull, rebuild, migrate, restart)
+        if: ${{ !inputs.dry_run }}
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_deploy -p "${{ secrets.DEPLOY_PORT || 22 }}" \
+              -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "set -euo pipefail
+               cd '${{ secrets.DEPLOY_PATH }}'
+               git fetch origin --prune
+               git checkout main
+               git reset --hard '$SHA'
+               # BUILD_SHA is baked into the web image so GET /health can prove
+               # which commit prod is serving (see Dockerfile.web + smoke-prod.sh).
+               BUILD_SHA='$SHA' docker compose build --build-arg BUILD_SHA='$SHA'
+               docker compose run --rm api npm run migrate
+               docker compose up -d
+               docker image prune -f"
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          {
+            echo "### Dry run — nothing touched"
+            echo ""
+            echo "Would deploy \`${{ steps.sha.outputs.sha }}\` to \`${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── The gate that makes this honest ──────────────────────────────────
+      # A deploy that "succeeded" but left prod on the old build is the exact
+      # failure this workflow exists to end. smoke-prod.sh now asserts the LIVE
+      # web tier's /health reports a real BUILD_SHA (not "unknown", not a body
+      # missing the field entirely), so a no-op deploy fails here instead of
+      # being discovered days later by a human grepping the live page.
+      - name: Post-deploy smoke (api + web freshness)
+        if: ${{ !inputs.dry_run }}
+        run: bash scripts/smoke-prod.sh
+
+      - name: Post-deploy smoke artefact
+        if: ${{ always() && !inputs.dry_run }}
+        run: bash scripts/smoke-prod.sh --json > deploy-smoke.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && !inputs.dry_run }}
+        with:
+          name: deploy-smoke-${{ github.run_id }}
+          path: deploy-smoke.json
+          retention-days: 30
