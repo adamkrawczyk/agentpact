@@ -246,7 +246,7 @@ app.addHook("onRequest", async (request, reply) => {
   const path = request.url.split("?")[0];
   if (V1_SUNSET_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`))) {
     reply.header("Sunset", V1_SUNSET_DATE);
-    reply.header("Link", '</api/intents>; rel="successor-version"');
+    reply.header("Link", '</api/intents/discover>; rel="successor-version"');
   }
 });
 const vaultSql = sql as unknown as Sql<Record<string, unknown>>;

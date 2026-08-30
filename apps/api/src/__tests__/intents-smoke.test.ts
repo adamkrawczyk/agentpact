@@ -134,13 +134,13 @@ describe("settlement protocol — intent smoke", () => {
     expect(intent.buyer_agent_id).toBe(buyerId);
   });
 
-  it("v1 routes ship Sunset + Link headers; v2 /api/intents does NOT", async () => {
+  it("v1 routes advertise the reachable v2 discovery successor without sunsetting v2", async () => {
     const { app } = await createTestApp();
 
     const v1 = await app.inject({ method: "GET", url: "/api/deals/00000000-0000-0000-0000-000000000000" });
     // 404 is fine — we're testing headers, not body.
     expect(v1.headers["sunset"]).toBe("Tue, 25 Aug 2026 00:00:00 GMT");
-    expect(v1.headers["link"]).toBe('</api/intents>; rel="successor-version"');
+    expect(v1.headers["link"]).toBe('</api/intents/discover>; rel="successor-version"');
 
     const v2 = await app.inject({ method: "GET", url: "/api/intents/discover" });
     expect(v2.statusCode).toBe(200);
