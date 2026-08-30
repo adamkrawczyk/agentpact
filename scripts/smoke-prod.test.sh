@@ -45,6 +45,20 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(503); self.end_headers(); self.wfile.write(b'{"error":"down"}'); return
         if mode == "garbage":
             self.send_response(200); self.end_headers(); self.wfile.write(b"not json"); return
+        # Link-header freshness probe target: GET /api/deals/<id> (non-settlement path).
+        if self.path.startswith("/api/deals/") and not self.path.endswith("/settlement"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            if mode == "link_stale":
+                self.send_header("Link", '</api/intents>; rel="successor-version"')
+            elif mode == "link_absent":
+                pass
+            else:
+                # default / "ok" / "link_fresh": current build's header.
+                self.send_header("Link", '</api/intents/discover>; rel="successor-version"')
+            self.end_headers()
+            self.wfile.write(b'{"error":"Deal not found"}')
+            return
         # ok
         payload = b'{"ok":true}' if self.path == "/api/health" else b'[{"id":"x"}]'
         self.send_response(200); self.send_header("Content-Type","application/json"); self.end_headers(); self.wfile.write(payload)
@@ -187,6 +201,52 @@ json_out=$(run_smoke --json) || out_rc=$?
 assert "exit code 0 when freshness skipped" "$out_rc" "0"
 n_web=$(echo "$json_out" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['web_freshness']))")
 assert "web_freshness empty when skipped" "$n_web" "0"
+stop_mock
+
+# ── API Link-header freshness regression suite (incident 2026-08-30) ───────
+# RED proofs for: PR #116 merged (101b1cd), CI green, route-presence freshness
+# stayed green (the route never disappeared), yet prod served the OLD Link
+# header value for hours because nothing deployed the API image. Route-exists
+# checks cannot catch a header-VALUE regression; only a literal header
+# comparison can.
+
+echo "▸ test 10: fresh Link header (new successor route) → exit 0"
+start_mock link_fresh
+out_rc=0
+json_out=$(run_smoke_fresh --json) || out_rc=$?
+assert "exit code 0 with fresh Link header" "$out_rc" "0"
+lpass=$(echo "$json_out" | python3 -c "import json,sys;print(json.load(sys.stdin)['link_freshness'][0]['pass'])")
+assert "link_freshness pass" "$lpass" "True"
+lactual=$(echo "$json_out" | python3 -c "import json,sys;print(json.load(sys.stdin)['link_freshness'][0]['actual'])")
+assert "link actual value" "$lactual" '</api/intents/discover>; rel="successor-version"'
+stop_mock
+
+echo "▸ test 11: STALE Link header (old /api/intents successor) → exit 1"
+start_mock link_stale
+out_rc=0
+out=$(run_smoke_fresh 2>&1) || out_rc=$?
+assert "exit code 1 on stale Link header" "$out_rc" "1"
+echo "$out" | grep -q "STALE_LINK" \
+  && assert "STALE_LINK named in failure summary" "yes" "yes" \
+  || assert "STALE_LINK named in failure summary" "no" "yes"
+stop_mock
+
+echo "▸ test 12: Link header entirely absent → exit 1"
+start_mock link_absent
+out_rc=0
+json_out=$(run_smoke_fresh --json) || out_rc=$?
+assert "exit code 1 when Link header absent" "$out_rc" "1"
+lpass=$(echo "$json_out" | python3 -c "import json,sys;print(json.load(sys.stdin)['link_freshness'][0]['pass'])")
+assert "link_freshness fail on absent header" "$lpass" "False"
+stop_mock
+
+echo "▸ test 13: SKIP_FRESHNESS=1 bypasses the Link probe entirely (pre-deploy use)"
+start_mock link_stale
+out_rc=0
+json_out=$(run_smoke --json) || out_rc=$?
+assert "exit code 0 when freshness skipped (link)" "$out_rc" "0"
+n_link=$(echo "$json_out" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['link_freshness']))")
+assert "link_freshness empty when skipped" "$n_link" "0"
 stop_mock
 
 echo ""
