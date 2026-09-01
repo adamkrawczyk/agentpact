@@ -250,7 +250,18 @@ jobs:
                # races this. Run it explicitly, once, before reload.
                npm run migrate
 
+               # ── Stamp build provenance ─────────────────────────────────
+               # The web tier's /health reports $BUILD_SHA; smoke-prod's
+               # STALE_WEB gate refuses "unknown". The env file is what the
+               # start-*.sh wrappers source, so stamp it BEFORE the reload.
+               if grep -q '^BUILD_SHA=' /etc/agentpact/.env; then
+                 sed -i "s/^BUILD_SHA=.*/BUILD_SHA='$SHA'/" /etc/agentpact/.env
+               else
+                 echo "BUILD_SHA='$SHA'" >> /etc/agentpact/.env
+               fi
+
                # ── Reload (zero-downtime) ──────────────────────────────────
+               set -a; source /etc/agentpact/.env; set +a
                pm2 reload ecosystem.config.cjs --update-env
 
                # ── Verify all 4 processes came back online ────────────────
