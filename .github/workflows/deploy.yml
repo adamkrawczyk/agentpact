@@ -178,7 +178,20 @@ jobs:
                # unpushed local commits and 82 dirty files that a routine reset
                # would have silently destroyed. Refuse by default; only an
                # explicit FORCE=true (workflow_dispatch 'force' input) proceeds.
-               LOCAL_ONLY=\$(git log --oneline '$SHA'..HEAD 2>/dev/null | wc -l | tr -d ' ')
+               # The SHA must exist locally before it can be compared against.
+               # 'git log MISSING..HEAD' errors, and with stderr swallowed the
+               # pipeline yields 0 lines -- which the check below would read as
+               # 'no local-only commits, safe to reset'. That is fail-OPEN on a
+               # destructive step: a clean-but-diverged checkout whose fetch
+               # failed would be wiped. Verified on the live box 2026-09-01:
+               # with the SHA absent, LOCAL_ONLY read 0 while HEAD genuinely
+               # carried 32 unreachable commits. Fail CLOSED instead.
+               if ! git cat-file -e '$SHA^{commit}' 2>/dev/null; then
+                 echo \"REFUSING TO DEPLOY: commit $SHA is not present in the checkout after fetch.\"
+                 echo \"Cannot determine what a reset would destroy, so refusing rather than guessing. Check that origin is reachable and the commit was pushed.\"
+                 exit 1
+               fi
+               LOCAL_ONLY=\$(git rev-list --count '$SHA'..HEAD)
                DIRTY=\$(git status --porcelain | wc -l | tr -d ' ')
                if [[ \"\$LOCAL_ONLY\" != \"0\" || \"\$DIRTY\" != \"0\" ]] && [[ \"$FORCE\" != \"true\" ]]; then
                  echo \"REFUSING TO DEPLOY: checkout has \$LOCAL_ONLY commit(s) not reachable from \$SHA and \$DIRTY dirty file(s).\"
