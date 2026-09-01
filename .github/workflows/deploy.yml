@@ -209,6 +209,20 @@ jobs:
                git checkout main
                git reset --hard '$SHA'
 
+               # ── Load runtime env ───────────────────────────────────────
+               # DATABASE_URL (and everything else the app/migrate script
+               # needs) lives in /etc/agentpact/.env, sourced by every pm2
+               # start-*.sh wrapper. This remote deploy step is a fresh SSH
+               # shell that inherits none of that -- without sourcing it here,
+               # 'npm run migrate' falls back to postgres.js's hardcoded
+               # localhost/postgres default and fails auth (verified live
+               # 2026-09-01, run 33551456424: 'password authentication failed
+               # for user \"postgres\"'). set -a exports every var sourced so
+               # child processes (tsc, tsx, node) inherit them too.
+               set -a
+               source /etc/agentpact/.env
+               set +a
+
                # ── Build ───────────────────────────────────────────────────
                # npm workspaces monorepo; root 'build' script fans out to
                # api/mcp/web/daemon/relayer-daemon/fulfillment-daemon/sdk.
