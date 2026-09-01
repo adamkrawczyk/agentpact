@@ -290,18 +290,25 @@ export function enrichOfferRow<T extends Record<string, unknown>>(offer: T): T &
   is_free_tier: boolean;
   pricing_model: "paid" | "reputation-only";
   proofs_json: unknown[];
+  verified: boolean;
 } {
   const isFreeTier = isZeroPrice(offer.base_price);
   // Parse JSONB location if it's a string (postgres.js test env)
   if (typeof offer.location === "string") {
     try { offer = { ...offer, location: JSON.parse(offer.location) }; } catch {}
   }
+  // Verified Seller SKU: `seller_verified` is a per-query boolean projected by
+  // the offers list/search queries (a.verified_at IS NOT NULL); the single
+  // offer detail lookup projects the same column under the same alias. Both
+  // normalize into a stable `verified` boolean on every offer response.
+  const verified = offer.seller_verified === true || offer.seller_verified === "t";
   return {
     ...offer,
     tags: isFreeTier ? withReputationOnlyTag(offer.tags) : normalizeTags(offer.tags),
     is_free_tier: isFreeTier,
     pricing_model: isFreeTier ? "reputation-only" : "paid",
     proofs_json: coerceJsonArray(offer.proofs_json),
+    verified,
   };
 }
 

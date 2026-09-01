@@ -48,6 +48,7 @@ import configRoutes from './routes/config.js';
 import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/deal-helpers.js';
 import { registerAuditWebhookRoutes } from './routes/audit-webhook.js';
 import { registerAuditOrdersRoutes } from './routes/audit-orders.js';
+import { registerVerifiedSellerWebhookRoutes } from './routes/verified-seller-webhook.js';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -1506,6 +1507,13 @@ app.addHook("preHandler", async (request, reply) => {
     return;
   }
 
+  // Verified Seller SKU: public Stripe webhook (sig-verified internally).
+  // GET /api/agents/:id/verification is already public via the existing
+  // "/api/agents" prefix rule above (public GET routes).
+  if (routePath.startsWith("/api/verified/")) {
+    return;
+  }
+
   if (routePath.startsWith("/api/")) {
     await app.authenticate(request, reply);
   }
@@ -1551,6 +1559,7 @@ app.addHook("preHandler", async (request, reply) => {
   await app.register(configRoutes);
   await registerAuditWebhookRoutes(app, _sql);
   await registerAuditOrdersRoutes(app, _sql);
+  await registerVerifiedSellerWebhookRoutes(app, _sql);
 }
 
 // ── §5.1 (2026-05-21): structured error responses. Every error response
