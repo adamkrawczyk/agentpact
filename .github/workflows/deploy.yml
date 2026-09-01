@@ -251,7 +251,7 @@ jobs:
                npm run migrate
 
                # ── Stamp build provenance ─────────────────────────────────
-               # The web tier's /health reports $BUILD_SHA; smoke-prod's
+               # The web tier's /health reports \$BUILD_SHA; smoke-prod's
                # STALE_WEB gate refuses "unknown". The env file is what the
                # start-*.sh wrappers source, so stamp it BEFORE the reload.
                if grep -q '^BUILD_SHA=' /etc/agentpact/.env; then
