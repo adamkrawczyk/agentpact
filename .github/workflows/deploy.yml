@@ -29,7 +29,7 @@ name: Deploy
 # The remote step below was rewritten to match this shape: pull, npm ci,
 # npm run build (with BUILD_SHA exported so the web tier's /health can prove
 # which commit is live — see WEB_FRESHNESS_PROBES in smoke-prod.sh), migrate,
-# then `pm2 reload ecosystem.config.js` (zero-downtime) followed by a
+# then `pm2 reload ecosystem.config.cjs` (zero-downtime) followed by a
 # `pm2 jlist` check that all four apps report `status":"online"`.
 #
 # The prod checkout was also found to be a DIVERGENT FORK at the time of this
@@ -192,9 +192,16 @@ jobs:
                  exit 1
                fi
                LOCAL_ONLY=\$(git rev-list --count '$SHA'..HEAD)
-               DIRTY=\$(git status --porcelain | wc -l | tr -d ' ')
+               # --untracked-files=no: 'git reset --hard' NEVER touches untracked
+               # files, only tracked ones (modified/staged/deleted). Counting
+               # untracked files here is over-inclusive: any ops-local untracked
+               # file that legitimately lives in the deploy path (e.g.
+               # ecosystem.config.cjs, run/*.sh, which are deliberately NOT
+               # committed to the repo) would permanently trip this guard on
+               # every future deploy even though a reset --hard can't touch them.
+               DIRTY=\$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
                if [[ \"\$LOCAL_ONLY\" != \"0\" || \"\$DIRTY\" != \"0\" ]] && [[ \"$FORCE\" != \"true\" ]]; then
-                 echo \"REFUSING TO DEPLOY: checkout has \$LOCAL_ONLY commit(s) not reachable from \$SHA and \$DIRTY dirty file(s).\"
+                 echo \"REFUSING TO DEPLOY: checkout has \$LOCAL_ONLY commit(s) not reachable from $SHA and \$DIRTY dirty tracked file(s).\"
                  echo \"A plain reset --hard would destroy them irrecoverably. Re-run workflow_dispatch with force=true only after these have been adjudicated (see issue #118).\"
                  exit 1
                fi
@@ -219,7 +226,7 @@ jobs:
                npm run migrate
 
                # ── Reload (zero-downtime) ──────────────────────────────────
-               pm2 reload ecosystem.config.js --update-env
+               pm2 reload ecosystem.config.cjs --update-env
 
                # ── Verify all 4 processes came back online ────────────────
                sleep 3
@@ -229,7 +236,7 @@ jobs:
                  pm2 jlist
                  exit 1
                fi
-               echo \"All pm2 apps online at \$SHA\""
+               echo \"All pm2 apps online at $SHA\""
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
