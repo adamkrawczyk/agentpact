@@ -13,9 +13,35 @@ name: Deploy
 # returned 0 five days later. All three hosts were healthy the whole time; the
 # WEB build was simply old, and nothing in CI could see it.
 #
+# ── 2026-09-01 topology correction (issue #118) ─────────────────────────────
+# This workflow originally assumed the prod host runs docker-compose. A live
+# probe of agentpact-cloud (78.47.94.218) on 2026-08-29/09-01 found that
+# assumption was false: there is NO docker on that box at all. Production runs
+# four Node processes directly under pm2 (ap-api, ap-web, ap-mcp, ap-relayer),
+# started via /opt/agentpact-app/ecosystem.config.js and per-app wrapper
+# scripts in /opt/agentpact-app/run/*.sh, each of which `source`s
+# /etc/agentpact/.env and execs `node apps/<app>/dist/index.js` (api uses
+# apps/api/dist/server.js). Build is npm workspaces (`npm run build` at repo
+# root fans out to each workspace's own build script). Migrations run via
+# `npm run migrate` (scripts/migrate.ts, a dedicated single-connection
+# postgres client) — RUN_MIGRATIONS is deliberately false in every pm2 app's
+# env so app boot never races the migration runner. Node on the box is v20.
+# The remote step below was rewritten to match this shape: pull, npm ci,
+# npm run build (with BUILD_SHA exported so the web tier's /health can prove
+# which commit is live — see WEB_FRESHNESS_PROBES in smoke-prod.sh), migrate,
+# then `pm2 reload ecosystem.config.js` (zero-downtime) followed by a
+# `pm2 jlist` check that all four apps report `status":"online"`.
+#
+# The prod checkout was also found to be a DIVERGENT FORK at the time of this
+# probe (32 unpushed local commits, 82 dirty files — see issue #118 steps 1-2,
+# not yet resolved as of this workflow change). Because `git reset --hard`
+# would silently destroy that history, the remote step now refuses to run
+# unless the checkout is clean and matches origin's history, UNLESS the
+# workflow_dispatch `force` input is explicitly set to true.
+#
 # Two halves, both required:
-#   1. this workflow — pull the freshly-built image on the prod host after main
-#      goes green, so a merge deploys itself;
+#   1. this workflow — pull the freshly-built commit onto the prod host after
+#      main goes green, so a merge deploys itself;
 #   2. the web-freshness probe in scripts/smoke-prod.sh — assert the LIVE web
 #      tier serves the commit we merged, so if half 1 ever silently stops
 #      working the daily smoke goes red instead of staying green.
@@ -24,13 +50,18 @@ name: Deploy
 # This workflow is intentionally INERT until the deploy secrets exist. Without
 # them the `preflight` job reports "not configured" and exits 0 — a missing
 # secret must never look like a broken pipeline (and must never silently look
-# like a successful deploy either; see the smoke gate below).
+# like a successful deploy either; see the smoke gate below). It stays inert
+# after this change too: no secrets were added by issue #118 step 3(a), and
+# the prod divergence (steps 1-2) is still unresolved, so enabling this
+# workflow today would run `git reset --hard` and hit the new guard's refusal
+# (or, with force=true, would genuinely discard the 32 unpushed commits —
+# don't set force until issue #118 step 2 has adjudicated them).
 #
 # Required repository secrets:
 #   DEPLOY_HOST         prod host (e.g. agentpact.xyz)
 #   DEPLOY_USER         ssh user
 #   DEPLOY_SSH_KEY      private key, PEM, no passphrase
-#   DEPLOY_PATH         absolute path of the checkout on the box (has docker-compose.yml + .env)
+#   DEPLOY_PATH         absolute path of the checkout on the box (pm2 app root, e.g. /opt/agentpact-app)
 # Optional:
 #   DEPLOY_PORT         ssh port (default 22)
 #
@@ -45,6 +76,10 @@ on:
     inputs:
       dry_run:
         description: "Report what would happen; do not touch prod"
+        type: boolean
+        default: false
+      force:
+        description: "DESTRUCTIVE: allow git reset --hard to discard local-only commits / dirty files on the box. Only set this after issue #118 step 2 (adjudicate the 32 unpushed commits) is resolved."
         type: boolean
         default: false
 
@@ -125,6 +160,7 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           SHA: ${{ steps.sha.outputs.sha }}
+          FORCE: ${{ inputs.force && 'true' || 'false' }}
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/id_deploy -p "${{ secrets.DEPLOY_PORT || 22 }}" \
@@ -133,14 +169,54 @@ jobs:
               "set -euo pipefail
                cd '${{ secrets.DEPLOY_PATH }}'
                git fetch origin --prune
+
+               # ── Destructive-reset guard ──────────────────────────────────
+               # 'git reset --hard \$SHA' below is destructive: it discards any
+               # commit reachable from HEAD but not from \$SHA, and any dirty
+               # working-tree change, with no recovery short of a prior backup.
+               # This box has, at least once (2026-08-29/09-01), carried 32
+               # unpushed local commits and 82 dirty files that a routine reset
+               # would have silently destroyed. Refuse by default; only an
+               # explicit FORCE=true (workflow_dispatch 'force' input) proceeds.
+               LOCAL_ONLY=\$(git log --oneline '$SHA'..HEAD 2>/dev/null | wc -l | tr -d ' ')
+               DIRTY=\$(git status --porcelain | wc -l | tr -d ' ')
+               if [[ \"\$LOCAL_ONLY\" != \"0\" || \"\$DIRTY\" != \"0\" ]] && [[ \"$FORCE\" != \"true\" ]]; then
+                 echo \"REFUSING TO DEPLOY: checkout has \$LOCAL_ONLY commit(s) not reachable from \$SHA and \$DIRTY dirty file(s).\"
+                 echo \"A plain reset --hard would destroy them irrecoverably. Re-run workflow_dispatch with force=true only after these have been adjudicated (see issue #118).\"
+                 exit 1
+               fi
+
                git checkout main
                git reset --hard '$SHA'
-               # BUILD_SHA is baked into the web image so GET /health can prove
-               # which commit prod is serving (see Dockerfile.web + smoke-prod.sh).
-               BUILD_SHA='$SHA' docker compose build --build-arg BUILD_SHA='$SHA'
-               docker compose run --rm api npm run migrate
-               docker compose up -d
-               docker image prune -f"
+
+               # ── Build ───────────────────────────────────────────────────
+               # npm workspaces monorepo; root 'build' script fans out to
+               # api/mcp/web/daemon/relayer-daemon/fulfillment-daemon/sdk.
+               # BUILD_SHA is exported into the build env so the web tier's
+               # /health can prove which commit prod is serving (see
+               # apps/web/src/index.ts and scripts/smoke-prod.sh's WEB
+               # freshness probe) instead of the placeholder 'unknown'.
+               export BUILD_SHA='$SHA'
+               npm ci
+               npm run build
+
+               # ── Migrate ─────────────────────────────────────────────────
+               # RUN_MIGRATIONS=false in every pm2 app's env so app boot never
+               # races this. Run it explicitly, once, before reload.
+               npm run migrate
+
+               # ── Reload (zero-downtime) ──────────────────────────────────
+               pm2 reload ecosystem.config.js --update-env
+
+               # ── Verify all 4 processes came back online ────────────────
+               sleep 3
+               NOT_ONLINE=\$(pm2 jlist | python3 -c \"import json,sys; procs=json.load(sys.stdin); bad=[p['name'] for p in procs if p['pm2_env'].get('status') != 'online']; print(','.join(bad))\")
+               if [[ -n \"\$NOT_ONLINE\" ]]; then
+                 echo \"DEPLOY FAILED: process(es) not online after reload: \$NOT_ONLINE\"
+                 pm2 jlist
+                 exit 1
+               fi
+               echo \"All pm2 apps online at \$SHA\""
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
@@ -148,7 +224,7 @@ jobs:
           {
             echo "### Dry run — nothing touched"
             echo ""
-            echo "Would deploy \`${{ steps.sha.outputs.sha }}\` to \`${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}\`."
+            echo "Would deploy \`${{ steps.sha.outputs.sha }}\` to \`${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}\` (pm2 reload, force=${{ inputs.force }})."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ── The gate that makes this honest ──────────────────────────────────
