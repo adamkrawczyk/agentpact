@@ -13,9 +13,19 @@ import postgres from "postgres";
  *   block (legitimate — DROP + ADD CONSTRAINT needs atomicity), which crashed the E2E CI
  *   run dated 2026-05-25. The shared client uses max:10, so we open our own max:1 client
  *   here and close it when done. This keeps the app-side pool untouched.
+ *
+ * Idempotency: this script tracks applied migrations in _migration_history (same
+ * table/pattern as apps/api/src/server.ts's runMigrations()) and only replays files
+ * NOT already recorded there. Before this fix it unconditionally re-ran every .sql
+ * file on every invocation — harmless for genuinely idempotent DDL (CREATE TABLE IF
+ * NOT EXISTS, ADD COLUMN IF NOT EXISTS) but fatal for non-idempotent statements like
+ * `CREATE UNIQUE INDEX idx_subscriptions_one_active` (no IF NOT EXISTS on indexes in
+ * 036_subscriptions.sql), which crashed with `relation already exists` on every
+ * re-run against an already-migrated database — verified live 2026-09-01, deploy.yml
+ * workflow_dispatch run 33554039052, blocking every CD deploy at the migrate step.
  */
 const connection =
-  process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/agentpact";
+  process.env.DATABASE_URL ?? "postgres://postgres:***@localhost:5432/agentpact";
 
 const migrationSql = postgres(connection, {
   max: 1,
@@ -24,17 +34,37 @@ const migrationSql = postgres(connection, {
 });
 
 async function main() {
+  await migrationSql.unsafe(`
+    CREATE TABLE IF NOT EXISTS _migration_history (
+      filename TEXT PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  const applied = new Set(
+    (await migrationSql`SELECT filename FROM _migration_history`).map((r: Record<string, unknown>) => String(r.filename))
+  );
+
   const migrationsDir = resolve(process.cwd(), "migrations");
   const files = (await readdir(migrationsDir))
     .filter((name) => name.endsWith(".sql"))
     .sort();
 
+  let ok = 0, skipped = 0;
   for (const file of files) {
+    if (applied.has(file)) {
+      skipped++;
+      continue;
+    }
     const migrationPath = resolve(migrationsDir, file);
     const ddl = await readFile(migrationPath, "utf8");
     await migrationSql.unsafe(ddl);
+    await migrationSql`INSERT INTO _migration_history (filename) VALUES (${file}) ON CONFLICT DO NOTHING`;
     console.log(`Migration ${file} applied`);
+    ok++;
   }
+
+  console.log(`Done: ${ok} applied, ${skipped} already applied (skipped)`);
 }
 
 main()
