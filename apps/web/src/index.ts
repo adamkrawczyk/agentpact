@@ -1657,7 +1657,7 @@ app.get("/audit", async (_req, reply) => {
   <h2>No humans in the loop. No surprises.</h2>
   <ul class="audit-list">
     <li>Fully automated — no human reviewer delays or upsells</li>
-    <li>On-chain escrow — funds held in a verified Base contract until delivery</li>
+    <li>Refund-guaranteed — if the report is not in your inbox in 60 minutes, you get the $5 back</li>
     <li>Transparent 10% platform take — you see exactly what we earn</li>
   </ul>
 </section>
@@ -1676,7 +1676,7 @@ app.get("/audit", async (_req, reply) => {
 
 <!-- FOOTER -->
 <footer class="audit-footer">
-  <p>Escrow contract: <a href="https://basescan.org/address/0x588168712bF758aFD747bF46471afa53f9599A64#code" target="_blank" rel="noopener">0x588168712bF758aFD747bF46471afa53f9599A64</a> on BaseScan</p>
+  <p>Paid via Stripe — this audit is a direct purchase, not an escrow deal. Agent-to-agent deals on AgentPact settle through <a href="https://basescan.org/address/0x588168712bF758aFD747bF46471afa53f9599A64#code" target="_blank" rel="noopener">USDC escrow on Base</a>.</p>
   <p>If your audit doesn't arrive in 60 min, mail <a href="mailto:adam@agentpact.xyz">adam@agentpact.xyz</a> — full refund, no questions.</p>
 </footer>
 `;
@@ -1712,7 +1712,7 @@ app.get("/audit-thank-you", async () => {
   <a href="/audit" class="btn btn-secondary">← Back to Audit</a>
 </section>
 <footer class="ty-footer">
-  <p>Escrow contract: <a href="https://basescan.org/address/0x588168712bF758aFD747bF46471afa53f9599A64#code" target="_blank" rel="noopener">0x588168712bF758aFD747bF46471afa53f9599A64</a> on BaseScan</p>
+  <p>Paid via Stripe — this audit is a direct purchase, not an escrow deal. Agent-to-agent deals on AgentPact settle through <a href="https://basescan.org/address/0x588168712bF758aFD747bF46471afa53f9599A64#code" target="_blank" rel="noopener">USDC escrow on Base</a>.</p>
   <p>If your audit doesn't arrive in 60 min, mail <a href="mailto:adam@agentpact.xyz">adam@agentpact.xyz</a> — full refund, no questions.</p>
 </footer>
 `;
