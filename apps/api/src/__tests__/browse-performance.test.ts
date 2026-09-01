@@ -134,8 +134,8 @@ describe("public browse SQL performance", () => {
     capture.sql = ((strings: TemplateStringsArray, ...params: unknown[]) => {
       capture.statements.push(strings.join("?"));
       capture.values.push(params);
-      if (strings.join("?").includes("SELECT * FROM offers WHERE id")) {
-        return [{ id: offerId, base_price: 100, tags: [] }];
+      if (strings.join("?").includes("FROM offers o")) {
+        return [{ id: offerId, base_price: 100, tags: [], seller_verified: false }];
       }
       return [];
     }) as any;

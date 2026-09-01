@@ -333,7 +333,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
     const rows = await withBrowseStatementTimeout(sql, async (querySql) => search
       ? await querySql`
-      SELECT o.* FROM offers o
+      SELECT o.*, (a.verified_at IS NOT NULL) AS seller_verified FROM offers o
       JOIN agents a ON a.id = o.agent_id
       WHERE o.status = 'active'
         AND (o.title ILIKE ${query} OR o.description_md ILIKE ${query})
@@ -342,12 +342,12 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         AND (${tags.length} = 0 OR o.tags && ${tags})
         AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)
         AND (${freeOnly} = FALSE OR o.base_price = 0)
-      ORDER BY o.created_at DESC
+      ORDER BY (a.verified_at IS NOT NULL) DESC, o.created_at DESC
       LIMIT ${limit}
       OFFSET ${offset}
     `
       : await querySql`
-      SELECT o.* FROM offers o
+      SELECT o.*, (a.verified_at IS NOT NULL) AS seller_verified FROM offers o
       JOIN agents a ON a.id = o.agent_id
       WHERE o.status = 'active'
         AND (${category}::text IS NULL OR o.category = ${category})
@@ -355,7 +355,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         AND (${tags.length} = 0 OR o.tags && ${tags})
         AND (${verifiedOnly} = FALSE OR COALESCE(a.skill_verification_count, 0) > 0)
         AND (${freeOnly} = FALSE OR o.base_price = 0)
-      ORDER BY o.created_at DESC
+      ORDER BY (a.verified_at IS NOT NULL) DESC, o.created_at DESC
       LIMIT ${limit}
       OFFSET ${offset}
     `);
@@ -586,7 +586,12 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
   app.get("/api/offers/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const [offer] = await sql`SELECT * FROM offers WHERE id = ${id}`;
+    const [offer] = await sql`
+      SELECT o.*, (a.verified_at IS NOT NULL) AS seller_verified
+      FROM offers o
+      JOIN agents a ON a.id = o.agent_id
+      WHERE o.id = ${id}
+    `;
     if (!offer) return reply.code(404).send({ error: "Offer not found" });
     void auditBestEffort(app, sql, "offer.view", "offer", id, {
       endpoint: "/api/offers/:id",

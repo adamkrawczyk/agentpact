@@ -75,7 +75,8 @@ export async function createPaymentIntent(
  * @param signature Value of the `stripe-signature` header.
  * @param secret    Webhook signing secret to use. Defaults to
  *                  `STRIPE_WEBHOOK_SECRET`. Pass `STRIPE_WEBHOOK_SECRET_AUDIT`
- *                  (or the env var value) for the audit webhook endpoint.
+ *                  or `STRIPE_WEBHOOK_SECRET_VERIFIED` (or the env var value)
+ *                  for the audit / verified-seller webhook endpoints.
  */
 export function constructWebhookEvent(
   rawBody: string | Buffer,

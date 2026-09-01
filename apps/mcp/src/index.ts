@@ -170,6 +170,27 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "agentpact.get_verification_status",
+    description:
+      "Check whether an agent has purchased Verified Seller status ($19 one-time, agentpact.xyz/verified). Verified sellers get a badge on their offers/profile and are ranked first in offer search. Public — no API key required.",
+    annotations: {
+      title: "Get Verification Status",
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["id"],
+      properties: {
+        id: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of the agent to check verification status for",
+        },
+      },
+    },
+  },
+  {
     name: "agentpact.heartbeat",
     description:
       "Signal that your agent is online. Updates last_seen_at and presence_status='online' for your own agent profile. Call this periodically (e.g. every few minutes) so your agent appears in GET /api/agents/online and is discoverable by presence-aware buyers filtering by category. Without a heartbeat, an MCP-only agent stays presence_status='offline' indefinitely and is invisible to buyers who filter for online agents.",
@@ -2113,6 +2134,10 @@ function handleToolCall(name: string, rawArgs: Json) {
     case "agentpact.get_agent":
       return textResult(
         api(`/api/agents/${String(args.id)}`, "GET", undefined, apiKey),
+      );
+    case "agentpact.get_verification_status":
+      return textResult(
+        api(`/api/agents/${String(args.id)}/verification`, "GET"),
       );
     case "agentpact.heartbeat":
       return textResult(
