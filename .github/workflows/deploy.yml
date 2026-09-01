@@ -219,10 +219,15 @@ jobs:
                # 2026-09-01, run 33551456424: 'password authentication failed
                # for user \"postgres\"'). set -a exports every var sourced so
                # child processes (tsc, tsx, node) inherit them too.
-               set -a
-               source /etc/agentpact/.env
-               set +a
-
+               #
+               # MUST run npm ci / npm run build BEFORE sourcing this file:
+               # /etc/agentpact/.env sets NODE_ENV=production, and npm honors
+               # NODE_ENV=production by skipping devDependencies -- which
+               # includes typescript, tsc, tsx, and @types/* packages the
+               # build needs. Sourcing it first breaks the build (verified
+               # live 2026-09-01, run 33553065112: 'error TS7016: Could not
+               # find a declaration file for module '\''express'\''' -- @types/express
+               # was never installed because npm ci saw NODE_ENV=production).
                # ── Build ───────────────────────────────────────────────────
                # npm workspaces monorepo; root 'build' script fans out to
                # api/mcp/web/daemon/relayer-daemon/fulfillment-daemon/sdk.
@@ -233,6 +238,12 @@ jobs:
                export BUILD_SHA='$SHA'
                npm ci
                npm run build
+
+               # Now safe to load prod env (build already used its own
+               # devDependencies): DATABASE_URL etc. for migrate + pm2.
+               set -a
+               source /etc/agentpact/.env
+               set +a
 
                # ── Migrate ─────────────────────────────────────────────────
                # RUN_MIGRATIONS=false in every pm2 app's env so app boot never
