@@ -255,9 +255,9 @@ jobs:
                # STALE_WEB gate refuses "unknown". The env file is what the
                # start-*.sh wrappers source, so stamp it BEFORE the reload.
                if grep -q '^BUILD_SHA=' /etc/agentpact/.env; then
-                 sed -i "s/^BUILD_SHA=.*/BUILD_SHA='$SHA'/" /etc/agentpact/.env
+                 sed -i \"s/^BUILD_SHA=.*/BUILD_SHA='$SHA'/\" /etc/agentpact/.env
                else
-                 echo "BUILD_SHA='$SHA'" >> /etc/agentpact/.env
+                 echo \"BUILD_SHA='$SHA'\" >> /etc/agentpact/.env
                fi
 
                # ── Reload (zero-downtime) ──────────────────────────────────
