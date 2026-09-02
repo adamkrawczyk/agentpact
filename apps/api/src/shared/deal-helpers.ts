@@ -344,6 +344,36 @@ export async function releaseMilestonePayment(
        VALUES ('payment.release', 'milestone', $1, $2::jsonb)`,
       [milestoneId, JSON.stringify({ gross, sellerAmount, feeAmount, platformWallet: PLATFORM_WALLET, txHash })]
     );
+    // ── platform fee ledger ────────────────────────────────────────────────
+    // Mirrors routes/audit-orders.ts's completion-path INSERT exactly: same
+    // table, same 10%-at-close convention (fee_pct_at_close records the rate
+    // that actually applied, not a live env lookup, so historical rows stay
+    // correct if PLATFORM_FEE_PCT is ever changed), same source-tagging
+    // ('stripe' for a fiat-funded intent, 'usdc' for an on-chain escrow
+    // intent — audit-orders is Stripe-only, so this is the first 'usdc' row
+    // this table has ever produced). Idempotency does NOT rely on this
+    // ON CONFLICT alone: platform_fee_ledger_unique_deal (migration 038)
+    // is a real UNIQUE constraint on deal_id, so even a caller that skips
+    // this helper entirely cannot double-insert for the same deal, and a
+    // retried releaseMilestonePayment() call for an already-released
+    // milestone never reaches this line at all (it returns early via the
+    // CAS-lost / already-'released' branches above).
+    const feeAmountMinor = Math.round(feeAmount * 1_000_000);
+    if (feeAmountMinor > 0) {
+      await txn.unsafe(
+        `INSERT INTO platform_fee_ledger
+          (deal_id, amount_minor, currency, fee_pct_at_close, source)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (deal_id) DO NOTHING`,
+        [
+          payment.deal_id,
+          feeAmountMinor,
+          (payment.currency as string) ?? "USDC",
+          PLATFORM_FEE_PCT,
+          isOnChainEscrowFunded ? "usdc" : "stripe",
+        ],
+      );
+    }
     return true;
   });
 
