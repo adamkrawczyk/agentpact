@@ -78,6 +78,21 @@ describe("releaseMilestonePayment writes platform_fee_ledger (fixes #133)", () =
     expect(["stripe", "usdc"]).toContain(row.source as string);
   });
 
+  it("ledger fee equals the on-chain split exactly (integer floor, AgentPactEscrow.sol:79)", async () => {
+    // 1.008 USDC — a real prod release amount whose float math rounds differently
+    // from the contract's integer floor-division. Chain: floor(1_008_000 * 10 / 100)
+    // = 100_800 base units. Ledger must match to the base unit, not to 6dp-rounded floats.
+    const { milestoneId, dealId } = await seedFundedDeliveredMilestone(1.008);
+    const result = await releaseMilestonePayment(milestoneId);
+    expect(result.action).toBe("released");
+    const [row] = await sql<Array<Record<string, unknown>>>`
+      SELECT amount_minor FROM platform_fee_ledger WHERE deal_id = ${dealId}
+    `;
+    const grossMinor = 1_008_000n;
+    const chainFee = (grossMinor * 10n) / 100n; // Solidity: (amount * pct) / 100
+    expect(BigInt(String(row.amount_minor))).toBe(chainFee);
+  });
+
   it("does NOT double-write platform_fee_ledger when a release is retried for the same deal", async () => {
     const { milestoneId, dealId } = await seedFundedDeliveredMilestone(100);
 

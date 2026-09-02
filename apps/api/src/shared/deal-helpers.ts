@@ -298,8 +298,14 @@ export async function releaseMilestonePayment(
   }
 
   const gross = toNumber(payment.amount);
-  const sellerAmount = Number((gross * (100 - PLATFORM_FEE_PCT)) / 100).toFixed(6);
-  const feeAmount = Number((gross - Number(sellerAmount)).toFixed(6));
+  // Mirror AgentPactEscrow.sol:79-80 exactly: integer base units (USDC 6dp),
+  // platformFee = floor(amount * pct / 100), sellerAmount = amount - platformFee.
+  // Float math + toFixed/round here produced 1-base-unit drift vs the chain on
+  // ~45% of amounts (fuzzed 200k, PR #138 review) — the ledger must equal the transfer.
+  const grossMinor = Math.round(gross * 1_000_000);
+  const feeAmountMinor = Math.floor((grossMinor * PLATFORM_FEE_PCT) / 100);
+  const sellerAmount = ((grossMinor - feeAmountMinor) / 1_000_000).toFixed(6);
+  const feeAmount = feeAmountMinor / 1_000_000;
   const txHash = hasRealReleaseTx ? opts.releaseTxHash! : `sim_release_${randomUUID().slice(0, 8)}`;
 
   // TEST-ONLY: lets a test force a concurrent write (release or refund) to
@@ -358,7 +364,6 @@ export async function releaseMilestonePayment(
     // retried releaseMilestonePayment() call for an already-released
     // milestone never reaches this line at all (it returns early via the
     // CAS-lost / already-'released' branches above).
-    const feeAmountMinor = Math.round(feeAmount * 1_000_000);
     if (feeAmountMinor > 0) {
       await txn.unsafe(
         `INSERT INTO platform_fee_ledger
