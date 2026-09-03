@@ -68,8 +68,18 @@ name: Deploy
 # Manual dry run:  Actions → Deploy → Run workflow → dry_run = true
 
 on:
+  # ── Trigger fix (incident 2026-08-30) ─────────────────────────────────────
+  # This was wired to `workflows: ["CI"]`, but `CI` (.github/workflows/ci.yml)
+  # only runs `on: pull_request` — it has NO `push` trigger, so it never runs
+  # on `main` at all. Result: `workflow_run` never fired, `Deploy` had ZERO
+  # runs in its history (verified via `gh run list --workflow=Deploy`), and
+  # every merge to main — including #116, the successor-link fix this gate
+  # exists to catch — silently stopped at "image built" exactly like every
+  # incident before #117 claimed to fix. `Docker Build` (docker.yml) is the
+  # workflow that actually runs `on: push: branches: [main]`, so that is what
+  # must gate the deploy.
   workflow_run:
-    workflows: ["CI"]
+    workflows: ["Docker Build"]
     types: [completed]
     branches: [main]
   workflow_dispatch:

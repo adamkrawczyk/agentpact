@@ -62,6 +62,20 @@ FRESHNESS_PROBES=(
   "settlement_audit|/api/deals/00000000-0000-0000-0000-000000000000/settlement|PR#106 (2026-08-17)|404"
 )
 
+# ── API Link-header freshness probe (incident 2026-08-30) ──────────────────
+# Route-presence freshness (above) cannot see a HEADER VALUE change: PR #116
+# repointed the v1-sunset `Link: rel="successor-version"` header from
+# `/api/intents` to `/api/intents/discover`, merged as 101b1cd, CI green
+# (Docker Build/E2E/Lint all success) — and prod kept serving the OLD header
+# for hours because nothing deploys the API on a green merge. The route-exists
+# probes above stayed green throughout (the route never disappeared, only the
+# header value changed), so this needs its own assertion of the literal header.
+#
+# Each row: name|path|header_name|expected_value|shipped_in
+API_LINK_FRESHNESS_PROBES=(
+  "sunset_successor_link|/api/deals/00000000-0000-0000-0000-000000000000|Link|</api/intents/discover>; rel=\"successor-version\"|PR#116 (2026-08-30)"
+)
+
 # ── WEB freshness probes ────────────────────────────────────────────────────
 # The API probes above cannot see the WEB tier at all — they only touch
 # api.agentpact.xyz. That blind spot is why PR #115 (merged 2026-08-23, renders
@@ -199,6 +213,61 @@ if [[ "$SKIP_FRESHNESS" != "1" ]]; then
 fi
 freshness_json+="]"
 
+# ── API Link-header freshness evaluation ────────────────────────────────────
+# Uses `curl -D-` to capture RESPONSE HEADERS (not just body) and compares the
+# literal Link header value. Case-insensitive header name match (HTTP headers
+# are case-insensitive; curl -D- preserves server casing).
+link_json="["
+link_first=true
+if [[ "$SKIP_FRESHNESS" != "1" ]]; then
+  for probe in "${API_LINK_FRESHNESS_PROBES[@]}"; do
+    IFS='|' read -r lname lpath lheader lexpected lshipped <<< "$probe"
+    lurl="${API_BASE}${lpath}"
+    lheaders_file=$(mktemp)
+    lcode=$(curl -sS -o /dev/null -D "$lheaders_file" -w "%{http_code}" --max-time 15 "$lurl" 2>/dev/null || echo 0)
+
+    lactual=$(grep -i "^${lheader}:" "$lheaders_file" 2>/dev/null | tail -1 | sed -E "s/^[A-Za-z-]+:[[:space:]]*//" | tr -d '\r\n' || true)
+    lpass=false
+    lreason="ok"
+    if [[ "$lcode" == "000" || "$lcode" == "0" ]]; then
+      lreason="unreachable"
+    elif [[ -z "$lactual" ]]; then
+      lreason="header absent (STALE BUILD: ${lshipped})"
+    elif [[ "$lactual" != "$lexpected" ]]; then
+      lreason="value mismatch: got '${lactual}' want '${lexpected}' (STALE BUILD: ${lshipped})"
+    else
+      lpass=true
+    fi
+
+    if [[ "$lpass" != "true" ]]; then
+      all_pass=false
+      fail_summary+=("STALE_LINK:${lname} (${lreason})")
+    fi
+
+    if [[ "$JSON_OUTPUT" == "false" ]]; then
+      if [[ "$lpass" == "true" ]]; then
+        printf "  ${C_OK}✓${C_RST}  %-8s  %s${lheader}: %s${C_RST}  http=%s\n" \
+          "link" "$C_DIM" "$lactual" "$lcode"
+      else
+        printf "  ${C_FAIL}✗${C_RST}  %-8s  %sSTALE LINK HEADER${C_RST}  %s\n" \
+          "link" "$C_DIM" "$lreason"
+      fi
+    else
+      [[ "$link_first" == "false" ]] && link_json+=","
+      link_first=false
+      # Escape embedded double-quotes in header values (e.g. rel="successor-version")
+      # so the emitted JSON stays valid.
+      lexpected_esc="${lexpected//\"/\\\"}"
+      lactual_esc="${lactual//\"/\\\"}"
+      lreason_esc="${lreason//\"/\\\"}"
+      link_json+=$(printf '{"name":"%s","path":"%s","header":"%s","expected":"%s","actual":"%s","shipped_in":"%s","http":%s,"pass":%s,"reason":"%s"}' \
+        "$lname" "$lpath" "$lheader" "$lexpected_esc" "$lactual_esc" "$lshipped" "${lcode:-0}" "$lpass" "$lreason_esc")
+    fi
+    rm -f "$lheaders_file"
+  done
+fi
+link_json+="]"
+
 # ── WEB freshness evaluation ────────────────────────────────────────────────
 web_json="["
 web_first=true
@@ -250,8 +319,8 @@ fi
 web_json+="]"
 
 if [[ "$JSON_OUTPUT" == "true" ]]; then
-  printf '{"api_base":"%s","web_base":"%s","timestamp":"%s","all_pass":%s,"probes":%s,"freshness":%s,"web_freshness":%s}\n' \
-    "$API_BASE" "$WEB_BASE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$all_pass" "$results_json" "$freshness_json" "$web_json"
+  printf '{"api_base":"%s","web_base":"%s","timestamp":"%s","all_pass":%s,"probes":%s,"freshness":%s,"link_freshness":%s,"web_freshness":%s}\n' \
+    "$API_BASE" "$WEB_BASE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$all_pass" "$results_json" "$freshness_json" "$link_json" "$web_json"
 fi
 
 if [[ "$all_pass" == "true" ]]; then
