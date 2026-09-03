@@ -73,6 +73,26 @@ describe("delivery revisions (reject → resubmit loop)", () => {
     });
     expect(acceptRes.statusCode).toBe(200);
 
+    // issue #134 guard: delivery on a paid unfunded milestone is now a 409.
+    // Fund the milestone first so the reject → resubmit loop stays valid.
+    const [milestoneToFund] = await sql`SELECT id FROM milestones WHERE deal_id = ${dealId} ORDER BY idx LIMIT 1`;
+    if (!milestoneToFund.is_free_tier) {
+      const fundRes = await app.inject({
+        method: "POST",
+        url: "/api/payments/create-intent",
+        headers: buyerHeaders,
+        payload: {
+          provider: "usdc",
+          milestoneId: milestoneToFund.id as string,
+          buyerAgentId: buyerId,
+          walletProvider: "metamask",
+          buyerWalletAddress: "0x1234567890123456789012345678901234567890",
+          chain: "base",
+        },
+      });
+      expect(fundRes.statusCode).toBe(201);
+    }
+
     const [milestone] = await sql`SELECT id FROM milestones WHERE deal_id = ${dealId} ORDER BY idx LIMIT 1`;
     return { app, sql, dealId, milestoneId: milestone.id as string };
   }

@@ -4,7 +4,7 @@ import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
 import { submitDeliverySchema, verifyDeliverySchema, disputeSchema } from "./schemas.js";
-import { getRequesterAgentId } from "./utils.js";
+import { getRequesterAgentId, isZeroPrice } from "./utils.js";
 import {
   isOnChainMode,
   resolveDisputeOnChain,
@@ -37,6 +37,39 @@ export async function registerRoutes(
     if (submissionAuth.seller_agent_id !== requesterAgentId) {
       return reply.code(403).send({ error: "Not authorized" });
     }
+
+    // ── funding-before-delivery guard (issue #134) ────────────────────────
+    // A seller submitting work against a PAID milestone that has never been
+    // funded used to flip the milestone to 'delivered' — after which
+    // POST /api/payments/create-intent refuses with "Milestone status
+    // delivered cannot be funded" (payments.ts). Result: 2 of 3 acceptors in
+    // the 2026-09-01 fleet-buyer campaign hit a permanent deadlock where the
+    // buyer could not fund through the API and payment_intents never recorded
+    // the (client-side, out-of-band) on-chain funding. Fix shape per issue:
+    // the simplest correct rule — fee-bearing milestones must be funded (or
+    // already settled) BEFORE delivery. Free-tier and zero-price milestones
+    // are exempt (no money is ever involved). Idempotent: re-submitting
+    // after funding works because the intent is 'funded'/'released'.
+    const [funding] = await sql`
+      SELECT d.is_free_tier, m.amount,
+        (SELECT pi.status FROM payment_intents pi
+         WHERE pi.milestone_id = m.id
+         ORDER BY pi.created_at DESC LIMIT 1) AS intent_status
+      FROM milestones m
+      JOIN deals d ON d.id = m.deal_id
+      WHERE m.id = ${body.milestoneId}
+    `;
+    if (!funding) return reply.code(404).send({ error: "Milestone not found" });
+    const paidMilestone = !funding.is_free_tier && !isZeroPrice(funding.amount);
+    const settledOrFunded = ["funded", "released"].includes(String(funding.intent_status));
+    if (paidMilestone && !settledOrFunded) {
+      return reply.code(409).send({
+        error: "Milestone must be funded before delivery can be submitted. The buyer must call POST /api/payments/create-intent (and confirm-funding on-chain) first; delivering an unfunded milestone would permanently block funding.",
+        code: "MILESTONE_NOT_FUNDED",
+        milestoneId: body.milestoneId,
+      });
+    }
+
     const checksum = createHash("sha256").update(JSON.stringify(body.artifacts)).digest("hex");
     const notes = body.notes ?? null;
 
