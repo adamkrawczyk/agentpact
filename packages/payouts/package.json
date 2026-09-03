@@ -17,8 +17,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "ethers": "^6.16.0",
-    "stripe": "^17.0.0"
+    "ethers": "^6.16.0"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
