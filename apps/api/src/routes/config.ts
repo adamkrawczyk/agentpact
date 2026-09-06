@@ -27,3 +27,12 @@ export default async function configRoutes(app: FastifyInstance): Promise<void> 
     });
   });
 }
+
+/**
+ * Public route paths exposed by this module. The auth preHandler in index.ts
+ * consults this list instead of maintaining a hand-copied whitelist that can
+ * drift (issue #141: the whitelist named `/api/config`, a route that does not
+ * exist, while the real public route `/api/config/addresses` fell through to
+ * agent auth and 401'd in prod).
+ */
+export const CONFIG_PUBLIC_ROUTES: readonly string[] = ["/api/config/addresses"];
