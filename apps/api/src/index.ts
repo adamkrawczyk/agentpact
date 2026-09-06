@@ -44,7 +44,7 @@ import { registerRoutes as registerIntentsRoutes } from './routes/intents.js';
 import { countStaleOffersWithoutDeals } from './routes/offers.js';
 import adminRoutes from './routes/admin.js';
 import feedbackRoutes from './routes/feedback.js';
-import configRoutes from './routes/config.js';
+import configRoutes, { CONFIG_PUBLIC_ROUTES } from './routes/config.js';
 import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/deal-helpers.js';
 import { registerAuditWebhookRoutes } from './routes/audit-webhook.js';
 import { registerAuditOrdersRoutes } from './routes/audit-orders.js';
@@ -1370,7 +1370,12 @@ registerConciergeRoutes(app, sql as unknown as Sql<Record<string, unknown>>);
 
 app.addHook("preHandler", async (request, reply) => {
   const routePath = (request.url.split("?")[0] ?? request.url);
-  const publicRoutes = new Set(["/health", "/api/health", "/api/config", "/api/auth/register", "/api/auth/verify", "/api/auth/nonce"]);
+  // Issue #141 — keep the public-route whitelist in sync with the routes that
+  // actually exist. `/api/config` was a phantom entry (no such route — the real
+  // public chain-config route is `/api/config/addresses`, which fell through
+  // this hook to agent auth and 401'd in prod despite its documented
+  // no-auth contract). Source the config-module entries from the module itself.
+  const publicRoutes = new Set(["/health", "/api/health", ...CONFIG_PUBLIC_ROUTES, "/api/auth/register", "/api/auth/verify", "/api/auth/nonce"]);
 
   if (publicRoutes.has(routePath) || routePath.startsWith("/api/health")) {
     return;

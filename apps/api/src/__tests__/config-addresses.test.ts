@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import Fastify from "fastify";
-import configRoutes from "../routes/config.js";
+import configRoutes, { CONFIG_PUBLIC_ROUTES } from "../routes/config.js";
 import { ESCROW_ADDRESS, USDC_ADDRESS } from "../chain.js";
 
 /**
@@ -52,5 +52,46 @@ describe("GET /api/config/addresses", () => {
     const res = await app.inject({ method: "GET", url: "/api/config/addresses" });
     // No X-API-Key header sent; endpoint must answer anyway.
     expect(res.statusCode).toBe(200);
+  });
+});
+
+/**
+ * Issue #141 — public-route whitelist drift.
+ *
+ * The auth preHandler in index.ts kept a hand-copied whitelist that named
+ * `/api/config` — a route that does not exist — while the real public route
+ * `/api/config/addresses` was NOT in any whitelist and fell through to agent
+ * auth, returning 401 in prod ("Missing API key") for the documented no-auth
+ * chain-config endpoint. The index.ts whitelist now sources its config-module
+ * entries from CONFIG_PUBLIC_ROUTES exported by the route module itself, so it
+ * cannot drift again.
+ */
+describe("auth whitelist ↔ config routes sync (issue #141)", () => {
+  it("every route the config module registers is covered by CONFIG_PUBLIC_ROUTES", async () => {
+    // Build a bare app, register the module, and read the actual route paths
+    // off the Fastify router — the ground truth of what this module exposes.
+    const app = Fastify({ logger: false });
+    await app.register(configRoutes);
+    await app.ready();
+    const registered = app
+      .printRoutes()
+      .split("\n")
+      .map((line) => line.replace(/[├└│─\s]+/g, " ").trim().split(" (")[0])
+      .map((p) => (p.startsWith("/") ? p : "/" + p))
+      .filter((p) => p.startsWith("/api/"));
+    expect(registered.length).toBeGreaterThan(0);
+    for (const path of registered) {
+      expect(CONFIG_PUBLIC_ROUTES).toContain(path);
+    }
+  });
+
+  it("the full-app public whitelist (index.ts predicate) admits /api/config/addresses unauthenticated", async () => {
+    // Replica of the index.ts preHandler predicate for the exact-path public
+    // set (first check in the hook). If someone removes the entry again, this
+    // fails before prod does.
+    const publicRoutes = new Set(["/health", "/api/health", ...CONFIG_PUBLIC_ROUTES, "/api/auth/register", "/api/auth/verify", "/api/auth/nonce"]);
+    expect(publicRoutes.has("/api/config/addresses")).toBe(true);
+    // Regression: the phantom entry must not come back.
+    expect(publicRoutes.has("/api/config")).toBe(false);
   });
 });
