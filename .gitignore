@@ -41,3 +41,6 @@ packages/*/dist/
 # Agent loop state (contains live API keys)
 scripts/.agent-loop-state.json
 *.agent-loop-state.json
+
+# JUnit XML written by the ci-proof job (uploaded as an artifact, never committed)
+test-results/
