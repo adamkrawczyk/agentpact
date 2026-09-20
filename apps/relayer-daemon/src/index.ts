@@ -14,6 +14,7 @@ import {
   type SqlClient,
 } from "./sweepers.js";
 import { runAutoCloseSweep } from "./autoclose-sweeper.js";
+import { runSettlementSweep } from "./settlement-sweeper.js";
 
 interface SweeperHealth {
   cycles: number;
@@ -29,6 +30,7 @@ interface DaemonHealth {
   schellingSweeper: SweeperHealth;
   streamStaleSweeper: SweeperHealth;
   autocloseSweeper: SweeperHealth;
+  settlementSweeper: SweeperHealth;
 }
 
 function freshHealth(): SweeperHealth {
@@ -71,6 +73,7 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
     schellingSweeper: freshHealth(),
     streamStaleSweeper: freshHealth(),
     autocloseSweeper: freshHealth(),
+    settlementSweeper: freshHealth(),
   };
 
   async function safeRun(name: keyof DaemonHealth, fn: () => Promise<unknown>) {
@@ -90,7 +93,8 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
       health.ackSweeper.consecutiveFailures +
       health.schellingSweeper.consecutiveFailures +
       health.streamStaleSweeper.consecutiveFailures +
-      health.autocloseSweeper.consecutiveFailures
+      health.autocloseSweeper.consecutiveFailures +
+      health.settlementSweeper.consecutiveFailures
     ) < 3;
   }
 
@@ -111,6 +115,18 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
     config.autocloseSweepIntervalMs,
   );
 
+  // moneypath_0920 M1 — the schedule the acceptance-timeout promise never had.
+  const setTimer = setInterval(
+    () => safeRun("settlementSweeper", () => runSettlementSweep(sql, {
+      apiBaseUrl: config.apiBaseUrl,
+      adminApiKey: config.adminApiKey,
+      completeThreshold: config.settlementCompleteThreshold,
+      maxPerTick: config.settlementMaxPerTick,
+      autoReleaseEnabled: config.settlementAutoRelease,
+    })),
+    config.settlementSweepIntervalMs,
+  );
+
   const server = createServer((req, res) => {
     if (req.url === "/health") {
       res.writeHead(health.ok ? 200 : 503, { "content-type": "application/json" });
@@ -129,6 +145,7 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
       clearInterval(schTimer);
       clearInterval(stsTimer);
       clearInterval(acTimer);
+      clearInterval(setTimer);
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
     getHealth: () => health,

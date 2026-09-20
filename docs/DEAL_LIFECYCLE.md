@@ -63,8 +63,51 @@ Controls when a fulfillment-marked deal auto-completes:
   where the buyer trusts the verifier (e.g. task_contract auto-verification).
 - Maximum: 30 days.
 
-Set per-deal at proposal time. The auto-complete sweep is exposed at
-`POST /api/deals/:id/fulfillment/auto-complete` (cron-friendly).
+Set per-deal at proposal time.
+
+### What actually runs it
+
+Two operator surfaces expose auto-completion:
+
+| Endpoint | Scope |
+|---|---|
+| `POST /api/deals/:id/fulfillment/auto-complete` | one deal |
+| `POST /api/admin/auto-complete-timeouts` | every expired deal |
+
+**Until 2026-09-20 nothing called either one.** Both were operator-triggered
+and no operator triggered them, so the review window expired and then nothing
+happened — measured on production that day: 480 deals, 98 completed, **0 rows
+in `platform_fee_ledger`**, and 21 deals sitting in `delivered` past their own
+`acceptance_timeout_days`. The promise in this document was real; the schedule
+behind it did not exist.
+
+The schedule is now the **settlement sweeper** in the relayer daemon
+(`apps/relayer-daemon/src/settlement-sweeper.ts`), which ticks every
+`SETTLEMENT_SWEEP_INTERVAL_MS` (default 10 min) and, for each expired deal:
+
+1. **Skips self-deals** (`buyer_agent_id = seller_agent_id`) outright. They are
+   recorded as `skip_self_deal` and never released — they are not revenue.
+2. **Judges the delivered evidence** with a Jev classifier
+   (`apps/relayer-daemon/src/jev.ts`) against a fixed rubric. Time alone is not
+   evidence: a pure "N days passed, pay out" rule pays out on an empty
+   delivery.
+3. **Releases only above threshold** (`SETTLEMENT_COMPLETE_THRESHOLD`, default
+   0.85) by calling the per-deal endpoint above — it does **not** re-implement
+   the release. Below threshold the deal goes to `review` for a human. If the
+   judge is unavailable the deal is **held**, never released: an outage must
+   not become an automatic payout.
+
+Credentials in a fulfillment payload (`auth_value`, `auth_header`, …) are
+withheld from the judge by an allowlist, so they never leave the host.
+
+Every tick writes a row to `sweeper_runs` and every decision a row to
+`sweeper_decisions` carrying `judge@version`, the probability, and a hash of
+the rubric that produced it — so a release can be re-examined later against the
+rubric that actually applied at the time.
+
+**`SETTLEMENT_AUTO_RELEASE` defaults to `false`.** On first deploy the sweeper
+runs in shadow mode: it judges and records, but moves no money. Turning it on
+is a separate, deliberate act taken after reading real decisions off real deals.
 
 ## The two verify surfaces (and which to use)
 
