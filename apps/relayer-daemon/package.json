@@ -11,8 +11,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test 'src/**/*.test.ts'",
-    "test:junit": "node --import tsx --test --test-reporter=junit --test-reporter-destination=test-results/relayer.junit.xml 'src/**/*.test.ts'"
+    "test": "node --import tsx --test src/*.test.ts",
+    "test:junit": "node --import tsx --test --test-reporter=junit --test-reporter-destination=test-results/relayer.junit.xml src/*.test.ts"
   },
   "dependencies": {
     "postgres": "^3.4.5",
