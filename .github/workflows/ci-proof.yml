@@ -37,21 +37,52 @@ jobs:
 
       # npm -w runs with cwd inside each workspace, so the JUnit files land
       # in apps/<ws>/test-results/. --outputFile needs the dir to exist.
-      - name: Test API (JUnit XML)
+      # Two different test runners live in this repo and they take DIFFERENT
+      # flags, in DIFFERENT positions.
+      #
+      #   @agentpact/api  -> vitest
+      #        --reporter=junit --outputFile=<path>     (position-insensitive)
+      #
+      #   mcp / relayer   -> node --test
+      #        --test-reporter=junit --test-reporter-destination=<path>
+      #        and these MUST precede the test-file glob.
+      #
+      # Both failure modes here are SILENT-ish and were hit for real:
+      #   - vitest flags on node --test  -> node reads "--reporter=junit" as a
+      #     FILE PATH: "Could not find .../apps/mcp/--reporter=junit", exit 1.
+      #     (This is what broke this job's first run.)
+      #   - correct flags but placed AFTER the glob -> node exits 0, prints the
+      #     default spec output, and writes NO XML AT ALL. The proof step then
+      #     sees 0 tests. Only ci_proof.py's refuse-on-empty-glob turns that
+      #     into a hard failure instead of a certified-green lie.
+      #
+      # Because npm strips one level of `--`, the flags are baked into the
+      # workspace `test:junit` scripts rather than appended here.
+      - name: Test API (vitest, JUnit XML)
         run: |
           mkdir -p apps/api/test-results
           npm run -w @agentpact/api test -- --reporter=junit --outputFile=test-results/api.junit.xml
 
-      - name: Test MCP (JUnit XML, if present)
+      - name: Test MCP (node --test, JUnit XML)
         run: |
           mkdir -p apps/mcp/test-results
-          npm run -w @agentpact/mcp test --if-present -- --reporter=junit --outputFile=test-results/mcp.junit.xml
+          npm run -w @agentpact/mcp test:junit
+
+      # The settlement sweeper's 45 tests guard the money path. They were
+      # absent from the root `npm test` chain until PR #146 (commit 32431d8),
+      # so they had never run in CI at all. A proof artifact that omitted them
+      # would certify a green build over an untested release path.
+      - name: Test relayer-daemon (node --test, JUnit XML)
+        run: |
+          mkdir -p apps/relayer-daemon/test-results
+          npm run -w @agentpact/relayer-daemon test:junit
 
       - name: Type check all workspaces
         run: |
           npx tsc --noEmit -p apps/api/tsconfig.json
           npx tsc --noEmit -p apps/web/tsconfig.json
           npx tsc --noEmit -p apps/mcp/tsconfig.json
+          npx tsc --noEmit -p apps/relayer-daemon/tsconfig.json
 
       - name: Route lint
         run: bash scripts/lint-routes.sh
@@ -61,6 +92,7 @@ jobs:
           python3 scripts/ci_proof.py build \
             --junit-glob "apps/api/test-results/*.xml" \
             --junit-glob "apps/mcp/test-results/*.xml" \
+            --junit-glob "apps/relayer-daemon/test-results/*.xml" \
             --status lint:pass \
             --status typecheck:pass \
             --output ci-proof.json

@@ -37,7 +37,7 @@ SCHEMA_VERSION = 1
 
 
 def _parse_junit(path: str) -> dict:
-    totals = dict(tests=0, passed=0, failures=0, errors=0, skipped=0)
+    totals: dict = dict(tests=0, passed=0, failures=0, errors=0, skipped=0)
     tree = ET.parse(path)
     root = tree.getroot()
     # JUnit XML: counters live on <testsuite> (pytest) or on the child
@@ -61,6 +61,13 @@ def _parse_junit(path: str) -> dict:
                     f"ci_proof: warning: {path}: unparseable {key}={raw!r}",
                     file=sys.stderr,
                 )
+    # Carry the suite names. A receipt that says "35 tests passed" without
+    # naming them cannot answer the only question that matters on a money
+    # path — WHICH suites ran — so a silently-dropped suite looks identical
+    # to one that never existed.
+    names = [n.get("name") for n in nodes if n.get("name")]
+    if names:
+        totals["names"] = names
     return totals
 
 
@@ -76,8 +83,17 @@ def _collect_junit(patterns: list[str]) -> dict:
         try:
             t = _parse_junit(path)
         except (ET.ParseError, OSError) as exc:
-            suites.append({"file": path, "error": str(exc)})
-            continue
+            # A JUnit file we cannot read is NOT a file with zero tests.
+            # Recording it as a note and continuing is how a truncated or
+            # half-written report silently lowers the count and still
+            # certifies green — exactly the fake-green this tool exists to
+            # refuse. A 0-byte api.junit.xml (runner crashed mid-write, or
+            # the wrong reporter flags produced nothing) hit this for real.
+            # Fail loudly instead; the caller turns this into exit 2.
+            raise SystemExit(
+                f"ci_proof: REFUSING to build a proof — unreadable JUnit XML {path}: {exc}\n"
+                f"          An unparseable report is a broken test run, not an empty one."
+            )
         # Per-file derivation so suite entries and totals always agree
         # (pytest's JUnit XML has no native "passed" attribute).
         if t["passed"] == 0 and t["tests"] > 0:
