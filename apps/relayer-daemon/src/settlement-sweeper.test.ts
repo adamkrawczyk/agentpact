@@ -315,6 +315,52 @@ describe("runSettlementSweep", () => {
     assert.ok(scan.args.includes(7), "LIMIT is parameterised from config, bounding blast radius and judge spend");
   });
 
+  it("caps the release call and treats a timeout as AMBIGUOUS, never retrying it", async () => {
+    // A lost response on a money-moving call may mean the release SUCCEEDED.
+    // Retrying it is how you double-pay; the receipt must say so out loud.
+    const { sql, decisionFor } = makeSql([dealRow()]);
+    let apiCalls = 0, sawSignal = false, aborted = false;
+    const hang = (async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes("judge.test")) {
+        return new Response(JSON.stringify({ model: "jev-1.13.0", results: [{ scores: { satisfied: 0.97 } }] }), { status: 200 });
+      }
+      apiCalls++;
+      // Record whether a signal arrived AND whether it actually fired. The
+      // first version of this test rejected on a missing signal — useless,
+      // because the sweeper's catch block wraps EVERY error into the same
+      // "AMBIGUOUS" reason, so the assertion passed even with the signal
+      // removed. Mutation-tested: deleting `signal: ctrl.signal` must fail.
+      sawSignal = Boolean(init?.signal);
+      return await new Promise<Response>((_resolve, reject) => {
+        const sig = init?.signal as AbortSignal | undefined;
+        sig?.addEventListener("abort", () => { aborted = true; reject(new Error("The operation was aborted")); });
+        // No signal => hang past the test's own budget, so a sweeper that
+        // forgot the timeout cannot quietly pass.
+        setTimeout(() => reject(new Error("fetch was never aborted — no timeout on the money call")), 2000);
+      });
+    }) as unknown as typeof fetch;
+
+    const r = await runSettlementSweep(sql, baseCfg({
+      apiTimeoutMs: 50, fetchImpl: hang, jev: { fetchImpl: hang, endpoint: "https://judge.test" },
+    }));
+
+    assert.ok(sawSignal, "the release call must carry an AbortSignal — otherwise there is no timeout");
+    assert.ok(aborted, "the signal must actually fire, capping the call");
+    assert.equal(apiCalls, 1, "an ambiguous money call must NOT be retried");
+    assert.equal(r.acted, 0, "a lost response is never counted as a completion");
+    assert.match(String(decisionFor("deal-0000-0000-0000-000000000001")!.args[6]), /AMBIGUOUS/);
+  });
+
+  it("uses the per-deal route's timeout default (1), not the admin route's (7)", async () => {
+    // routes/fulfillment.ts:795 defaults to 1; routes/admin.ts:473 to 7. This
+    // sweeper calls the FORMER, so selecting on 7 would leave a NULL-timeout
+    // deal unreleased for six extra days.
+    const { sql, calls } = makeSql([]);
+    await runSettlementSweep(sql, baseCfg());
+    const scan = calls.find((c) => /FROM deals d/i.test(c.text))!.text;
+    assert.match(scan, /COALESCE\(d\.acceptance_timeout_days, 1\)/);
+  });
+
   // REGRESSION GUARD. These assertions exist because the first version of the
   // candidate query selected d.title / d.description — columns that DO NOT
   // EXIST on `deals` (the text lives on the joined offers/needs rows). Every

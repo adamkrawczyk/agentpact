@@ -53,6 +53,12 @@ export interface SettlementSweeperConfig {
   completeThreshold: number;
   /** Max deals per tick. Bounds blast radius AND judge spend. */
   maxPerTick: number;
+  /**
+   * Hard cap on the release call. Without it a hung API parks the tick while
+   * setInterval starts the next one, turning a hang into concurrent release
+   * attempts on the same deal.
+   */
+  apiTimeoutMs?: number;
   /** Set false to judge + record decisions without calling the API. */
   autoReleaseEnabled: boolean;
   jev?: JevConfig;
@@ -137,6 +143,21 @@ export async function runSettlementSweep(
     // Both offer_id and need_id are NOT NULL on deals, so the joins never
     // drop a row.
     //
+    // THE DEFAULT MUST MATCH THE ROUTE THIS SWEEPER CALLS, NOT THE OTHER ONE.
+    // The two API auto-complete surfaces disagree with each other:
+    //   routes/fulfillment.ts:795  Number(deal.acceptance_timeout_days ?? 1)
+    //   routes/admin.ts:473        COALESCE(acceptance_timeout_days, 7)
+    // This sweeper delegates to the PER-DEAL route (fulfillment.ts), so 1 is
+    // the only correct default. An earlier draft copied the 7 from the admin
+    // route. That direction was safe rather than dangerous — selecting a
+    // strict SUBSET of what the route accepts can only under-release, never
+    // produce the refuse-then-retry-forever loop the opposite mismatch causes
+    // — but a NULL-timeout deal would have sat unreleased for six extra days.
+    //
+    // Inert on today's data (column is NOT NULL DEFAULT 1; 0 of 480 prod rows
+    // are NULL), so this guards against the schema changing under us rather
+    // than fixing a live bug. Found by adversarial review, not by the tests.
+    //
     // Excludes deals already decided 'complete' or 'review' in the last 24h,
     // so a deal a human is reviewing is not re-judged on every tick.
     const candidates = await sql<CandidateRow>`
@@ -164,7 +185,7 @@ export async function runSettlementSweep(
       ) f ON TRUE
       WHERE d.status IN ('delivered', 'active', 'funded')
         AND d.updated_at < ${now()}::timestamptz
-            - (COALESCE(d.acceptance_timeout_days, 7) || ' days')::interval
+            - (COALESCE(d.acceptance_timeout_days, 1) || ' days')::interval
         AND NOT EXISTS (
           SELECT 1 FROM sweeper_decisions sd
           WHERE sd.deal_id = d.id
@@ -291,10 +312,40 @@ async function releaseViaApi(
     return { ok: false, completed: false, settlementPending: false, reason: "ADMIN_API_KEY unset" };
   }
   const url = `${cfg.apiBaseUrl.replace(/\/$/, "")}/api/deals/${dealId}/fulfillment/auto-complete`;
-  const res = await doFetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-admin-key": cfg.adminApiKey },
-  });
+
+  // TIMEOUT IS MANDATORY ON THIS CALL. Without one, a hung API connection
+  // parks the whole tick indefinitely — and because ticks are on setInterval,
+  // the next tick starts anyway and re-selects the same deal, which is how a
+  // hang turns into concurrent release attempts on one deal.
+  //
+  // DELIBERATELY NOT RETRIED. A timeout here is AMBIGUOUS: the release may
+  // have completed server-side and only the response was lost. Retrying an
+  // ambiguous money-moving call is how you double-pay. The honest outcome is
+  // 'error' — recorded, left for the next tick to re-evaluate against the
+  // deal's THEN-current status, which is the real idempotency guard: if the
+  // API did complete it, the deal is no longer 'delivered/active/funded' and
+  // the eligibility query will not select it again.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), cfg.apiTimeoutMs ?? 30_000);
+  let res: Response;
+  try {
+    res = await doFetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-admin-key": cfg.adminApiKey },
+      signal: ctrl.signal,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false, completed: false, settlementPending: false,
+      // Say AMBIGUOUS out loud in the receipt. "api call failed" invites a
+      // human to re-run it by hand; "may have completed server-side" does not.
+      reason: `api call did not return (${msg}) — AMBIGUOUS: the release may have completed server-side; not retried`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+
   const text = await res.text();
   if (!res.ok) {
     return { ok: false, completed: false, settlementPending: false, reason: `HTTP ${res.status}: ${text.slice(0, 200)}` };
