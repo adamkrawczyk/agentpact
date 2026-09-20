@@ -1,0 +1,75 @@
+name: CI Proof
+
+# moneypath G8 (build half): every run on main and every PR uploads a
+# machine-readable ci-proof.json artifact recording WHAT was actually
+# verified on that commit — test counts collected/passed, lint/typecheck
+# status, commit SHA, run URL. A green checkmark alone proves nothing.
+# The PR template asks the author to reference this artifact; the G8
+# predicate then greps merged PR bodies for the receipt.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    name: CI proof artifact (ci-proof.json)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build API + MCP
+        run: |
+          npm run -w @agentpact/api build
+          npm run -w @agentpact/mcp build
+
+      # npm -w runs with cwd inside each workspace, so the JUnit files land
+      # in apps/<ws>/test-results/. --outputFile needs the dir to exist.
+      - name: Test API (JUnit XML)
+        run: |
+          mkdir -p apps/api/test-results
+          npm run -w @agentpact/api test -- --reporter=junit --outputFile=test-results/api.junit.xml
+
+      - name: Test MCP (JUnit XML, if present)
+        run: |
+          mkdir -p apps/mcp/test-results
+          npm run -w @agentpact/mcp test --if-present -- --reporter=junit --outputFile=test-results/mcp.junit.xml
+
+      - name: Type check all workspaces
+        run: |
+          npx tsc --noEmit -p apps/api/tsconfig.json
+          npx tsc --noEmit -p apps/web/tsconfig.json
+          npx tsc --noEmit -p apps/mcp/tsconfig.json
+
+      - name: Route lint
+        run: bash scripts/lint-routes.sh
+
+      - name: Build ci-proof.json
+        run: |
+          python3 scripts/ci_proof.py build \
+            --junit-glob "apps/api/test-results/*.xml" \
+            --junit-glob "apps/mcp/test-results/*.xml" \
+            --status lint:pass \
+            --status typecheck:pass \
+            --output ci-proof.json
+          python3 scripts/ci_proof.py verify ci-proof.json
+
+      - name: Upload CI proof artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-proof
+          path: ci-proof.json
+          retention-days: 90
