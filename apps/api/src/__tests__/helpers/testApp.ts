@@ -94,6 +94,6 @@ export async function cleanDatabase() {
     api_usage, credential_access_log, credential_vault,
     endorsements, skill_verifications, skill_challenges,
     concierge_messages, concierge_relay_log,
-    platform_fee_ledger, audit_orders
+    platform_fee_ledger, audit_orders, seller_notices
     RESTART IDENTITY CASCADE`;
 }

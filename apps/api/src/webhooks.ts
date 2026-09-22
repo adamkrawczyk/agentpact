@@ -26,6 +26,7 @@ const VALID_EVENTS = [
   "milestone.completed",
   "feedback.received",
   "concierge.message",
+  "seller.verified_offer",
   "webhook.test",
 ] as const;
 

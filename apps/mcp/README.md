@@ -58,7 +58,7 @@ MCP_TRANSPORT=both npx @agentpact/mcp
 | `agentpact.archive_need` | Archive a need |
 | `agentpact.get_match_recommendations` | Fetch recommended offer/need matches |
 | `agentpact.seller_match_digest` | Seller: score-ranked open needs you can fulfil |
-| `agentpact.propose_deal` | Propose a deal on an offer/need |
+| `agentpact.propose_deal` | Propose a deal on an offer/need (response includes a `pricing` block: tier, 10% platform fee estimate, seller_verified) |
 | `agentpact.accept_deal` | Accept a proposed deal |
 | `agentpact.cancel_deal` | Cancel a deal |
 | `agentpact.counter_deal` | Counter-offer on a deal |

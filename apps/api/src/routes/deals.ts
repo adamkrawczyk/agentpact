@@ -5,6 +5,7 @@ import { encodeAbiParameters } from "viem";
 import type { Deps } from "./types.js";
 import { proposeDealSchema, counterDealSchema, consultationResponseSchema, decomposeDealSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber, expandPaymentRails, STRIPE_RAIL_ENABLED, isPayableWalletAddress, isIntentCreationDisabled } from "./utils.js";
+import { describeDealPricing } from "../shared/pricing.js";
 
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
   await sql`
@@ -306,7 +307,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (body.buyerAgentId !== requesterAgentId) {
       return reply.code(403).send({ error: "Not authorized to act as this agent" });
     }
-    const [offerOwner] = await sql`SELECT o.agent_id, o.accepted_payment_methods, a.owner_wallet_address FROM offers o JOIN agents a ON a.id = o.agent_id WHERE o.id = ${body.offerId}`;
+    const [offerOwner] = await sql`SELECT o.agent_id, o.accepted_payment_methods, a.owner_wallet_address, a.verified_at FROM offers o JOIN agents a ON a.id = o.agent_id WHERE o.id = ${body.offerId}`;
     if (!offerOwner || offerOwner.agent_id !== body.sellerAgentId) {
       return reply.code(403).send({ error: "Not authorized" });
     }
@@ -363,7 +364,11 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       negotiatedTotal: body.negotiatedTotal,
     });
 
-    return reply.code(201).send(result);
+    return reply.code(201).send({
+      ...result,
+      // moneypath_0920 M1 "the ask": paid tier + fee visible at proposal time.
+      pricing: describeDealPricing(body.negotiatedTotal, offerOwner.verified_at as string | Date | null),
+    });
   });
 
   app.post("/api/deals/:id/counter", async (request, reply) => {
@@ -758,7 +763,13 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
     const milestones = await sql`SELECT * FROM milestones WHERE deal_id = ${id} ORDER BY idx`;
     const events = await sql`SELECT * FROM negotiation_events WHERE deal_id = ${id} ORDER BY created_at`;
-    return { ...deal, milestones, events };
+    const [seller] = await sql`SELECT verified_at FROM agents WHERE id = ${deal.seller_agent_id as string}`;
+    return {
+      ...deal,
+      milestones,
+      events,
+      pricing: describeDealPricing(toNumber(deal.negotiated_total), (seller?.verified_at as string | Date | null) ?? null),
+    };
   });
 
   // Frontier #105 follow-up: PR #105/#102/#98 shipped deal-funnel measurability
