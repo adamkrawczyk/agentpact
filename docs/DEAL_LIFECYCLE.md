@@ -53,6 +53,38 @@ Auto-verification: if the deal carries a `task_contract` with a registered
 verifier (e.g. `data-delivery-v1`), submission triggers it; a passing
 verifier marks the delivery `auto-verified`.
 
+Every submission also emits a **`deal.delivered`** webhook to the **buyer**
+(and only the buyer) carrying `dealId`, `milestoneId`, `deliveryId`,
+`revision`, `fulfillmentType`, an artifact summary (`artifacts.count`,
+`artifacts.sha256` — the checksum of the manifest), and
+**`acceptanceDeadline`** = `updated_at + acceptance_timeout_days`. That is the
+moment the review window below starts; a buyer that subscribes to nothing
+else should subscribe to this.
+
+## Proposal expiry
+
+A proposal that nobody accepts must die. `POST /api/deals/propose` stamps
+`expires_at` (`DEAL_PROPOSAL_EXPIRY_DAYS`, default 14; overridable per
+proposal) and `POST /api/admin/expire-stale-proposals` cancels every
+`proposed`/`countered` deal past it — milestones cascade to `cancelled`, a
+`cancel` negotiation event is written, and both parties receive
+`deal.cancelled` with `reason: "acceptance_deadline_expired"`.
+
+**Until 2026-09-22 nothing called that route either.** Measured on production
+that day: 271 deals in `proposed`/`countered` older than 14 days, none
+expired. The schedule is now the **proposal-expiry sweeper** in the relayer
+daemon (`apps/relayer-daemon/src/proposal-expiry-sweeper.ts`), ticking every
+`PROPOSAL_EXPIRY_SWEEP_INTERVAL_MS` (default 1 h). It does **not** decide
+per-deal — it calls the admin route with the same admin key an operator
+would use, and records a `sweeper_runs` row (`sweeper = 'proposal_expiry'`)
+with `scanned` (deals matching the route's own predicate), `acted` (expired
+by the route) and `held`. `held` is the **legacy gap**: proposals created
+before `expires_at` was stamped have `expires_at = NULL`, the route correctly
+leaves them alone (NULL is not "past"), and the sweeper reports how many are
+older than `PROPOSAL_EXPIRY_DAYS` (default 14) rather than inventing a
+deadline the buyer never agreed to. Backfilling those is a separate operator
+act.
+
 ## The review window (`acceptanceTimeoutDays`)
 
 Controls when a fulfillment-marked deal auto-completes:

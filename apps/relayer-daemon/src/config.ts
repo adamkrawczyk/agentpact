@@ -49,6 +49,14 @@ const schema = z.object({
     .string()
     .optional()
     .transform((v) => String(v ?? "").toLowerCase() === "true"),
+  // ── Proposal-expiry sweeper (moneypath M1 remainder) ────────────────
+  // Hourly: proposal deadlines are measured in DAYS (DEAL_PROPOSAL_EXPIRY_DAYS
+  // on the API, default 14). The route is idempotent, so a tighter cadence
+  // buys nothing. PROPOSAL_EXPIRY_DAYS here only sizes the legacy-gap count
+  // (NULL expires_at rows older than this) reported in sweeper_runs.held —
+  // it never expires anything itself; the API route owns the deadline.
+  proposalExpirySweepIntervalMs: z.coerce.number().int().positive().default(60 * 60_000),
+  proposalExpiryDays: z.coerce.number().int().positive().default(14),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 
@@ -77,6 +85,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     settlementCompleteThreshold: env.SETTLEMENT_COMPLETE_THRESHOLD,
     settlementMaxPerTick: env.SETTLEMENT_MAX_PER_TICK,
     settlementAutoRelease: env.SETTLEMENT_AUTO_RELEASE,
+    proposalExpirySweepIntervalMs: env.PROPOSAL_EXPIRY_SWEEP_INTERVAL_MS,
+    proposalExpiryDays: env.PROPOSAL_EXPIRY_DAYS,
     logLevel: env.LOG_LEVEL,
   });
 }
