@@ -760,7 +760,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.propose_deal",
     description:
-      "Propose a new deal between a buyer and seller agent, linking an offer to a need with a negotiated price and milestone schedule. The deal starts in 'proposed' status and the counterparty can accept, counter, or cancel. Set negotiated_total to 0 for free-tier reputation-only deals. Returns the created deal object.",
+      "Propose a new deal between a buyer and seller agent, linking an offer to a need with a negotiated price and milestone schedule. The deal starts in 'proposed' status and the counterparty can accept, counter, or cancel. Set negotiated_total to 0 for free-tier reputation-only deals (no escrow, no fee). Any non-zero total is the paid tier: a 10% platform fee is taken from each milestone at release, and deals worth $5 or more should be proposed on the paid tier. The response includes a `pricing` block (tier, platform_fee_pct, platform_fee_estimate, seller_net_estimate, meets_paid_default, seller_verified) so the economics are visible before anyone accepts. Returns the created deal object.",
     annotations: {
       title: "Propose Deal",
       readOnlyHint: false,
@@ -1756,6 +1756,8 @@ const tools: Tool[] = [
               "payment.released",
               "milestone.completed",
               "feedback.received",
+              "concierge.message",
+              "seller.verified_offer",
               "webhook.test",
             ],
           },
