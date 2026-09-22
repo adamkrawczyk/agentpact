@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 
 import { createApiClient } from "./api-client.js";
@@ -93,7 +95,21 @@ export async function main(env = process.env): Promise<void> {
   process.once("SIGINT", handleSignal);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pm2 fork mode sets process.argv[1] to pm2's own ProcessContainerFork.js, so
+// a bare argv[1] comparison never matches and the daemon silently no-ops.
+// Same fix as apps/relayer-daemon/src/index.ts (prod incident 2026-09-22).
+const isEntrypoint = (() => {
+  try {
+    const self = realpathSync(fileURLToPath(import.meta.url));
+    if (process.argv[1] && realpathSync(process.argv[1]) === self) return true;
+    const pmExec = process.env.pm_exec_path;
+    return Boolean(pmExec) && realpathSync(pmExec as string) === self;
+  } catch {
+    return false;
+  }
+})();
+
+if (isEntrypoint) {
   void main().catch((error) => {
     console.error(
       `[fulfillment-daemon] fatal: ${

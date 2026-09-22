@@ -5,6 +5,8 @@
 // daemon exposes a minimal HTTP /health endpoint for UptimeRobot (Phase F2).
 
 import { createServer } from "node:http";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { loadConfig, type Config } from "./config.js";
 import {
   runAckTimeoutSweep,
@@ -154,9 +156,20 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
 
 // ── Entrypoint ──────────────────────────────────────────────────────────
 
+// Under pm2 fork mode process.argv[1] is pm2's ProcessContainerFork.js, not
+// this file, so a bare argv[1] comparison is false and the daemon boots into a
+// silent no-op (module loads, nothing starts, no port, no sweeps). Measured on
+// prod 2026-09-22: every sweeper had been dead since the 09-01 restart under
+// pm2. Resolve both sides to real paths and also honour an explicit override.
 const isEntrypoint = (() => {
+  if (process.env.RELAYER_FORCE_ENTRYPOINT === "true") return true;
   try {
-    return import.meta.url === `file://${process.argv[1]}`;
+    const self = realpathSync(fileURLToPath(import.meta.url));
+    const argv = process.argv[1] ? realpathSync(process.argv[1]) : "";
+    if (self === argv) return true;
+    // pm2 fork: the real script is in pm_exec_path / process.env.pm_exec_path.
+    const pmExec = process.env.pm_exec_path;
+    return Boolean(pmExec) && realpathSync(pmExec as string) === self;
   } catch {
     return false;
   }
