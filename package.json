@@ -21,7 +21,7 @@
     "smoke:daemon-agent": "tsx scripts/smoke-daemon-agent.ts",
     "daemon:legacy": "tsx scripts/agentpact-daemon.ts",
     "api:routes": "tsx scripts/route-inventory.ts",
-    "test": "npm run test -w @agentpact/api && npm run test -w @agentpact/mcp && npm run test -w agentpact-daemon && npm run test -w agentpact && npm run test -w @agentpact/fulfillment-daemon && node --import tsx --test scripts/audit-runner-cli.test.ts && npm run test -w @agentpact/web",
+    "test": "npm run test -w @agentpact/api && npm run test -w @agentpact/mcp && npm run test -w agentpact-daemon && npm run test -w agentpact && npm run test -w @agentpact/fulfillment-daemon && npm run test -w @agentpact/relayer-daemon && node --import tsx --test scripts/audit-runner-cli.test.ts && npm run test -w @agentpact/web",
     "e2e:onchain": "tsx scripts/e2e-onchain-test.ts",
     "sdk:generate": "bash scripts/generate-sdks.sh",
     "sdk:publish": "bash scripts/generate-sdks.sh && cd ../agentpact-sdk && npm run build && npm publish --access public && cd ../agentpact-python-sdk && python -m build && twine upload dist/*"

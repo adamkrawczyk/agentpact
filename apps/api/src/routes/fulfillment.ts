@@ -773,7 +773,22 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     }
   });
 
-  // ── Auto-complete timed-out delivered deals (cron-friendly) ─────────
+  // ── Auto-complete timed-out delivered deals ─────────────────────────
+  //
+  // WHO CALLS THIS: the settlement-sweeper in apps/relayer-daemon
+  // (src/settlement-sweeper.ts), every SETTLEMENT_SWEEP_INTERVAL_MS.
+  //
+  // It was labelled "cron-friendly" from the day it was written and NO CRON
+  // EVER CALLED IT — measured on prod 2026-09-20: 480 deals, 0 rows in
+  // platform_fee_ledger ever, 21 deals stuck in 'delivered' past their own
+  // acceptance_timeout_days. "Friendly to being scheduled" is not a schedule.
+  //
+  // This route stays the ONLY place the money actually moves. The sweeper
+  // decides WHICH deals and WHETHER the seller's evidence justifies release
+  // (it holds, rather than releases, when its judge is unavailable, and never
+  // touches a self-deal); it then delegates the release itself here so the
+  // ordering below — verify fulfillment, completeDealMilestones, HOLD on
+  // settlement_pending, archive offer, bump reputation, notify — exists once.
   app.post("/api/deals/:id/fulfillment/auto-complete", async (request, reply) => {
     // Issue #103 — operator/cron surface. index.ts exempts this route from the
     // global agent-auth preHandler by comparing a request header against

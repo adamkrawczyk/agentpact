@@ -25,6 +25,30 @@ const schema = z.object({
   // Autoclose sweeper cadence + spend cap.
   autocloseSweepIntervalMs: z.coerce.number().int().positive().default(30_000),
   autocloseMaxUsdc: z.coerce.number().positive().default(5),
+  // ── Settlement sweeper (moneypath_0920 M1) ────────────────────────────
+  // 10 minutes: acceptance timeouts are measured in DAYS, so a tighter cadence
+  // buys nothing and only multiplies judge spend on the same held deals.
+  settlementSweepIntervalMs: z.coerce.number().int().positive().default(10 * 60_000),
+  // The sweeper calls the API's own auto-complete route rather than releasing
+  // money itself — see settlement-sweeper.ts for why. It therefore needs the
+  // API's base URL and the same admin key an operator would use.
+  apiBaseUrl: z.string().url().default("https://api.agentpact.xyz"),
+  adminApiKey: z.string().optional(),
+  settlementCompleteThreshold: z.coerce.number().min(0).max(1).default(0.85),
+  settlementMaxPerTick: z.coerce.number().int().positive().default(25),
+  // DEFAULT OFF. A sweeper that starts releasing real money the moment it is
+  // deployed is not a feature, it is an incident. Shadow mode judges and
+  // records decisions so the thresholds can be read off REAL deals first;
+  // SETTLEMENT_AUTO_RELEASE=true is a deliberate, separate act.
+  //
+  // NOT z.coerce.boolean(): that is JS Boolean(), so the STRING "false" —
+  // exactly what an env var holds when someone tries to turn this off —
+  // coerces to TRUE. On this switch that failure mode silently releases money.
+  // Only the literal string "true" (case-insensitive) enables it.
+  settlementAutoRelease: z
+    .string()
+    .optional()
+    .transform((v) => String(v ?? "").toLowerCase() === "true"),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 
@@ -47,6 +71,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     streamStaleSweepIntervalMs: env.STREAM_STALE_SWEEP_INTERVAL_MS,
     autocloseSweepIntervalMs: env.AUTOCLOSE_SWEEP_INTERVAL_MS,
     autocloseMaxUsdc: env.AUTOCLOSE_MAX_USDC,
+    settlementSweepIntervalMs: env.SETTLEMENT_SWEEP_INTERVAL_MS,
+    apiBaseUrl: env.API_BASE_URL,
+    adminApiKey: env.ADMIN_API_KEY,
+    settlementCompleteThreshold: env.SETTLEMENT_COMPLETE_THRESHOLD,
+    settlementMaxPerTick: env.SETTLEMENT_MAX_PER_TICK,
+    settlementAutoRelease: env.SETTLEMENT_AUTO_RELEASE,
     logLevel: env.LOG_LEVEL,
   });
 }

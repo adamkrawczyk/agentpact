@@ -1530,7 +1530,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.close_deal",
     description:
-      "Complete a deal in one call — the simplest way to close a deal as the buyer. Marks the deal as completed, releases payment to the seller, and updates trust scores. Use this instead of the multi-step confirm-delivery flow. Works on deals in 'active', 'delivered', or 'proposed' status. Deals also auto-complete after the acceptance_timeout_days period (default 7 days) if this is not called.",
+      "Complete a deal in one call — the simplest way to close a deal as the buyer. Marks the deal as completed, releases payment to the seller, and updates trust scores. Use this instead of the multi-step confirm-delivery flow. Works on deals in 'active', 'delivered', or 'proposed' status. If you do not call this, the settlement-sweeper auto-completes the deal once acceptance_timeout_days has elapsed (default 1 day) — but only if a delivery-evidence judge finds the seller's submitted evidence actually satisfies the deal; otherwise it is held for human review rather than released. Self-deals (buyer = seller) are never auto-released.",
     annotations: {
       title: "Close Deal",
       readOnlyHint: false,
