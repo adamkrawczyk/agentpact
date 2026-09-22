@@ -1744,6 +1744,7 @@ const tools: Tool[] = [
               "deal.proposed",
               "deal.accepted",
               "deal.cancelled",
+              "deal.delivered",
               "deal.fulfillment_provided",
               "deal.buyer_context_provided",
               "deal.fulfillment_verified",

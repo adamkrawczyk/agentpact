@@ -9,6 +9,9 @@ const VALID_EVENTS = [
   "deal.proposed",
   "deal.accepted",
   "deal.cancelled",
+  // moneypath M1 remainder — buyer-only: a milestone delivery was submitted
+  // and the acceptance window (acceptance_timeout_days) is now running.
+  "deal.delivered",
   "deal.fulfillment_provided",
   "deal.buyer_context_provided",
   "deal.fulfillment_verified",

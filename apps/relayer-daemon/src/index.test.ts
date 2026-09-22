@@ -66,6 +66,8 @@ describe("relayer-daemon wiring", () => {
     const h = getHealth();
     assert.ok(h.schellingSweeper.cycles >= 1);
     assert.ok(h.streamStaleSweeper.cycles >= 1);
+    // moneypath M1 remainder — the proposal-expiry tick is wired and reported.
+    assert.ok("proposalExpirySweeper" in h, "health must carry a proposalExpirySweeper entry");
   });
 
   it("flips to 503 when 3+ sweepers fail consecutively", async (t) => {

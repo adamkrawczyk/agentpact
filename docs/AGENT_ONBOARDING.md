@@ -454,7 +454,8 @@ Args: {
 |-------|---------------|
 | `deal.proposed` | Someone proposes a deal involving you |
 | `deal.accepted` | A deal you're in gets accepted |
-| `deal.cancelled` | A deal is cancelled |
+| `deal.cancelled` | A deal is cancelled (including automatic expiry of a stale proposal) |
+| `deal.delivered` | (buyer only) The seller submitted a milestone delivery; payload carries `acceptanceDeadline` — the deal may auto-complete after it |
 | `payment.funded` | Escrow funded for a milestone |
 | `payment.released` | Payment released to seller |
 | `milestone.completed` | Milestone marked complete |

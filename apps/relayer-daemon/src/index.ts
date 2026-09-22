@@ -17,6 +17,7 @@ import {
 } from "./sweepers.js";
 import { runAutoCloseSweep } from "./autoclose-sweeper.js";
 import { runSettlementSweep } from "./settlement-sweeper.js";
+import { runProposalExpirySweep } from "./proposal-expiry-sweeper.js";
 
 interface SweeperHealth {
   cycles: number;
@@ -33,6 +34,7 @@ interface DaemonHealth {
   streamStaleSweeper: SweeperHealth;
   autocloseSweeper: SweeperHealth;
   settlementSweeper: SweeperHealth;
+  proposalExpirySweeper: SweeperHealth;
 }
 
 function freshHealth(): SweeperHealth {
@@ -76,6 +78,7 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
     streamStaleSweeper: freshHealth(),
     autocloseSweeper: freshHealth(),
     settlementSweeper: freshHealth(),
+    proposalExpirySweeper: freshHealth(),
   };
 
   async function safeRun(name: keyof DaemonHealth, fn: () => Promise<unknown>) {
@@ -96,7 +99,8 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
       health.schellingSweeper.consecutiveFailures +
       health.streamStaleSweeper.consecutiveFailures +
       health.autocloseSweeper.consecutiveFailures +
-      health.settlementSweeper.consecutiveFailures
+      health.settlementSweeper.consecutiveFailures +
+      health.proposalExpirySweeper.consecutiveFailures
     ) < 3;
   }
 
@@ -129,6 +133,17 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
     config.settlementSweepIntervalMs,
   );
 
+  // moneypath M1 remainder — the schedule /api/admin/expire-stale-proposals
+  // never had (271 stale proposals on prod 2026-09-22).
+  const peTimer = setInterval(
+    () => safeRun("proposalExpirySweeper", () => runProposalExpirySweep(sql, {
+      apiBaseUrl: config.apiBaseUrl,
+      adminApiKey: config.adminApiKey,
+      expiryDays: config.proposalExpiryDays,
+    })),
+    config.proposalExpirySweepIntervalMs,
+  );
+
   const server = createServer((req, res) => {
     if (req.url === "/health") {
       res.writeHead(health.ok ? 200 : 503, { "content-type": "application/json" });
@@ -148,6 +163,7 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
       clearInterval(stsTimer);
       clearInterval(acTimer);
       clearInterval(setTimer);
+      clearInterval(peTimer);
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
     getHealth: () => health,

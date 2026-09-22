@@ -157,6 +157,43 @@ export async function registerRoutes(
       WHERE id = (SELECT deal_id FROM milestones WHERE id = ${body.milestoneId})
     `;
 
+    // moneypath M1 remainder — tell the BUYER the clock is running.
+    // Before this, a delivery flipped the deal to 'delivered' silently: the
+    // buyer's only signal was polling get_deal, and the acceptance window
+    // (acceptance_timeout_days, after which the settlement sweeper may
+    // auto-complete and release escrow) ran with nobody told it had started.
+    // `deal.delivered` was already listed as a subscribable event in
+    // docs/agent-integration-guide.md — this makes the claim true.
+    // Deadline = updated_at + acceptance_timeout_days, computed from the row
+    // just written so it matches what the sweeper will later evaluate.
+    const [deliveredDeal] = await sql`
+      SELECT d.id, d.buyer_agent_id, d.acceptance_timeout_days, d.updated_at, o.fulfillment_type
+      FROM milestones m
+      JOIN deals d ON d.id = m.deal_id
+      LEFT JOIN offers o ON o.id = d.offer_id
+      WHERE m.id = ${body.milestoneId}
+    `;
+    if (deliveredDeal) {
+      const timeoutDays = Number(deliveredDeal.acceptance_timeout_days ?? 1);
+      const updatedAt = new Date(deliveredDeal.updated_at as string | Date);
+      const acceptanceDeadline = new Date(updatedAt.getTime() + timeoutDays * 24 * 60 * 60 * 1000);
+      notifyAgents(sql, [String(deliveredDeal.buyer_agent_id)], "deal.delivered", {
+        dealId: String(deliveredDeal.id),
+        milestoneId: body.milestoneId,
+        deliveryId: String(delivery.id),
+        revision,
+        sellerAgentId: body.submittedBy,
+        fulfillmentType: deliveredDeal.fulfillment_type ?? null,
+        artifacts: {
+          count: Array.isArray(body.artifacts) ? body.artifacts.length : 0,
+          sha256: checksum,
+        },
+        acceptanceTimeoutDays: timeoutDays,
+        acceptanceDeadline: acceptanceDeadline.toISOString(),
+        autoVerified: autoVerifyResult?.success === true,
+      });
+    }
+
     // Re-fetch delivery with updated status/result
     const [updatedDelivery] = await sql`SELECT * FROM deliveries WHERE id = ${delivery.id}`;
     return reply.code(201).send({ ...updatedDelivery, auto_verify_result: autoVerifyResult });
