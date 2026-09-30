@@ -25,6 +25,10 @@ interface SweeperHealth {
   lastErrorAt: string | null;
   lastError: string | null;
   consecutiveFailures: number;
+  /** ISO start of the tick currently in flight, or null when idle. */
+  inFlightSince: string | null;
+  /** Ticks skipped because the previous one had not finished. */
+  overlapSkips: number;
 }
 
 interface DaemonHealth {
@@ -44,6 +48,8 @@ function freshHealth(): SweeperHealth {
     lastErrorAt: null,
     lastError: null,
     consecutiveFailures: 0,
+    inFlightSince: null,
+    overlapSkips: 0,
   };
 }
 
@@ -62,6 +68,12 @@ function recordRun(h: SweeperHealth, err: Error | null) {
 
 export interface DaemonDeps {
   config: Config;
+  /**
+   * Called when a tick has been in flight longer than config.tickStallMs.
+   * Production passes process.exit(1) so pm2 restarts a wedged process;
+   * tests pass a spy. Default: no-op (health still flips to 503).
+   */
+  onStall?: (name: string, stalledMs: number) => void;
   sql: SqlClient;
   chain: ChainClient;
   log?: (level: "info" | "warn" | "error", msg: string, meta?: Record<string, unknown>) => void;
@@ -81,9 +93,45 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
     proposalExpirySweeper: freshHealth(),
   };
 
-  async function safeRun(name: keyof DaemonHealth, fn: () => Promise<unknown>) {
-    if (name === "ok") return;
-    const h = health[name] as SweeperHealth;
+  type SweeperName = Exclude<keyof DaemonHealth, "ok">;
+  const SWEEPERS: SweeperName[] = [
+    "ackSweeper", "schellingSweeper", "streamStaleSweeper",
+    "autocloseSweeper", "settlementSweeper", "proposalExpirySweeper",
+  ];
+  const tickStallMs = config.tickStallMs ?? 60 * 60_000;
+
+  // 2026-09-22 prod incident: one tick never returned (no error, no log line,
+  // no finished_at), and every sweeper went silent for 8 days while pm2 said
+  // `online` and /health said ok:true with frozen lastRunAt values. Health
+  // must read LIVENESS, not just the last recorded error.
+  function stalledSweepers(nowMs = Date.now()): Array<{ name: SweeperName; ms: number }> {
+    const out: Array<{ name: SweeperName; ms: number }> = [];
+    for (const name of SWEEPERS) {
+      const since = health[name].inFlightSince;
+      if (!since) continue;
+      const ms = nowMs - Date.parse(since);
+      if (ms > tickStallMs) out.push({ name, ms });
+    }
+    return out;
+  }
+
+  function recomputeOk() {
+    const failures = SWEEPERS.reduce((n, k) => n + health[k].consecutiveFailures, 0);
+    // Degraded on 3+ total consecutive failures across all sweepers, OR on
+    // any tick in flight past the stall threshold.
+    health.ok = failures < 3 && stalledSweepers().length === 0;
+  }
+
+  async function safeRun(name: SweeperName, fn: () => Promise<unknown>) {
+    const h = health[name];
+    // Overlap guard: setInterval fires regardless of whether the previous
+    // tick finished. Stacking ticks on a hung dependency multiplies the hang
+    // (and on the settlement path re-selects the same deal concurrently).
+    if (h.inFlightSince) {
+      h.overlapSkips++;
+      return;
+    }
+    h.inFlightSince = new Date().toISOString();
     try {
       const result = await fn();
       recordRun(h, null);
@@ -92,16 +140,10 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
       const e = err instanceof Error ? err : new Error(String(err));
       recordRun(h, e);
       log("error", `${name}.fail`, { error: e.message });
+    } finally {
+      h.inFlightSince = null;
     }
-    // Degraded state on 3+ total consecutive failures across all sweepers.
-    health.ok = (
-      health.ackSweeper.consecutiveFailures +
-      health.schellingSweeper.consecutiveFailures +
-      health.streamStaleSweeper.consecutiveFailures +
-      health.autocloseSweeper.consecutiveFailures +
-      health.settlementSweeper.consecutiveFailures +
-      health.proposalExpirySweeper.consecutiveFailures
-    ) < 3;
+    recomputeOk();
   }
 
   const ackTimer = setInterval(
@@ -144,8 +186,23 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
     config.proposalExpirySweepIntervalMs,
   );
 
+  // Stall watchdog: a wedged tick must become visible AND self-heal. The
+  // overlap guard alone would turn a hang into permanent silent skipping.
+  let stallReported = false;
+  const stallTimer = setInterval(() => {
+    const stalled = stalledSweepers();
+    recomputeOk();
+    if (stalled.length === 0 || stallReported) return;
+    stallReported = true;
+    for (const s of stalled) {
+      log("error", `${s.name}.stalled`, { inFlightMs: s.ms, tickStallMs });
+    }
+    deps.onStall?.(stalled[0].name, stalled[0].ms);
+  }, Math.min(60_000, Math.max(10, Math.floor(tickStallMs / 4))));
+
   const server = createServer((req, res) => {
     if (req.url === "/health") {
+      recomputeOk();
       res.writeHead(health.ok ? 200 : 503, { "content-type": "application/json" });
       res.end(JSON.stringify(health));
       return;
@@ -164,6 +221,7 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
       clearInterval(acTimer);
       clearInterval(setTimer);
       clearInterval(peTimer);
+      clearInterval(stallTimer);
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
     getHealth: () => health,
@@ -202,6 +260,10 @@ if (isEntrypoint) {
   }
   const { default: postgres } = await import("postgres");
   const sql = postgres(config.databaseUrl, {
+    // Same Supavisor fix as apps/api/src/db.ts (PG 26000, 2026-07-24): the
+    // transaction-mode pooler (:6543) can route PREPARE and EXECUTE to
+    // different backends. Named prepared statements are unsafe behind it.
+    prepare: false,
     max: 3,
     idle_timeout: 20,
     connect_timeout: 10,
@@ -361,7 +423,15 @@ if (isEntrypoint) {
     };
   }
 
-  const { stop } = startDaemon({ config, sql, chain });
+  const { stop } = startDaemon({
+    config, sql, chain,
+    // A wedged tick cannot be un-wedged from inside the process. Exit non-zero
+    // so pm2 (autorestart) brings up a fresh one; the stall is logged first.
+    onStall: (name, ms) => {
+      console.error(JSON.stringify({ level: "error", msg: "relayer-daemon.exit_on_stall", sweeper: name, inFlightMs: ms }));
+      setTimeout(() => process.exit(1), 250);
+    },
+  });
   const shutdown = async () => {
     await stop();
     process.exit(0);

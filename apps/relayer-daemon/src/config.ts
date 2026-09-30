@@ -57,6 +57,11 @@ const schema = z.object({
   // it never expires anything itself; the API route owns the deadline.
   proposalExpirySweepIntervalMs: z.coerce.number().int().positive().default(60 * 60_000),
   proposalExpiryDays: z.coerce.number().int().positive().default(14),
+  // A tick in flight longer than this is WEDGED: /health flips to 503 and the
+  // process exits so pm2 restarts it. 60 min clears the worst legitimate
+  // settlement tick: 25 deals x (3 judge attempts x 20s + one 30s release
+  // call) ~ 39 min. A threshold under that would kill healthy ticks.
+  tickStallMs: z.coerce.number().int().positive().default(60 * 60_000),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 
@@ -87,6 +92,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     settlementAutoRelease: env.SETTLEMENT_AUTO_RELEASE,
     proposalExpirySweepIntervalMs: env.PROPOSAL_EXPIRY_SWEEP_INTERVAL_MS,
     proposalExpiryDays: env.PROPOSAL_EXPIRY_DAYS,
+    tickStallMs: env.RELAYER_TICK_STALL_MS,
     logLevel: env.LOG_LEVEL,
   });
 }
