@@ -84,6 +84,8 @@ interface CandidateRow {
   description: string | null;
   fulfillment_type: string | null;
   fulfillment_data: unknown;
+  delivery_manifest: unknown;
+  delivery_notes: string | null;
   seller_completed_count: string | number | null;
   is_self_deal: boolean;
 }
@@ -170,6 +172,8 @@ export async function runSettlementSweep(
           o.description_md
         )                                                   AS description,
         f.fulfillment_type, f.fulfillment_data,
+        dl.artifact_manifest                                AS delivery_manifest,
+        dl.verification_notes                               AS delivery_notes,
         (d.buyer_agent_id = d.seller_agent_id) AS is_self_deal,
         (SELECT COUNT(*) FROM deals x
           WHERE x.seller_agent_id = d.seller_agent_id AND x.status = 'completed'
@@ -183,6 +187,14 @@ export async function runSettlementSweep(
         WHERE deal_id = d.id AND status NOT IN ('revoked')
         ORDER BY created_at DESC LIMIT 1
       ) f ON TRUE
+      LEFT JOIN LATERAL (
+        -- The latest submit_delivery artifact for this deal (any milestone).
+        SELECT x.artifact_manifest, x.verification_notes
+        FROM deliveries x
+        JOIN milestones m ON m.id = x.milestone_id
+        WHERE m.deal_id = d.id
+        ORDER BY x.created_at DESC LIMIT 1
+      ) dl ON TRUE
       WHERE d.status IN ('delivered', 'active', 'funded')
         AND d.updated_at < ${now()}::timestamptz
             - (COALESCE(d.acceptance_timeout_days, 1) || ' days')::interval
@@ -215,6 +227,8 @@ export async function runSettlementSweep(
             dealDescription: deal.description,
             fulfillmentType: deal.fulfillment_type,
             fulfillmentData: deal.fulfillment_data,
+            deliveryManifest: deal.delivery_manifest,
+            deliveryNotes: deal.delivery_notes,
             sellerCompletedCount: Number(deal.seller_completed_count ?? 0),
           });
           const verdict = await judgeDelivery(evidence, cfg.jev);
