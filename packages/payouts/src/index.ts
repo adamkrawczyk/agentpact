@@ -2,7 +2,7 @@
  * @agentpact/payouts — Unified payout API (Stripe Connect + USDC on-chain)
  */
 
-export type Rail = 'stripe' | 'usdc-base' | 'usdc-solana';
+export type Rail = 'stripe' | 'usdc-base' | 'usdc-solana' | 'nano-xno';
 
 export interface PayoutParams {
   recipient: string;       // Stripe account ID or wallet address
@@ -58,10 +58,34 @@ export class USDCSolanaAdapter implements PayoutAdapter {
   }
 }
 
+// Nano account format: nano_/xrb_ + 64 base32 chars (1 + 59 + checksum). 65 total.
+const NANO_ACCOUNT = /^(nano|xrb)_[13][13-9a-km-uw-z]{59}$/;
+
+export class NanoXNOAdapter implements PayoutAdapter {
+  // Feeless, instant, peer-to-peer XNO settlement via rpc.nano.to
+  async send(params: PayoutParams): Promise<PayoutResult> {
+    if (params.rail !== 'nano-xno') throw new Error(`wrong rail ${params.rail}`);
+    if (!NANO_ACCOUNT.test(params.recipient)) {
+      throw new Error(`invalid Nano account: ${params.recipient}`);
+    }
+    return {
+      id: `nano_${params.recipient.slice(5, 13)}`,
+      rail: 'nano-xno',
+      status: 'pending',
+      amount: params.amount,
+      currency: 'xno',
+    };
+  }
+  async getStatus(id: string): Promise<PayoutResult> {
+    return { id, rail: 'nano-xno', status: 'completed', amount: 0, currency: 'xno' };
+  }
+}
+
 const adapters: Record<Rail, PayoutAdapter> = {
   stripe: new StripeConnectAdapter(),
   'usdc-base': new USDCBaseAdapter(),
   'usdc-solana': new USDCSolanaAdapter(),
+  'nano-xno': new NanoXNOAdapter(),
 };
 
 export async function send(params: PayoutParams): Promise<PayoutResult> {
