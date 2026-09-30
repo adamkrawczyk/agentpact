@@ -118,12 +118,69 @@ export function rubricHash(rubric: readonly string[] = RUBRIC): string {
   return `fnv1a32:${h.toString(16).padStart(8, "0")}`;
 }
 
+/**
+ * Flatten a deliveries.artifact_manifest into judge-safe lines. Accepts the
+ * array, or the double-encoded JSON string postgres.js returns for rows written
+ * with JSON.stringify(...)::jsonb. data: URIs are decoded (text only, capped)
+ * so an inline deliverable is judged on its content, not on "data:...".
+ * Credential-looking keys are never forwarded.
+ */
+export function describeManifest(manifest: unknown, maxItems = 6): string[] {
+  let m: unknown = manifest;
+  for (let i = 0; i < 2 && typeof m === "string"; i++) {
+    try { m = JSON.parse(m); } catch { return []; }
+  }
+  if (!Array.isArray(m)) return [];
+  const out: string[] = [];
+  for (const raw of m.slice(0, maxItems)) {
+    if (!raw || typeof raw !== "object") continue;
+    const rec = raw as Record<string, unknown>;
+    const type = String(rec.type ?? "artifact");
+    const url = typeof rec.url === "string" ? rec.url : "";
+    const hash = typeof rec.hash === "string" ? ` ${rec.hash.slice(0, 80)}` : "";
+    if (url.startsWith("data:")) {
+      out.push(`${type} (inline): ${decodeDataUri(url).slice(0, 700)}${hash}`);
+    } else if (url === "about:blank" || url === "") {
+      out.push(`${type}: (no location given)${hash}`);
+    } else {
+      out.push(`${type}: ${url.slice(0, 300)}${hash}`);
+    }
+  }
+  if (m.length > maxItems) out.push(`(+${m.length - maxItems} more artifact(s))`);
+  return out;
+}
+
+function decodeDataUri(uri: string): string {
+  const comma = uri.indexOf(",");
+  if (comma < 0) return "";
+  const meta = uri.slice(5, comma);
+  const body = uri.slice(comma + 1);
+  try {
+    const text = meta.includes(";base64")
+      ? Buffer.from(body, "base64").toString("utf8")
+      : decodeURIComponent(body);
+    // Text payloads only; binary decodes to replacement chars — say so instead.
+    return /\uFFFD/.test(text.slice(0, 200)) ? "(binary payload)" : text.replace(/\s+/g, " ").trim();
+  } catch {
+    return "(undecodable payload)";
+  }
+}
+
 /** Redact + flatten a fulfillment payload into text safe to send off-host. */
 export function buildEvidence(input: {
   dealTitle?: string | null;
   dealDescription?: string | null;
   fulfillmentType?: string | null;
   fulfillmentData?: unknown;
+  /**
+   * Latest submitted delivery (deliveries.artifact_manifest + verification
+   * notes). Sellers deliver through submit_delivery far more often than
+   * through the fulfillment-details path — on prod 2026-09-30, 13 of 19 real
+   * delivered deals had an empty deal_fulfillment payload and a real artifact
+   * in deliveries, so the judge was scoring them as empty (p ~ 0.01).
+   */
+  deliveryManifest?: unknown;
+  deliveryNotes?: string | null;
   sellerCompletedCount?: number;
 }): string {
   const parts: string[] = [];
@@ -153,6 +210,13 @@ export function buildEvidence(input: {
   } else {
     parts.push("delivery: (no structured payload)");
   }
+
+  const artifacts = describeManifest(input.deliveryManifest);
+  if (artifacts.length) {
+    parts.push(`SUBMITTED ARTIFACTS (${artifacts.length}):`);
+    for (const a of artifacts) parts.push(`- ${a}`);
+  }
+  if (input.deliveryNotes) parts.push(`DELIVERY NOTES: ${String(input.deliveryNotes).slice(0, 600)}`);
 
   if (typeof input.sellerCompletedCount === "number") {
     parts.push(`SELLER HISTORY: ${input.sellerCompletedCount} previously completed deal(s)`);
