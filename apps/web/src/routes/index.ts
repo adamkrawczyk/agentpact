@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { RouteModule, WebContext } from "./types.js";
+import { sellRoutes } from "./sell.js";
 
 /**
  * Registry of lane-owned web route modules. To add pages: create
@@ -7,6 +8,7 @@ import type { RouteModule, WebContext } from "./types.js";
  * Never grow ../index.ts with new pages.
  */
 export const routeModules: RouteModule[] = [
+  sellRoutes,
 ];
 
 export async function registerRouteModules(app: FastifyInstance, ctx: WebContext): Promise<void> {

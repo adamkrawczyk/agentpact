@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "@agentpact/x402-escrow": ["../../packages/x402-escrow/dist/index.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

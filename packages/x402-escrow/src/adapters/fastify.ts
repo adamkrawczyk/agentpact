@@ -8,6 +8,7 @@ interface FastifyLikeRequest {
   protocol?: string;
   hostname?: string;
   headers: Record<string, string | string[] | undefined>;
+  body?: unknown;
 }
 interface FastifyLikeReply {
   statusCode: number;
@@ -31,7 +32,7 @@ export function x402EscrowFastify(config: X402EscrowConfig | ReturnType<typeof x
   return {
     async preHandler(request: FastifyLikeRequest, reply: FastifyLikeReply): Promise<void> {
       const host = request.hostname ?? (request.headers.host as string | undefined) ?? "localhost";
-      const coreReq: CoreRequest = { method: request.method, url: `${request.protocol ?? "https"}://${host}${request.url}`, headers: request.headers };
+      const coreReq: CoreRequest = { method: request.method, url: `${request.protocol ?? "https"}://${host}${request.url}`, headers: request.headers, body: request.body };
       const decision = await core.handle(coreReq);
       if (decision.action === "respond") {
         reply.code(decision.status);

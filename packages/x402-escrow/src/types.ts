@@ -67,6 +67,8 @@ export interface CoreRequest {
   /** Absolute URL of the protected resource as the client requested it. */
   url: string;
   headers: Record<string, string | string[] | undefined>;
+  /** Parsed body when the framework already parsed it (Express json(), Fastify). Lets `price` depend on the order size. */
+  body?: unknown;
 }
 
 export type ResponseBody = string | Uint8Array | ArrayBuffer | null | undefined;
