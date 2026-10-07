@@ -8,9 +8,10 @@
 
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { startServer, stopServer } from "./test-server.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -19,19 +20,6 @@ const WEB_SRC = resolve(__dirname, "index.ts");
 const TEST_PORT = 29847;
 const BASE = `http://localhost:${TEST_PORT}`;
 
-async function waitForServer(url: string, retries = 40, delayMs = 150): Promise<void> {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(800) });
-      if (r.status < 600) return; // any response means the server is up
-    } catch {
-      // not ready yet
-    }
-    await new Promise((res) => setTimeout(res, delayMs));
-  }
-  throw new Error(`Server at ${url} did not start after ${(retries * delayMs) / 1000}s`);
-}
-
 // ---------------------------------------------------------------------------
 // Primary server (no STRIPE link — tests the placeholder path)
 // ---------------------------------------------------------------------------
@@ -39,21 +27,11 @@ async function waitForServer(url: string, retries = 40, delayMs = 150): Promise<
 let primaryServer: ChildProcess | null = null;
 
 before(async () => {
-  primaryServer = spawn("npx", ["tsx", "--no-cache", WEB_SRC], {
-    env: {
-      ...process.env,
-      PORT: String(TEST_PORT),
-      API_BASE_URL: "http://localhost:1",
-    },
-    stdio: "ignore", // don't inherit pipes — prevents parent event-loop from hanging
-    detached: false,
-  });
-  primaryServer.unref(); // allow parent to exit even if child still runs
-  await waitForServer(`${BASE}/robots.txt`);
+  primaryServer = await startServer({ src: WEB_SRC, port: TEST_PORT, env: { API_BASE_URL: "http://localhost:1" } });
 });
 
 after(async () => {
-  primaryServer?.kill("SIGTERM");
+  stopServer(primaryServer);
 });
 
 // ---------------------------------------------------------------------------
@@ -177,22 +155,15 @@ describe("GET /audit with STRIPE env set", () => {
   let stripeServer: ChildProcess | null = null;
 
   before(async () => {
-    stripeServer = spawn("npx", ["tsx", "--no-cache", WEB_SRC], {
-      env: {
-        ...process.env,
-        PORT: String(STRIPE_PORT),
-        API_BASE_URL: "http://localhost:1",
-        VITE_STRIPE_AUDIT_PAYMENT_LINK: STRIPE_LINK,
-      },
-      stdio: "ignore",
-      detached: false,
+    stripeServer = await startServer({
+      src: WEB_SRC,
+      port: STRIPE_PORT,
+      env: { API_BASE_URL: "http://localhost:1", VITE_STRIPE_AUDIT_PAYMENT_LINK: STRIPE_LINK },
     });
-    stripeServer.unref();
-    await waitForServer(`http://localhost:${STRIPE_PORT}/robots.txt`);
   });
 
   after(async () => {
-    stripeServer?.kill("SIGTERM");
+    stopServer(stripeServer);
   });
 
   test("CTA href contains VITE_STRIPE_AUDIT_PAYMENT_LINK value", async () => {
