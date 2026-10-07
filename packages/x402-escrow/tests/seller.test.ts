@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { x402Escrow, parseUsd, AGENTPACT_ESCROW_SCHEME, DEAL_HEADER } from "../src/index.js";
+import { x402Escrow, parseUsd, AGENTPACT_ESCROW_SCHEME, DEAL_HEADER, DEAL_TOKEN_HEADER } from "../src/index.js";
 import { API, FACILITATOR, OFFER, PAY_TO, SELLER, b64json, decodeB64json, mockNetwork, type MockOptions } from "./helpers.js";
 
 const RESOURCE = "https://seller.test/validate";
@@ -24,6 +24,10 @@ function seller(net: ReturnType<typeof mockNetwork>, over: Partial<Parameters<ty
 
 function req(headers: Record<string, string> = {}) {
   return { method: "POST", url: RESOURCE, headers };
+}
+
+function dealReq(id = "deal-1", token: string | null = "tok-1") {
+  return req({ [DEAL_HEADER.toLowerCase()]: id, ...(token ? { [DEAL_TOKEN_HEADER.toLowerCase()]: token } : {}) });
 }
 
 function paymentFor(accepted: any, over: Record<string, unknown> = {}) {
@@ -211,7 +215,7 @@ function escrowNet(state: Partial<NonNullable<MockOptions["deals"]>[string]> = {
   return mockNetwork({
     ...extra,
     deals: {
-      "deal-1": { sellerAgentId: SELLER, status: "active", escrowed: 25_000_000n, milestoneIds: ["m-1"], ...state },
+      "deal-1": { sellerAgentId: SELLER, status: "active", escrowed: 25_000_000n, milestoneIds: ["m-1"], token: "tok-1", ...state },
     },
   });
 }
@@ -219,7 +223,7 @@ function escrowNet(state: Partial<NonNullable<MockOptions["deals"]>[string]> = {
 test("escrow: funded deal for this seller → serve once, then submit the delivery with the artifact sha256", async () => {
   const net = escrowNet();
   const mw = seller(net, { price: "$25" });
-  const d = await mw.handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const d = await mw.handle(dealReq());
   assert.equal(d.action, "serve");
   if (d.action !== "serve") return;
   assert.equal(d.mode, "escrow");
@@ -242,12 +246,57 @@ test("escrow: funded deal for this seller → serve once, then submit the delive
   assert.equal(done.headers["X-AGENTPACT-DEAL"], "deal-1");
 });
 
+test("escrow: deal id without the buyer's token (deal ids are public) → 402, not served", async () => {
+  const net = escrowNet();
+  const mw = seller(net, { price: "$25" });
+  for (const r of [dealReq("deal-1", null), dealReq("deal-1", "stolen-guess")]) {
+    const d = await mw.handle(r);
+    assert.equal(d.action, "respond");
+    if (d.action === "respond") assert.match(decodeB64json(d.headers["PAYMENT-REQUIRED"]).error, /buyer_token_invalid/);
+  }
+  assert.equal(net.deals["deal-1"].consumedKey, undefined);
+  const consume = net.calls.find((c) => c.url.endsWith("/consume"));
+  assert.equal(consume?.body.buyerToken, undefined, "no token forwarded when none was sent");
+});
+
+test("escrow: the buyer token is forwarded to consume", async () => {
+  const net = escrowNet();
+  await seller(net, { price: "$25" }).handle(dealReq());
+  assert.equal(net.calls.find((c) => c.url.endsWith("/consume"))?.body.buyerToken, "tok-1");
+});
+
+test("3xx is a served response: plain x402 settles it, escrow keeps the deal consumed", async () => {
+  const net = mockNetwork();
+  const mw = seller(net);
+  const pr = await firstRequirements(mw);
+  const d = await mw.handle(req({ "payment-signature": paymentFor(pr.accepts[0]) }));
+  if (d.action !== "serve") throw new Error("expected serve");
+  await d.complete("", 302);
+  assert.ok(net.calls.some((c) => c.url.endsWith("/settle")), "redirect is paid for");
+
+  const enet = escrowNet();
+  const e = await seller(enet, { price: "$25" }).handle(dealReq());
+  if (e.action !== "serve") throw new Error("expected serve");
+  await e.complete("", 302);
+  assert.equal(enet.calls.some((c) => c.url.endsWith("/consume/release")), false, "no release for a served redirect");
+});
+
+test("wrong x402Version → 400 (invalid payment), facilitator not called", async () => {
+  const net = mockNetwork();
+  const mw = seller(net);
+  const pr = await firstRequirements(mw);
+  const d = await mw.handle(req({ "payment-signature": paymentFor(pr.accepts[0], { x402Version: 1 }) }));
+  assert.equal(d.action, "respond");
+  if (d.action === "respond") assert.equal(d.status, 400);
+  assert.equal(net.calls.length, 0);
+});
+
 test("escrow: replay of a consumed deal → 402 again", async () => {
   const net = escrowNet();
   const mw = seller(net, { price: "$25" });
-  const first = await mw.handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const first = await mw.handle(dealReq());
   assert.equal(first.action, "serve");
-  const replay = await mw.handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const replay = await mw.handle(dealReq());
   assert.equal(replay.action, "respond");
   if (replay.action === "respond") {
     assert.equal(replay.status, 402);
@@ -257,7 +306,7 @@ test("escrow: replay of a consumed deal → 402 again", async () => {
 
 test("escrow: underfunded deal → 402, not served", async () => {
   const net = escrowNet({ escrowed: 1_000_000n });
-  const d = await seller(net, { price: "$25" }).handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const d = await seller(net, { price: "$25" }).handle(dealReq());
   assert.equal(d.action, "respond");
   if (d.action === "respond") {
     assert.equal(d.status, 402);
@@ -267,14 +316,14 @@ test("escrow: underfunded deal → 402, not served", async () => {
 
 test("escrow: unfunded deal → 402 telling the buyer to fund", async () => {
   const net = escrowNet({ escrowed: 0n });
-  const d = await seller(net, { price: "$25" }).handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const d = await seller(net, { price: "$25" }).handle(dealReq());
   assert.equal(d.action, "respond");
   if (d.action === "respond") assert.match(decodeB64json(d.headers["PAYMENT-REQUIRED"]).error, /not_funded/);
 });
 
 test("escrow: deal belonging to another seller → 402, not served", async () => {
   const net = escrowNet({ sellerAgentId: "99999999-9999-4999-8999-999999999999" });
-  const d = await seller(net, { price: "$25" }).handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const d = await seller(net, { price: "$25" }).handle(dealReq());
   assert.equal(d.action, "respond");
   if (d.action === "respond") {
     assert.equal(d.status, 402);
@@ -284,7 +333,7 @@ test("escrow: deal belonging to another seller → 402, not served", async () =>
 
 test("escrow: proposed deal → middleware accepts it for the seller and asks the buyer to fund", async () => {
   const net = escrowNet({ status: "proposed", escrowed: 0n });
-  const d = await seller(net, { price: "$25" }).handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const d = await seller(net, { price: "$25" }).handle(dealReq());
   assert.equal(d.action, "respond");
   const accept = net.calls.find((c) => c.url === `${API}/api/deals/deal-1/accept`);
   assert.ok(accept, "accept called");
@@ -304,7 +353,7 @@ test("escrow: underpriced proposed deal → 402, the middleware does NOT accept 
     }
     return net.fetch(input, init);
   }) as typeof fetch;
-  const d = await seller(net, { price: "$25", fetch: fetchImpl }).handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const d = await seller(net, { price: "$25", fetch: fetchImpl }).handle(dealReq());
   assert.equal(d.action, "respond");
   if (d.action === "respond") assert.match(decodeB64json(d.headers["PAYMENT-REQUIRED"]).error, /agentpact_deal_underpriced/);
   assert.equal(net.calls.some((c) => c.url.endsWith("/accept")), false);
@@ -316,7 +365,7 @@ test("escrow: AgentPact API unreachable → 500, not served", async () => {
     facilitatorUrl: FACILITATOR, apiBase: API,
     fetch: (async () => { throw new Error("ECONNREFUSED"); }) as typeof fetch,
   });
-  const d = await mw.handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const d = await mw.handle(dealReq());
   assert.equal(d.action, "respond");
   if (d.action === "respond") assert.equal(d.status, 500);
 });
@@ -325,7 +374,7 @@ test("escrow: delivery submission failure is reported but the paid response is s
   const errors: unknown[] = [];
   const net = escrowNet({}, { failDelivery: true });
   const mw = seller(net, { price: "$25", onError: (e) => errors.push(e) });
-  const d = await mw.handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const d = await mw.handle(dealReq());
   assert.equal(d.action, "serve");
   if (d.action !== "serve") return;
   const done = await d.complete("data", 200);
@@ -336,14 +385,14 @@ test("escrow: delivery submission failure is reported but the paid response is s
 test("escrow: handler failure releases the consumption so the paid-for deal can be retried", async () => {
   const net = escrowNet();
   const mw = seller(net, { price: "$25" });
-  const d = await mw.handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const d = await mw.handle(dealReq());
   assert.equal(d.action, "serve");
   if (d.action !== "serve") return;
   await d.complete("internal error", 500);
   assert.ok(net.calls.some((c) => c.url === `${API}/api/deals/deal-1/consume/release`));
   assert.equal(net.calls.some((c) => c.url.endsWith("/api/deliveries/submit")), false, "no delivery for a failed response");
   assert.equal(net.deals["deal-1"].consumedKey, undefined);
-  const again = await mw.handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  const again = await mw.handle(dealReq());
   assert.equal(again.action, "serve", "buyer can retry the same deal");
 });
 

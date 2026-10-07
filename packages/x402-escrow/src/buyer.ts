@@ -4,6 +4,7 @@ import type { X402Signer } from "./evm-signer.js";
 import {
   AGENTPACT_ESCROW_SCHEME,
   DEAL_HEADER,
+  DEAL_TOKEN_HEADER,
   DEFAULT_API_BASE,
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
@@ -118,7 +119,8 @@ async function escrowFlow(
   const api: ApiCall = async (method, path, body) => {
     const res = await doFetch(`${apiBase}${path}`, {
       method,
-      headers: { "content-type": "application/json", "x-api-key": opts.apiKey as string },
+      // No content-type without a body: Fastify rejects an empty JSON body (400).
+      headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), "x-api-key": opts.apiKey as string },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const json = await res.json().catch(() => ({})) as Record<string, unknown>;
@@ -159,7 +161,10 @@ async function escrowFlow(
     emit("escrow.proposed", { dealId });
   }
 
-  const retry = () => doFetch(url, withHeader(init, DEAL_HEADER, dealId as string));
+  // Deal ids are public; the token (buyer-only) is what proves this retry is ours.
+  const minted = await api("POST", `/api/deals/${encodeURIComponent(dealId)}/x402-token`);
+  const token = String(minted.token);
+  const retry = () => doFetch(url, withHeader(withHeader(init, DEAL_HEADER, dealId as string), DEAL_TOKEN_HEADER, token));
   const res = await retry();
   if (res.status !== 402) return res;
   const pr = await readPaymentRequired(res);

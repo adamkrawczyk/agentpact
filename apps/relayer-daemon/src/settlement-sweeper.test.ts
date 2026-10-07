@@ -401,11 +401,11 @@ describe("runSettlementSweep", () => {
 
 describe("settlement sweeper — deterministic validator verdict (M3)", () => {
   const judge = (f: ReturnType<typeof makeFetch>) => ({ endpoint: "https://judge.test", fetchImpl: f.impl, attempts: 1 });
-  const passed = { passed: true, verdicts: [{ type: "csv-schema", passed: true, reasons: [] }] };
+  const passed = { passed: true, releaseEligible: true, verdicts: [{ type: "csv-schema", passed: true, reasons: [] }] };
   const failed = { passed: false, verdicts: [{ type: "csv-schema", passed: false, reasons: ["row 3: column \"id\" value \"x\" is not integer"] }] };
 
   it("validator pass → released via the API route with judge 'validator', judge never called", async () => {
-    const { sql, decisionFor } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: passed })]);
+    const { sql, decisionFor } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: passed, validator_release_all: true })]);
     const f = makeFetch({ p: 0.01 }); // the judge would say "bad" — it must not be asked
     const r = await runSettlementSweep(sql, baseCfg({ jev: judge(f), fetchImpl: f.impl }));
     assert.equal(r.decisions[0].outcome, "complete");
@@ -417,7 +417,7 @@ describe("settlement sweeper — deterministic validator verdict (M3)", () => {
   });
 
   it("validator fail → 'review' with the validator's reason; no release, no judge", async () => {
-    const { sql } = makeSql([dealRow({ status: "active", delivery_status: "rejected", delivery_validation: failed })]);
+    const { sql } = makeSql([dealRow({ status: "active", delivery_status: "rejected", delivery_validation: failed, validator_failed_any: true })]);
     const f = makeFetch({ p: 0.99 }); // the judge would say "great" — it must not be asked
     const r = await runSettlementSweep(sql, baseCfg({ jev: judge(f), fetchImpl: f.impl }));
     assert.equal(r.decisions[0].outcome, "review");
@@ -426,7 +426,8 @@ describe("settlement sweeper — deterministic validator verdict (M3)", () => {
   });
 
   it("validator pass but the buyer rejected the delivery → 'review', never auto-released", async () => {
-    const { sql } = makeSql([dealRow({ delivery_status: "rejected", delivery_validation: passed })]);
+    // The seller resubmitted after the buyer's rejection; the new delivery passes.
+    const { sql } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: passed, validator_release_all: true, buyer_rejected_any: true })]);
     const f = makeFetch({ p: 0.99 });
     const r = await runSettlementSweep(sql, baseCfg({ jev: judge(f), fetchImpl: f.impl }));
     assert.equal(r.decisions[0].outcome, "review");
@@ -435,7 +436,7 @@ describe("settlement sweeper — deterministic validator verdict (M3)", () => {
   });
 
   it("validator pass in shadow mode → 'review' (no money moves)", async () => {
-    const { sql } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: passed })]);
+    const { sql } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: passed, validator_release_all: true })]);
     const f = makeFetch({});
     const r = await runSettlementSweep(sql, baseCfg({ autoReleaseEnabled: false, fetchImpl: f.impl }));
     assert.equal(r.decisions[0].outcome, "review");
@@ -443,7 +444,7 @@ describe("settlement sweeper — deterministic validator verdict (M3)", () => {
   });
 
   it("self-deal with a passing validator is still never released", async () => {
-    const { sql } = makeSql([dealRow({ is_self_deal: true, delivery_status: "auto-verified", delivery_validation: passed })]);
+    const { sql } = makeSql([dealRow({ is_self_deal: true, delivery_status: "auto-verified", delivery_validation: passed, validator_release_all: true })]);
     const f = makeFetch({});
     const r = await runSettlementSweep(sql, baseCfg({ fetchImpl: f.impl }));
     assert.equal(r.decisions[0].outcome, "skip_self_deal");
@@ -464,13 +465,38 @@ describe("settlement sweeper — deterministic validator verdict (M3)", () => {
     const q = calls.find((c) => /FROM deals d/i.test(c.text))?.text ?? "";
     assert.match(q, /delivery_status/);
     assert.match(q, /auto_verify_result\s*->\s*'validators'/);
+    for (const col of ["validator_failed_any", "buyer_rejected_any", "validator_release_all"]) assert.match(q, new RegExp(col));
+  });
+
+  it("one milestone passing does not release the deal while another milestone is not validator-cleared → judge path", async () => {
+    const { sql } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: passed, validator_release_all: false })]);
+    const f = makeFetch({ p: 0.95 });
+    await runSettlementSweep(sql, baseCfg({ jev: judge(f), fetchImpl: f.impl }));
+    assert.ok(f.seen.some((s) => s.url.includes("judge.test")), "fell back to the judge");
+  });
+
+  it("another milestone FAILED its validators while the latest delivery passed → 'review', never released", async () => {
+    const { sql } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: passed, validator_failed_any: true, validator_release_all: false })]);
+    const f = makeFetch({ p: 0.99 });
+    const r = await runSettlementSweep(sql, baseCfg({ jev: judge(f), fetchImpl: f.impl }));
+    assert.equal(r.decisions[0].outcome, "review");
+    assert.equal(f.seen.length, 0);
+  });
+
+  it("a pass that is not release-eligible (only seller-writable milestone validators) never bypasses the judge", async () => {
+    const notEligible = { ...passed, releaseEligible: false };
+    const { sql } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: notEligible, validator_release_all: true })]);
+    const f = makeFetch({ p: 0.1 });
+    const r = await runSettlementSweep(sql, baseCfg({ jev: judge(f), fetchImpl: f.impl }));
+    assert.ok(f.seen.some((s) => s.url.includes("judge.test")), "judge consulted");
+    assert.equal(r.decisions[0].outcome, "review");
   });
 });
 
 describe("settlement sweeper — validator verdict integrity (M3)", () => {
   it("a summary 'passed' that contradicts its own verdict list is NOT treated as a pass", async () => {
-    const forged = { passed: true, verdicts: [{ type: "sha256", passed: false, reasons: ["sha256 mismatch"] }] };
-    const { sql } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: forged })]);
+    const forged = { passed: true, releaseEligible: true, verdicts: [{ type: "sha256", passed: false, reasons: ["sha256 mismatch"] }] };
+    const { sql } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: forged, validator_release_all: true })]);
     const f = makeFetch({});
     const r = await runSettlementSweep(sql, baseCfg({ fetchImpl: f.impl }));
     assert.equal(r.decisions[0].outcome, "review");
@@ -480,7 +506,7 @@ describe("settlement sweeper — validator verdict integrity (M3)", () => {
 
 describe("settlement sweeper — release request shape", () => {
   it("POSTs a JSON body (Fastify 400s an empty body sent as application/json)", async () => {
-    const { sql } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: { passed: true, verdicts: [{ type: "sha256", passed: true, reasons: [] }] } })]);
+    const { sql } = makeSql([dealRow({ delivery_status: "auto-verified", delivery_validation: { passed: true, releaseEligible: true, verdicts: [{ type: "sha256", passed: true, reasons: [] }] }, validator_release_all: true })]);
     const f = makeFetch({});
     await runSettlementSweep(sql, baseCfg({ fetchImpl: f.impl }));
     const rel = f.seen.find((s) => s.url.endsWith("/fulfillment/auto-complete"));

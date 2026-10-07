@@ -45,3 +45,14 @@ LANGUAGE sql STABLE AS $$
   WHERE m.deal_id = p_deal_id
     AND pi.status = 'funded'
 $$;
+
+-- Buyer binding for escrowed x402 retries. Deal ids are public (GET
+-- /api/deals), so a deal id alone must never redeem a funded deal: the buyer
+-- mints a secret token (POST /api/deals/:id/x402-token, buyer-only) and sends
+-- it with X-AGENTPACT-DEAL-TOKEN; consume checks its sha256. Re-minting
+-- rotates it.
+CREATE TABLE IF NOT EXISTS x402_deal_tokens (
+  deal_id            UUID PRIMARY KEY REFERENCES deals(id) ON DELETE CASCADE,
+  token_sha256       TEXT NOT NULL CHECK (token_sha256 ~ '^[0-9a-f]{64}$'),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

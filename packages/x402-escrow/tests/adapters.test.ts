@@ -102,9 +102,9 @@ test("fastify: preHandler answers 402; onSend settles and swaps the payload on f
 });
 
 test("fastify: escrow branch submits delivery from onSend", async () => {
-  const net = mockNetwork({ deals: { d1: { sellerAgentId: SELLER, status: "active", escrowed: 30_000_000n, milestoneIds: ["m1"] } } });
+  const net = mockNetwork({ deals: { d1: { sellerAgentId: SELLER, status: "active", escrowed: 30_000_000n, milestoneIds: ["m1"], token: "t1" } } });
   const hooks = x402EscrowFastify(cfg(net, "$25"));
-  const r = fakeFastify({ [DEAL_HEADER.toLowerCase()]: "d1" });
+  const r = fakeFastify({ [DEAL_HEADER.toLowerCase()]: "d1", "x-agentpact-deal-token": "t1" });
   await hooks.preHandler(r.request as any, r.reply);
   assert.equal(r.reply.sent, false);
   await hooks.onSend(r.request as any, r.reply, Buffer.from("rows"));

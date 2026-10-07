@@ -40,11 +40,18 @@ function world(price: string, opts: { simulationFunding?: boolean } = {}) {
     }
     if (url.startsWith(FACILITATOR)) return sellerNet.fetch(input, init);
     if (headers.get("x-api-key") !== "buyer-key") return json(401, { error: "bad key" });
+    // Mirror Fastify: a JSON content-type with an empty body is a 400.
+    if (headers.get("content-type")?.includes("application/json") && !init.body) return json(400, { error: "Body cannot be empty" });
     if (url === `${API}/api/needs` && method === "POST") return json(201, { id: "need-1" });
     if (url === `${API}/api/deals/propose` && method === "POST") {
       const id = `deal-${++dealSeq}`;
       deals[id] = { sellerAgentId: body.sellerAgentId, status: "proposed", escrowed: 0n, milestoneIds: [`${id}-m1`] };
       return json(201, { id, status: "proposed" });
+    }
+    const mint = url.match(/\/api\/deals\/([^/]+)\/x402-token$/);
+    if (mint && method === "POST") {
+      deals[mint[1]].token = `token-for-${mint[1]}`;
+      return json(201, { dealId: mint[1], token: deals[mint[1]].token });
     }
     const getDeal = url.match(/\/api\/deals\/([^/?]+)$/);
     if (getDeal && method === "GET") {

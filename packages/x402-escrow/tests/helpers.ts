@@ -16,6 +16,8 @@ export interface DealState {
   /** USDC base units currently held in escrow for the deal. */
   escrowed: bigint;
   consumedKey?: string;
+  /** Buyer token minted for the deal; consume requires it. */
+  token?: string;
   milestoneIds: string[];
 }
 
@@ -65,6 +67,7 @@ export function mockNetwork(opts: MockOptions = {}) {
         const deal = deals[consume[1]];
         if (!deal) return json(404, { error: "Deal not found", code: "DEAL_NOT_FOUND" });
         if (deal.sellerAgentId !== SELLER) return json(403, { error: "not your deal", code: "WRONG_SELLER" });
+        if (!deal.token || body.buyerToken !== deal.token) return json(403, { error: "bad token", code: "BUYER_TOKEN_INVALID" });
         if (deal.consumedKey !== undefined) {
           if (deal.consumedKey === body.consumeKey) {
             return json(200, { consumed: true, replay: true, dealId: consume[1], milestoneIds: deal.milestoneIds });

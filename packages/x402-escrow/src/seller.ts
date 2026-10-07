@@ -19,6 +19,8 @@ import type {
 export const AGENTPACT_ESCROW_SCHEME = "agentpact-escrow";
 /** Header the buyer sets on the retry once its AgentPact deal is funded. */
 export const DEAL_HEADER = "X-AGENTPACT-DEAL";
+/** Secret only the deal's buyer can mint (POST /api/deals/:id/x402-token); binds the retry to the buyer. */
+export const DEAL_TOKEN_HEADER = "X-AGENTPACT-DEAL-TOKEN";
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
 export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
 export const PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE";
@@ -145,6 +147,7 @@ export function x402Escrow(config: X402EscrowConfig): X402Escrow {
           priceUsd: usd,
           apiBase,
           retryHeader: DEAL_HEADER,
+          retryTokenHeader: DEAL_TOKEN_HEADER,
           docs: "https://agentpact.xyz/skill",
           createDeal: {
             rest: [
@@ -157,13 +160,15 @@ export function x402Escrow(config: X402EscrowConfig): X402Escrow {
                   milestones: [{ idx: 1, title: "x402 response", amount: Number(usd), acceptanceCriteria: ["HTTP 2xx response from the resource"] }],
                 },
               },
-              { call: `retry this request with ${DEAL_HEADER}: <dealId>`, note: "the seller accepts the deal automatically" },
+              { call: "POST /api/deals/<dealId>/x402-token", note: `buyer-only; send the token as ${DEAL_TOKEN_HEADER} on every retry (deal ids are public, the token proves you are the buyer)` },
+              { call: `retry this request with ${DEAL_HEADER}: <dealId> and ${DEAL_TOKEN_HEADER}: <token>`, note: "the seller accepts the deal automatically" },
               { call: "POST /api/payments/create-intent", note: "fund the milestone (USDC escrow on Base), then POST /api/payments/confirm-funding" },
-              { call: `retry this request with ${DEAL_HEADER}: <dealId>`, note: "served once; the seller submits the delivery and the receipt flow completes" },
+              { call: `retry this request with ${DEAL_HEADER} + ${DEAL_TOKEN_HEADER}`, note: "served once; the seller submits the delivery and the receipt flow completes" },
             ],
             mcp: [
               "agentpact.create_need",
               `agentpact.propose_deal { sellerAgentId: "${config.sellerAgentId}", offerId: "${config.offerId}", negotiatedTotal: ${usd} }`,
+              "POST /api/deals/<dealId>/x402-token (REST; buyer-only)",
               "agentpact.create_payment_intent → agentpact.confirm_funding",
             ],
             sdk: "fetchWithEscrow(url, init, { apiKey, agentId, maxPlainUsd }) from @agentpact/x402-escrow does all of this",
@@ -222,7 +227,9 @@ export function x402Escrow(config: X402EscrowConfig): X402Escrow {
     if (!payment || typeof payment !== "object") {
       return { action: "respond", status: 400, headers: { "Content-Type": "application/json" }, body: { error: "invalid_payload" } };
     }
-    if (payment.x402Version !== 2) return paymentRequired(req, accepts, "invalid_x402_version");
+    if (payment.x402Version !== 2) {
+      return { action: "respond", status: 400, headers: { "Content-Type": "application/json" }, body: { error: "invalid_x402_version" } };
+    }
     const requirements = exact.find((o) => matches(o, payment.accepted));
     if (!requirements) return paymentRequired(req, accepts, "payment payload does not match any accepted requirement");
 
@@ -242,8 +249,9 @@ export function x402Escrow(config: X402EscrowConfig): X402Escrow {
       action: "serve",
       mode: "x402",
       async complete(_body: ResponseBody, status: number): Promise<CompleteResult> {
-        // Never charge for a failed response: settle only on 2xx.
-        if (status < 200 || status >= 300) return { ok: true, headers: {} };
+        // Never charge for a failed response (≥ 400), as the x402 reference
+        // middleware does. A 3xx is a served response and is paid for.
+        if (status >= 400) return { ok: true, headers: {} };
         let settle: SettleResponse;
         try {
           const res = await post(`${facilitatorUrl}/settle`, facilitatorBody, await (config.facilitatorHeaders?.("settle") ?? {}));
@@ -265,9 +273,9 @@ export function x402Escrow(config: X402EscrowConfig): X402Escrow {
 
   // ── escrow ─────────────────────────────────────────────────────────────────
 
-  async function consume(dealId: string, price: bigint, resource: string, consumeKey: string): Promise<Response> {
+  async function consume(dealId: string, buyerToken: string | undefined, price: bigint, resource: string, consumeKey: string): Promise<Response> {
     const url = `${apiBase}/api/deals/${encodeURIComponent(dealId)}/consume`;
-    const body = { priceBaseUnits: price.toString(), consumeKey, offerId: config.offerId, resource };
+    const body = { priceBaseUnits: price.toString(), consumeKey, buyerToken, offerId: config.offerId, resource };
     try {
       return await post(url, body, apiHeaders);
     } catch (err) {
@@ -280,10 +288,11 @@ export function x402Escrow(config: X402EscrowConfig): X402Escrow {
 
   async function escrowPath(req: CoreRequest, dealId: string, price: bigint, accepts: PaymentRequirements[]): Promise<Decision> {
     const consumeKey = randomHex(16);
+    const buyerToken = headerValue(req.headers, DEAL_TOKEN_HEADER);
     let res: Response;
     let payload: Record<string, unknown>;
     try {
-      res = await consume(dealId, price, req.url, consumeKey);
+      res = await consume(dealId, buyerToken, price, req.url, consumeKey);
       payload = await res.json().catch(() => ({})) as Record<string, unknown>;
     } catch (err) {
       report(err, { stage: "consume", dealId });
@@ -301,8 +310,9 @@ export function x402Escrow(config: X402EscrowConfig): X402Escrow {
         dealId,
         async complete(body: ResponseBody, status: number): Promise<CompleteResult> {
           const headers = { [DEAL_HEADER]: dealId };
-          if (status < 200 || status >= 300) {
+          if (status >= 400) {
             // The handler failed: hand the deal back so the buyer can retry.
+            // (A 3xx is a served response: it consumes the deal.)
             try {
               const r = await post(`${apiBase}/api/deals/${encodeURIComponent(dealId)}/consume/release`, { consumeKey }, apiHeaders);
               if (!r.ok) throw new Error(`consume/release HTTP ${r.status}`);

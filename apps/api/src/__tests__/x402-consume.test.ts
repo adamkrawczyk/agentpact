@@ -31,14 +31,19 @@ describe("POST /api/deals/:id/consume (x402 escrow upgrade)", () => {
     sellerHeaders = await getAuthHeadersForAgent(sellerId);
   });
 
-  async function setupDeal(opts: { total?: number; accept?: boolean; fund?: boolean } = {}) {
+  let buyerToken = "";
+
+  async function setupDeal(opts: { total?: number; accept?: boolean; fund?: boolean; needCriteria?: unknown[] } = {}) {
     const { app, sql } = await createTestApp();
     const total = opts.total ?? 25;
     const offer = generateTestOffer(sellerId);
     const offerRes = await app.inject({ method: "POST", url: "/api/offers", headers: sellerHeaders, payload: offer });
     expect(offerRes.statusCode).toBe(201);
     const offerId = JSON.parse(offerRes.body).id as string;
-    const needRes = await app.inject({ method: "POST", url: "/api/needs", headers: buyerHeaders, payload: generateTestNeed(buyerId) });
+    const needRes = await app.inject({
+      method: "POST", url: "/api/needs", headers: buyerHeaders,
+      payload: { ...generateTestNeed(buyerId), acceptanceCriteria: opts.needCriteria ?? [] },
+    });
     const needId = JSON.parse(needRes.body).id as string;
     const proposeRes = await app.inject({
       method: "POST", url: "/api/deals/propose", headers: buyerHeaders,
@@ -50,6 +55,9 @@ describe("POST /api/deals/:id/consume (x402 escrow upgrade)", () => {
     });
     expect(proposeRes.statusCode).toBe(201);
     const dealId = JSON.parse(proposeRes.body).id as string;
+    const tok = await app.inject({ method: "POST", url: `/api/deals/${dealId}/x402-token`, headers: buyerHeaders });
+    expect(tok.statusCode).toBe(201);
+    buyerToken = JSON.parse(tok.body).token as string;
     const [milestone] = await sql`SELECT id FROM milestones WHERE deal_id = ${dealId}`;
     const milestoneId = milestone.id as string;
     if (opts.accept !== false) {
@@ -67,8 +75,37 @@ describe("POST /api/deals/:id/consume (x402 escrow upgrade)", () => {
   }
 
   function consume(app: App, dealId: string, body: Record<string, unknown>, headers = sellerHeaders) {
-    return app.inject({ method: "POST", url: `/api/deals/${dealId}/consume`, headers, payload: body });
+    return app.inject({ method: "POST", url: `/api/deals/${dealId}/consume`, headers, payload: { buyerToken, ...body } });
   }
+
+  it("deal hijack: a deal id without the buyer's token (or with a stale/wrong one) is refused", async () => {
+    const { app, dealId } = await setupDeal();
+    const none = await consume(app, dealId, { priceBaseUnits: "1", consumeKey: "hijack-key-1", buyerToken: undefined });
+    expect(none.statusCode).toBe(403);
+    expect(JSON.parse(none.body).code).toBe("BUYER_TOKEN_INVALID");
+    const wrong = await consume(app, dealId, { priceBaseUnits: "1", consumeKey: "hijack-key-2", buyerToken: "guess" });
+    expect(wrong.statusCode).toBe(403);
+    const stale = buyerToken;
+    const rot = await app.inject({ method: "POST", url: `/api/deals/${dealId}/x402-token`, headers: buyerHeaders });
+    expect(rot.statusCode).toBe(201);
+    expect((await consume(app, dealId, { priceBaseUnits: "1", consumeKey: "hijack-key-3", buyerToken: stale })).statusCode).toBe(403);
+    expect((await consume(app, dealId, { priceBaseUnits: "1", consumeKey: "hijack-key-4", buyerToken: JSON.parse(rot.body).token })).statusCode).toBe(200);
+  });
+
+  it("only the buyer can mint the x402 token", async () => {
+    const { app, dealId } = await setupDeal();
+    const bySeller = await app.inject({ method: "POST", url: `/api/deals/${dealId}/x402-token`, headers: sellerHeaders });
+    expect(bySeller.statusCode).toBe(403);
+    const anon = await app.inject({ method: "POST", url: `/api/deals/${dealId}/x402-token` });
+    expect(anon.statusCode).toBe(401);
+  });
+
+  it("deals carrying {validator} criteria are refused (an x402 artifact is the paywalled response itself)", async () => {
+    const { app, dealId } = await setupDeal({ needCriteria: [{ validator: { type: "sha256", sha256: "a".repeat(64) } }] });
+    const res = await consume(app, dealId, { priceBaseUnits: "1", consumeKey: "validator-1" });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("DEAL_HAS_VALIDATORS");
+  });
 
   it("funded deal: the seller consumes once and gets the milestone ids to deliver against", async () => {
     const { app, dealId, offerId, milestoneId } = await setupDeal();
