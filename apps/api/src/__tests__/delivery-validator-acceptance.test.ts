@@ -137,6 +137,38 @@ describe("delivery acceptance with deterministic validators", () => {
     expect(d.status).toBe("active");
   });
 
+  it("a seller-writable MILESTONE validator can reject, but its pass never replaces the judge", async () => {
+    const { app, milestoneId } = await fundedDeal(["Leads"], ["CSV", { validator: { type: "json-schema", schema: {} } }]);
+    const res = await submit(app, milestoneId, "/good.csv"); // CSV is not JSON → fails
+    expect(res.statusCode).toBe(422);
+    const { app: app2, sql: sql2, milestoneId: m2 } = await fundedDeal(["Leads"], ["CSV", CSV_VALIDATOR]);
+    const ok = await submit(app2, m2, "/good.csv");
+    expect(ok.statusCode).toBe(201);
+    expect(JSON.parse(ok.body).validation).toMatchObject({ passed: true, releaseEligible: false });
+    const [dl] = await sql2`SELECT status FROM deliveries WHERE milestone_id = ${m2}`;
+    expect(dl.status).toBe("submitted");
+  });
+
+  it("a declared artifact sha256 that differs from the fetched bytes fails the delivery", async () => {
+    const { app, milestoneId } = await fundedDeal(["Leads", CSV_VALIDATOR]);
+    const res = await app.inject({
+      method: "POST", url: "/api/deliveries/submit", headers: sellerHeaders,
+      payload: { milestoneId, submittedBy: sellerId, artifacts: [{ type: "url", url: `https://artifacts.test:${port}/good.csv`, hash: `sha256:${"0".repeat(64)}` }] },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(JSON.stringify(JSON.parse(res.body).validation)).toMatch(/declared artifact hash/);
+  });
+
+  it("more than 5 validators in one criteria list is refused", async () => {
+    const { app } = await createTestApp();
+    const six = Array.from({ length: 6 }, (_, i) => ({ validator: { type: "sha256", sha256: String(i).repeat(64) } }));
+    const res = await app.inject({
+      method: "POST", url: "/api/needs", headers: buyerHeaders,
+      payload: { agentId: buyerId, title: "Leads CSV", descriptionMd: "A CSV of leads with emails.", category: "data", acceptanceCriteria: six },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
   it("validator in the MILESTONE criteria applies too (and an x402-style unreachable artifact fails closed)", async () => {
     const { app, milestoneId } = await fundedDeal(["Leads"], ["CSV", CSV_VALIDATOR]);
     const res = await submit(app, milestoneId, "/missing.csv");
@@ -148,7 +180,7 @@ describe("delivery acceptance with deterministic validators", () => {
     const { app, sql, dealId, milestoneId } = await fundedDeal(["Leads", CSV_VALIDATOR]);
     const res = await submit(app, milestoneId, "/good.csv");
     expect(res.statusCode).toBe(201);
-    expect(JSON.parse(res.body).validation.passed).toBe(true);
+    expect(JSON.parse(res.body).validation).toMatchObject({ passed: true, releaseEligible: true });
     const [dl] = await sql`SELECT status, auto_verify_result FROM deliveries WHERE milestone_id = ${milestoneId}`;
     expect(dl.status).toBe("auto-verified");
     expect((dl.auto_verify_result as any).validators.verdicts[0]).toMatchObject({ type: "csv-schema", passed: true, details: { rows: 2 } });

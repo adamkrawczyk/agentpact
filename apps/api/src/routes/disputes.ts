@@ -156,11 +156,17 @@ export async function registerRoutes(
     // `{validator: {...}}` entries in the milestone's OR the need's
     // acceptance criteria are checked against the artifact before any LLM
     // judge. Union of both lists: a proposal cannot drop the buyer's need
-    // validator. Pass → 'auto-verified' (the settlement sweeper releases on
-    // this verdict without the judge); fail → 'rejected' with reasons, the
-    // milestone stays open, and the seller may resubmit.
+    // validator. Fail → 'rejected' with reasons, the milestone stays open,
+    // and the seller may resubmit.
+    // Pass → release-ELIGIBLE (the sweeper releases without the judge) only
+    // when at least one validator was authored by the BUYER, i.e. sits on a
+    // need owned by the deal's buyer. Milestone criteria can be written by
+    // the seller (counter-offers), so a seller-added `{schema: {}}` must not
+    // be able to replace the judge: such a pass only leaves the delivery
+    // 'submitted' for the normal judge path.
     const [criteriaRow] = await sql`
-      SELECT m.acceptance_criteria AS milestone_criteria, n.acceptance_criteria AS need_criteria
+      SELECT m.acceptance_criteria AS milestone_criteria, n.acceptance_criteria AS need_criteria,
+             (n.agent_id = d.buyer_agent_id) AS need_is_buyers
       FROM milestones m
       JOIN deals d ON d.id = m.deal_id
       LEFT JOIN needs n ON n.id = d.need_id
@@ -168,6 +174,7 @@ export async function registerRoutes(
     `;
     const fromMilestone = extractValidatorSpecs(criteriaRow?.milestone_criteria);
     const fromNeed = extractValidatorSpecs(criteriaRow?.need_criteria);
+    const buyerAuthored = criteriaRow?.need_is_buyers === true && fromNeed.specs.length > 0;
     const seenSpecs = new Set<string>();
     const validatorSpecs: ValidatorSpec[] = [];
     for (const spec of [...fromMilestone.specs, ...fromNeed.specs]) {
@@ -175,25 +182,24 @@ export async function registerRoutes(
       if (!seenSpecs.has(key)) { seenSpecs.add(key); validatorSpecs.push(spec); }
     }
     const invalidSpecs = [...fromMilestone.invalid, ...fromNeed.invalid];
-    let validation: Awaited<ReturnType<typeof runDeliveryValidators>> | null = null;
+    let validation: (Awaited<ReturnType<typeof runDeliveryValidators>> & { releaseEligible: boolean }) | null = null;
     if (validatorSpecs.length > 0 || invalidSpecs.length > 0) {
-      validation = await runDeliveryValidators(validatorSpecs, body.artifacts, validatorRuntime.options);
-      if (invalidSpecs.length > 0) {
-        // Fail closed: a validator the API can no longer interpret is not a pass.
-        validation = {
-          passed: false,
-          verdicts: [
-            ...validation.verdicts,
-            ...invalidSpecs.map((r) => ({ type: "invalid-spec", artifactIndex: 0, url: null, bytes: 0, sha256: null, passed: false, reasons: [r] })),
-          ],
-        };
-      }
+      const ran = await runDeliveryValidators(validatorSpecs, body.artifacts, validatorRuntime.options);
+      // Fail closed: a validator the API can no longer interpret is not a pass.
+      const verdicts = [
+        ...ran.verdicts,
+        ...invalidSpecs.map((r) => ({ type: "invalid-spec", artifactIndex: 0, url: null, bytes: 0, sha256: null, passed: false, reasons: [r] })),
+      ];
+      const passed = ran.passed && invalidSpecs.length === 0;
+      validation = { passed, releaseEligible: passed && buyerAuthored, verdicts };
       const reasons = validation.verdicts.flatMap((v) => v.reasons.map((r) => `${v.type}: ${r}`)).slice(0, 20);
       // A failed task-contract verifier keeps the delivery 'submitted' even
       // when the validators pass: auto-verified means every check passed.
+      // Only a buyer-authored pass is 'auto-verified' (see above).
       let deliveryStatus = "rejected";
       if (validation.passed) {
-        deliveryStatus = autoVerifyResult && !autoVerifyResult.success ? "submitted" : "auto-verified";
+        const taskContractFailed = autoVerifyResult !== null && !autoVerifyResult.success;
+        deliveryStatus = validation.releaseEligible && !taskContractFailed ? "auto-verified" : "submitted";
       }
       await sql`
         UPDATE deliveries

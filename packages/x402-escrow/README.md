@@ -65,8 +65,8 @@ return send(200, done.headers, body);
 
 What happens:
 
-- **Plain x402**: the buyer's `PAYMENT-SIGNATURE` must match one of your requirements exactly. It is verified by the facilitator, your handler runs, and the payment is settled only if the handler returned 2xx. If settlement fails, the buyer gets a 402 instead of your response.
-- **Escrow**: the buyer proposes an AgentPact deal against your `offerId` and retries with `X-AGENTPACT-DEAL: <dealId>`. The middleware accepts the deal for you, then on the funded retry asks AgentPact to *consume* it. That succeeds only if the deal is yours, holds at least this request's price in escrow, and has not been used. Exactly once, race-safe. The middleware serves your response once and submits the delivery (sha256 of the body). The buyer gets a receipt and you are paid on release (10% platform fee on escrowed deals). A replayed deal gets a 402. If your handler fails, the consumption is released so the buyer can retry.
+- **Plain x402**: the buyer's `PAYMENT-SIGNATURE` must match one of your requirements exactly. It is verified by the facilitator, your handler runs, and the payment is settled only if the handler did not fail (status < 400). If settlement fails, the buyer gets a 402 instead of your response.
+- **Escrow**: the buyer proposes an AgentPact deal against your `offerId` and retries with `X-AGENTPACT-DEAL: <dealId>` plus `X-AGENTPACT-DEAL-TOKEN: <token>`. Deal ids are public; the token, which only the buyer can mint, binds the retry to the buyer. The middleware accepts the deal for you (but never an underpriced one), then on the funded retry asks AgentPact to *consume* it. That succeeds only if the token matches, the deal is yours, holds at least this request's price in escrow, and has not been used. Exactly once, race-safe. The middleware serves your response once and submits the delivery (sha256 of the body). The buyer gets a receipt and you are paid on release (10% platform fee on escrowed deals). A replayed deal gets a 402. If your handler fails, the consumption is released so the buyer can retry.
 
 ## Buyer
 

@@ -68,6 +68,14 @@ export const acceptanceCriterionSchema = z.union([
   z.object({ validator: validatorSpecSchema }).strict(),
 ]);
 
+/** Each validator is an outbound fetch inside the submit request: keep it bounded. */
+export const MAX_VALIDATORS_PER_LIST = 5;
+
+export const acceptanceCriteriaListSchema = z.array(acceptanceCriterionSchema).refine(
+  (list) => list.filter((c) => typeof c !== "string").length <= MAX_VALIDATORS_PER_LIST,
+  { message: `at most ${MAX_VALIDATORS_PER_LIST} validators per acceptance-criteria list` },
+);
+
 /**
  * Validator specs inside stored acceptance criteria (JSONB). Stored rows went
  * through acceptanceCriterionSchema on write; anything that no longer parses
@@ -103,7 +111,7 @@ export const validatorRuntime: { options: RunOptions } = { options: {} };
 
 export async function runValidator(
   spec: ValidatorSpec,
-  artifacts: Array<{ url?: string }>,
+  artifacts: Array<{ url?: string; hash?: string }>,
   opts: RunOptions = {},
 ): Promise<ValidatorVerdict> {
   const def = registry.get(spec.type);
@@ -131,6 +139,13 @@ export async function runValidator(
       try { outcome = checker.finish(); } catch (e) { contentFailed(e); }
     }
     if (!outcome) outcome = { passed: false, reasons: [`artifact content rejected: ${contentError}`] };
+    // A sha256 the seller declared for this artifact must be the bytes we
+    // checked; otherwise the buyer could be handed something else.
+    const declared = artifacts[spec.artifactIndex]?.hash;
+    const m = typeof declared === "string" ? /^(?:sha256:)?([0-9a-fA-F]{64})$/.exec(declared.trim()) : null;
+    if (m && m[1].toLowerCase() !== digest) {
+      outcome = { ...outcome, passed: false, reasons: [...outcome.reasons, `declared artifact hash ${m[1].toLowerCase()} does not match the fetched bytes (${digest})`] };
+    }
     return { ...base, url, bytes, sha256: digest, ...outcome };
   } catch (e) {
     const reason = e instanceof ArtifactFetchError ? `artifact fetch refused (${e.code}): ${e.message}` : `artifact rejected: ${(e as Error).message}`;
@@ -140,7 +155,7 @@ export async function runValidator(
 
 export async function runDeliveryValidators(
   specs: ValidatorSpec[],
-  artifacts: Array<{ url?: string }>,
+  artifacts: Array<{ url?: string; hash?: string }>,
   opts: RunOptions = {},
 ): Promise<{ passed: boolean; verdicts: ValidatorVerdict[] }> {
   const verdicts: ValidatorVerdict[] = [];

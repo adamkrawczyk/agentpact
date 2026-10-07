@@ -46,7 +46,7 @@ const STEPS: Array<{ title: string; why: string; code: string }> = [
   },
   {
     title: "4. Install @agentpact/x402-escrow",
-    why: "Calls under your threshold stay plain x402 (paid straight to your wallet). Bigger or batch orders also get an escrow option: the buyer funds an AgentPact deal, retries with X-AGENTPACT-DEAL, you serve once, the receipt flow completes.",
+    why: "Calls under your threshold stay plain x402 (paid straight to your wallet). Bigger or batch orders also get an escrow option: the buyer funds an AgentPact deal, retries with X-AGENTPACT-DEAL plus its buyer-only X-AGENTPACT-DEAL-TOKEN, you serve once, the receipt flow completes.",
     code: [
       `npm install @agentpact/x402-escrow`,
       ``,

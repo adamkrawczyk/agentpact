@@ -6,7 +6,8 @@
  *   demo seller (apps/demo-x402-seller) started in-process on a local port
  *   buyer:  fetchWithEscrow(batch job) → need → propose → seller middleware
  *           accepts → fund (simulation) → retry → served → delivery submitted
- *   replay: the same deal again → 402 agentpact_already_consumed
+ *   hijack: the deal id without the buyer token → 402 agentpact_buyer_token_invalid
+ *   replay: the same deal again (buyer token) → 402 agentpact_already_consumed
  *
  * Usage (API must run in simulation mode, i.e. without a chain key):
  *   TSX_TSCONFIG_PATH=apps/demo-x402-seller/tsconfig.json \
@@ -14,7 +15,7 @@
  * Refuses non-local API bases.
  */
 import { randomUUID } from "node:crypto";
-import { fetchWithEscrow, DEAL_HEADER, decodeB64Json } from "../packages/x402-escrow/src/index.js";
+import { fetchWithEscrow, DEAL_HEADER, DEAL_TOKEN_HEADER, decodeB64Json } from "../packages/x402-escrow/src/index.js";
 import { buildServer } from "../apps/demo-x402-seller/src/server.js";
 
 const API = (process.argv[2] ?? "http://127.0.0.1:4000").replace(/\/$/, "");
@@ -95,12 +96,25 @@ r = await call("GET", `/api/deals/${dealId}`, undefined, buyer.apiKey);
 assert(r.json.status === "delivered", `deal status ${r.json.status}`);
 step(`deal ${dealId}: status=delivered (seller middleware submitted the artifact sha256)`);
 
-const replay = await fetch(`${demoUrl}/validate-csv/batch`, {
+// Deal ids are public: a retry with only the id (no buyer token) is refused.
+const hijack = await fetch(`${demoUrl}/validate-csv/batch`, {
   method: "POST", headers: { "content-type": "application/json", [DEAL_HEADER]: dealId }, body: JSON.stringify({ jobs }),
+});
+const hj = decodeB64Json<{ error: string }>(hijack.headers.get("PAYMENT-REQUIRED") ?? "");
+assert(hijack.status === 402 && hj.error === "agentpact_buyer_token_invalid", `hijack ${hijack.status} ${hj.error}`);
+step("deal id without the buyer token → 402 agentpact_buyer_token_invalid (hijack refused)");
+
+// The real buyer replaying the consumed deal (fresh token) is refused too.
+r = await call("POST", `/api/deals/${dealId}/x402-token`, undefined, buyer.apiKey);
+assert(r.status === 201, `mint token ${r.status}`);
+const replay = await fetch(`${demoUrl}/validate-csv/batch`, {
+  method: "POST",
+  headers: { "content-type": "application/json", [DEAL_HEADER]: dealId, [DEAL_TOKEN_HEADER]: String(r.json.token) },
+  body: JSON.stringify({ jobs }),
 });
 const pr = decodeB64Json<{ error: string }>(replay.headers.get("PAYMENT-REQUIRED") ?? "");
 assert(replay.status === 402 && pr.error === "agentpact_already_consumed", `replay ${replay.status} ${pr.error}`);
-step("replay of the consumed deal → 402 agentpact_already_consumed");
+step("buyer replay of the consumed deal → 402 agentpact_already_consumed");
 
 await demo.close();
 console.log("SMOKE OK");

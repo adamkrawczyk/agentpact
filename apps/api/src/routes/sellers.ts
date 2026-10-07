@@ -5,14 +5,17 @@
 //   GET  /api/sellers/me/x402-endpoints
 //   POST /api/deals/:id/consume          seller middleware: "is this deal funded for me, ≥ price, unused?" — atomically marks it used
 //   POST /api/deals/:id/consume/release  seller middleware: the handler failed, hand the undelivered deal back
+//   POST /api/deals/:id/x402-token       buyer: mint the secret that binds an x402 retry to the buyer
 //
 // All routes are agent-authenticated (global preHandler + getRequesterAgentId).
 
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { getRequesterAgentId } from "./utils.js";
 import { walletKey } from "../shared/qualifying.js";
+import { extractValidatorSpecs } from "../shared/validators/index.js";
 
 /** A heartbeat counts as "reachable" for this long. */
 const HEARTBEAT_FRESH_HOURS = 24;
@@ -21,6 +24,8 @@ const consumeSchema = z.object({
   // USDC base units (6 decimals) as a decimal-digit string: integer money only.
   priceBaseUnits: z.string().regex(/^[1-9]\d{0,30}$/, "priceBaseUnits must be a positive integer string (USDC base units)"),
   consumeKey: z.string().min(8).max(128),
+  // The buyer's X-AGENTPACT-DEAL-TOKEN, forwarded by the seller middleware.
+  buyerToken: z.string().max(200).optional(),
   offerId: z.string().uuid().optional(),
   resource: z.string().max(2048).optional(),
 });
@@ -31,6 +36,14 @@ const endpointSchema = z.object({
   url: z.string().url().max(2048).refine((u) => u.startsWith("https://"), "x402 endpoint must be https"),
   offerId: z.string().uuid().optional(),
 });
+
+const sha256Hex = (v: string) => createHash("sha256").update(v).digest("hex");
+
+function sameHash(a: string, b: string): boolean {
+  const x = Buffer.from(a, "hex");
+  const y = Buffer.from(b, "hex");
+  return x.length === y.length && x.length > 0 && timingSafeEqual(x, y);
+}
 
 type NextCall = { http: string; mcp?: string; body?: unknown; docs?: string };
 type ReadinessItem = { id: string; required: boolean; done: boolean; detail: string; next: NextCall | null };
@@ -189,14 +202,27 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       SELECT d.id, d.seller_agent_id, d.offer_id, d.status,
              ap_deal_escrowed_base_units(d.id)::text AS escrowed,
              (d.negotiated_total * 1000000)::numeric(38,0)::text AS negotiated_base_units,
-             c.consume_key
+             c.consume_key, t.token_sha256,
+             d.buyer_agent_id,
+             n.acceptance_criteria AS need_criteria,
+             (SELECT jsonb_agg(m.acceptance_criteria) FROM milestones m WHERE m.deal_id = d.id) AS milestone_criteria
       FROM deals d
       LEFT JOIN x402_consumptions c ON c.deal_id = d.id
+      LEFT JOIN x402_deal_tokens t ON t.deal_id = d.id
+      LEFT JOIN needs n ON n.id = d.need_id
       WHERE d.id = ${id}
     `;
     if (!deal) return reply.code(404).send({ error: "Deal not found", code: "DEAL_NOT_FOUND" });
     if (deal.seller_agent_id !== agentId) {
       return reply.code(403).send({ error: "This deal is not addressed to you", code: "WRONG_SELLER" });
+    }
+    // Deal ids are public, so the id alone never redeems a deal: the request
+    // must carry the token only the buyer can mint.
+    if (!body.buyerToken || !deal.token_sha256 || !sameHash(sha256Hex(body.buyerToken), String(deal.token_sha256))) {
+      return reply.code(403).send({
+        error: "Missing or wrong buyer token: the buyer mints it with POST /api/deals/:id/x402-token and sends X-AGENTPACT-DEAL-TOKEN",
+        code: "BUYER_TOKEN_INVALID",
+      });
     }
     const milestoneIds = async () =>
       (await sql`SELECT id FROM milestones WHERE deal_id = ${id} ORDER BY idx`).map((m) => String(m.id));
@@ -208,6 +234,16 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     }
     if (body.offerId && body.offerId !== deal.offer_id) {
       return reply.code(409).send({ error: "Deal was made for a different offer", code: "OFFER_MISMATCH" });
+    }
+    // An escrowed x402 delivery's artifact is the paywalled response itself,
+    // which a delivery validator cannot fetch: such a deal could never be
+    // delivered. Refuse it before the middleware accepts or serves it.
+    const criteriaLists = [deal.need_criteria, ...(Array.isArray(deal.milestone_criteria) ? deal.milestone_criteria : [])];
+    if (criteriaLists.some((c) => { const r = extractValidatorSpecs(c); return r.specs.length > 0 || r.invalid.length > 0; })) {
+      return reply.code(409).send({
+        error: "Deals with {validator} acceptance criteria cannot be served over x402 (the artifact is the paid response)",
+        code: "DEAL_HAS_VALIDATORS",
+      });
     }
     const price = BigInt(body.priceBaseUnits);
     if (deal.status === "proposed" || deal.status === "countered") {
@@ -264,6 +300,23 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       });
     }
     return { consumed: true, replay: false, dealId: id, milestoneIds: await milestoneIds() };
+  });
+
+  app.post("/api/deals/:id/x402-token", async (request, reply) => {
+    const agentId = getRequesterAgentId(request, reply);
+    if (!agentId) return;
+    const { id } = request.params as { id: string };
+    if (!z.string().uuid().safeParse(id).success) return reply.code(404).send({ error: "Deal not found" });
+    const [deal] = await sql`SELECT buyer_agent_id FROM deals WHERE id = ${id}`;
+    if (!deal) return reply.code(404).send({ error: "Deal not found" });
+    if (deal.buyer_agent_id !== agentId) return reply.code(403).send({ error: "Only the deal's buyer can mint its x402 token", code: "NOT_BUYER" });
+    const token = randomBytes(32).toString("base64url");
+    await sql`
+      INSERT INTO x402_deal_tokens (deal_id, token_sha256) VALUES (${id}, ${sha256Hex(token)})
+      ON CONFLICT (deal_id) DO UPDATE SET token_sha256 = EXCLUDED.token_sha256, created_at = NOW()
+    `;
+    // Shown once; only its hash is stored.
+    return reply.code(201).send({ dealId: id, token, header: "X-AGENTPACT-DEAL-TOKEN" });
   });
 
   app.post("/api/deals/:id/consume/release", async (request, reply) => {
