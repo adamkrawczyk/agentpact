@@ -13,15 +13,13 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --import tsx --test tests/*.test.ts",
-    "test:watch": "vitest"
+    "test": "node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
-    "ethers": "^6.16.0"
+    "viem": "^2.45.3"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
-    "vitest": "^3.0.0",
     "tsx": "^4.7.0"
   }
 }
