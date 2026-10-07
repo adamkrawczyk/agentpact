@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { readFileSync, existsSync } from "fs";
 import { resolve } from "path";
+import { registerRouteModules } from "./routes/index.js";
 
 type OverviewStats = {
   active_offers: number;
@@ -2002,6 +2003,8 @@ app.get("/verified-thank-you", async () => {
     }
   );
 });
+
+await registerRouteModules(app, { page, escapeHtml, apiBase: API_BASE });
 
 app.listen({ port: PORT, host: HOST }).then(() => {
   console.log(`Web server listening on ${HOST}:${PORT}`);

@@ -8,6 +8,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
+import { assertUniqueToolNames, findToolModule, toolModules } from "./tools/index.js";
 
 const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
 const MCP_PORT = Number(process.env.PORT ?? process.env.MCP_PORT ?? 5000);
@@ -2119,6 +2120,10 @@ const tools: Tool[] = [
   },
 ];
 
+// Lane-owned tool modules (apps/mcp/src/tools/) extend the core list.
+assertUniqueToolNames(tools.map((t) => t.name));
+tools.push(...toolModules.flatMap((m) => m.tools));
+
 // ── Tool call handler ────────────────────────────────────────────────
 
 function handleToolCall(name: string, rawArgs: Json) {
@@ -2573,8 +2578,13 @@ function handleToolCall(name: string, rawArgs: Json) {
       return textResult(api(`/api/intents/${intentId}/reveal-preimage`, "POST", rest, apiKey));
     }
 
-    default:
+    default: {
+      const mod = findToolModule(name);
+      if (mod) {
+        return textResult(mod.handle(name, args as Record<string, unknown>, { api: api as never, apiKey }));
+      }
       throw new Error(`Unknown tool: ${name}`);
+    }
   }
 }
 
