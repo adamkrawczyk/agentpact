@@ -332,7 +332,7 @@ async function createDealProposal(
     negotiatedTotal: number;
     maxPriceDeltaPct: number;
     acceptanceTimeoutDays: number;
-    milestones: Array<{ idx: number; title: string; amount: number; acceptanceCriteria: string[]; dueAt?: string }>;
+    milestones: z.infer<typeof proposeDealSchema>["milestones"];
   },
   opts: {
     idempotencyKey: string;
