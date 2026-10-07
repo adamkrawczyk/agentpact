@@ -129,6 +129,17 @@ describe("POST /api/deals/:id/consume (x402 escrow upgrade)", () => {
     expect(JSON.parse(r2.body).code).toBe("DEAL_NOT_ACCEPTED");
   });
 
+  it("underpriced PROPOSED deal → DEAL_UNDERPRICED, so the seller middleware never auto-accepts it", async () => {
+    const { app, sql, dealId } = await setupDeal({ total: 5, accept: false });
+    const res = await consume(app, dealId, { priceBaseUnits: "5000001", consumeKey: "underpriced-1" });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toMatchObject({ code: "DEAL_UNDERPRICED", negotiatedBaseUnits: "5000000" });
+    const ok = await consume(app, dealId, { priceBaseUnits: "5000000", consumeKey: "underpriced-2" });
+    expect(JSON.parse(ok.body).code).toBe("DEAL_NOT_ACCEPTED");
+    const [d] = await sql`SELECT status FROM deals WHERE id = ${dealId}`;
+    expect(d.status).toBe("proposed");
+  });
+
   it("offer mismatch → refused (a deal for another offer of the same seller does not pay for this endpoint)", async () => {
     const { app, dealId } = await setupDeal();
     const res = await consume(app, dealId, { priceBaseUnits: "1", consumeKey: "offer-mm-1", offerId: randomUUID() });

@@ -296,6 +296,20 @@ test("escrow: proposed deal → middleware accepts it for the seller and asks th
   assert.equal(net.deals["deal-1"].status, "active");
 });
 
+test("escrow: underpriced proposed deal → 402, the middleware does NOT accept it", async () => {
+  const net = mockNetwork({ deals: {} });
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input).endsWith("/consume")) {
+      return new Response(JSON.stringify({ error: "underpriced", code: "DEAL_UNDERPRICED" }), { status: 409 });
+    }
+    return net.fetch(input, init);
+  }) as typeof fetch;
+  const d = await seller(net, { price: "$25", fetch: fetchImpl }).handle(req({ [DEAL_HEADER.toLowerCase()]: "deal-1" }));
+  assert.equal(d.action, "respond");
+  if (d.action === "respond") assert.match(decodeB64json(d.headers["PAYMENT-REQUIRED"]).error, /agentpact_deal_underpriced/);
+  assert.equal(net.calls.some((c) => c.url.endsWith("/accept")), false);
+});
+
 test("escrow: AgentPact API unreachable → 500, not served", async () => {
   const mw = x402Escrow({
     sellerAgentId: SELLER, apiKey: "seller-key", offerId: OFFER, thresholdUsd: 1, price: "$25", payTo: PAY_TO,

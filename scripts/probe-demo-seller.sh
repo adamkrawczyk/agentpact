@@ -52,18 +52,22 @@ request() {
   curl "${args[@]}" "$BASE$path" > "$TMP/$step.code" || fail "$step" "request error"
 }
 
-# Decode the PAYMENT-REQUIRED header of a step and run a JS assertion on it.
+# Decode the PAYMENT-REQUIRED header of a step and apply a named check to it.
 check_pr() {
-  local step="$1" js="$2"
+  local step="$1" check="$2"
   node -e '
     const fs = require("fs");
     const raw = fs.readFileSync(process.argv[1], "utf8").split(/\r?\n/)
       .find((l) => /^payment-required:/i.test(l));
     if (!raw) { console.error("no PAYMENT-REQUIRED header"); process.exit(1); }
     const pr = JSON.parse(Buffer.from(raw.split(":").slice(1).join(":").trim(), "base64").toString("utf8"));
-    const ok = (new Function("pr", "return (" + process.argv[2] + ")"))(pr);
-    if (!ok) { console.error(JSON.stringify(pr).slice(0, 400)); process.exit(1); }
-  ' "$TMP/$step.headers" "$js" || fail "$step" "PAYMENT-REQUIRED check failed: $js"
+    const checks = {
+      x402_exact: () => pr.x402Version === 2 && pr.accepts.some((a) => a.scheme === "exact" && /^eip155:/.test(a.network) && /^\d+$/.test(a.amount)),
+      escrow_offered: () => pr.accepts.some((a) => a.scheme === "agentpact-escrow" && a.extra && a.extra.agentpact && a.extra.agentpact.offerId && a.extra.agentpact.retryHeader === "X-AGENTPACT-DEAL"),
+      deal_not_found: () => pr.error === "agentpact_deal_not_found",
+    };
+    if (!checks[process.argv[2]]()) { console.error(JSON.stringify(pr).slice(0, 400)); process.exit(1); }
+  ' "$TMP/$step.headers" "$check" || fail "$step" "PAYMENT-REQUIRED check failed: $check"
 }
 
 request health GET /health ""
@@ -72,16 +76,16 @@ grep -q '"ok":true' "$TMP/health.body" || fail health "body not ok"
 
 request single POST /validate-csv "$JOB"
 [ "$(cat "$TMP/single.code")" = 402 ] || fail single "expected 402, got $(cat "$TMP/single.code")"
-check_pr single 'pr.x402Version === 2 && pr.accepts.some((a) => a.scheme === "exact" && /^eip155:/.test(a.network) && /^\d+$/.test(a.amount))'
+check_pr single x402_exact
 
 request batch POST /validate-csv/batch "{\"jobs\":[$JOB,$JOB]}"
 [ "$(cat "$TMP/batch.code")" = 402 ] || fail batch "expected 402, got $(cat "$TMP/batch.code")"
-check_pr batch 'pr.accepts.some((a) => a.scheme === "agentpact-escrow" && a.extra && a.extra.agentpact && a.extra.agentpact.offerId && a.extra.agentpact.retryHeader === "X-AGENTPACT-DEAL")'
+check_pr batch escrow_offered
 
 DEAL="$(node -e 'console.log(require("crypto").randomUUID())')"
 request deal POST /validate-csv/batch "{\"jobs\":[$JOB]}" "X-AGENTPACT-DEAL: $DEAL"
 [ "$(cat "$TMP/deal.code")" = 402 ] || fail deal "expected 402 for an unknown deal, got $(cat "$TMP/deal.code") (500 = seller cannot reach AgentPact or its API key is rejected)"
-check_pr deal 'pr.error === "agentpact_deal_not_found"'
+check_pr deal deal_not_found
 
 if [ "$JSON" = 1 ]; then
   printf '{"ok":true,"base":"%s","steps":["health","x402_402","escrow_offered","agentpact_roundtrip"]}\n' "$BASE"

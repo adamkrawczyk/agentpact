@@ -34,6 +34,7 @@ async function call(method: string, path: string, body?: unknown, key?: string) 
     headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...(key ? { "x-api-key": key } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  // `any`: loosely-typed API JSON, checked field by field by assert() below.
   const json = await res.json().catch(() => ({})) as Record<string, any>;
   return { status: res.status, json };
 }

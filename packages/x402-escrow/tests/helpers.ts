@@ -7,6 +7,7 @@ export const SELLER = "11111111-1111-4111-8111-111111111111";
 export const OFFER = "22222222-2222-4222-8222-222222222222";
 export const PAY_TO = "0x209693Bc6afc0C5328bA36FaF03C514EF312287C";
 
+// `body: any`: parsed JSON of arbitrary request shapes, asserted field by field in tests.
 export interface Call { url: string; method: string; headers: Record<string, string>; body: any }
 
 export interface DealState {

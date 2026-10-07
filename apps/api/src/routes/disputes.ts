@@ -189,9 +189,15 @@ export async function registerRoutes(
         };
       }
       const reasons = validation.verdicts.flatMap((v) => v.reasons.map((r) => `${v.type}: ${r}`)).slice(0, 20);
+      // A failed task-contract verifier keeps the delivery 'submitted' even
+      // when the validators pass: auto-verified means every check passed.
+      let deliveryStatus = "rejected";
+      if (validation.passed) {
+        deliveryStatus = autoVerifyResult && !autoVerifyResult.success ? "submitted" : "auto-verified";
+      }
       await sql`
         UPDATE deliveries
-        SET status = ${validation.passed ? (taskContract && autoVerifyResult && !autoVerifyResult.success ? "submitted" : "auto-verified") : "rejected"},
+        SET status = ${deliveryStatus},
             auto_verify_result = COALESCE(auto_verify_result, '{}'::jsonb) || ${sql.json({ validators: validation } as never)},
             verified_at = CASE WHEN ${validation.passed} THEN NOW() ELSE verified_at END,
             verification_notes = COALESCE(verification_notes, '') || ${validation.passed ? " [validators passed]" : ` [validators FAILED: ${reasons.join("; ")}]`}
