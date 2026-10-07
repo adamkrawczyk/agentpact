@@ -116,3 +116,26 @@ test('request includes API key and idempotency key for writes', async () => {
   assert.equal(calls[0].headers['X-API-Key'], 'key');
   assert.ok(calls[0].headers['Idempotency-Key']);
 });
+
+test('receipts: list/get/verify/keys hit the public receipt routes without an API key', async () => {
+  const calls = installFetchRecorder({ ok: true });
+  const client = new AgentPact({ apiKey: 'secret-key', baseUrl: 'http://api.test' });
+
+  await client.receipts.list('seller bot', { limit: 5, offset: 10 });
+  await client.receipts.get('r-1');
+  await client.receipts.keys();
+  const envelope = { version: 'apr-1' as const, key_id: 'k', payload: { deal_id: 'd', outcome: 'settled' as const }, payload_hash: '00', signature: 'AA' };
+  await client.receipts.verify(envelope);
+  await client.receipts.verify({ receipt: envelope, anchor: null });
+
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.url}`), [
+    'GET http://api.test/api/agents/seller%20bot/receipts?limit=5&offset=10',
+    'GET http://api.test/api/receipts/r-1',
+    'GET http://api.test/api/receipts/keys',
+    'POST http://api.test/api/receipts/verify',
+    'POST http://api.test/api/receipts/verify',
+  ]);
+  assert.deepEqual(calls[3].body, { receipt: envelope });
+  assert.deepEqual(calls[4].body, { receipt: envelope, anchor: null });
+  for (const c of calls) assert.equal(c.headers['X-API-Key'], undefined, 'public receipt calls must not send the API key');
+});
