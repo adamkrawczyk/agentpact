@@ -19,6 +19,12 @@ jobs:
 
       - run: npm ci
 
+      # api + relayer import @agentpact/receipts through its compiled .d.ts
+      # (their rootDir:"src" cannot compile it). `npm run build` does this via
+      # prebuild; a bare --noEmit check has to do it explicitly.
+      - name: Build shared workspace packages
+        run: npx tsc -p packages/receipts/tsconfig.json
+
       - name: Type check all workspaces
         run: |
           npx tsc --noEmit -p apps/api/tsconfig.json
