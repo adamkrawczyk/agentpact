@@ -1,4 +1,5 @@
 import type { ToolModule } from "./types.js";
+import { receiptsModule } from "./receipts.js";
 
 /**
  * Registry of lane-owned MCP tool modules. To add tools: create
@@ -7,6 +8,7 @@ import type { ToolModule } from "./types.js";
  * (enforced at startup by `assertUniqueToolNames`).
  */
 export const toolModules: ToolModule[] = [
+  receiptsModule,
 ];
 
 export function assertUniqueToolNames(coreNames: string[], modules: ToolModule[] = toolModules): void {

@@ -18,6 +18,7 @@ import {
 import { runAutoCloseSweep } from "./autoclose-sweeper.js";
 import { runSettlementSweep } from "./settlement-sweeper.js";
 import { runProposalExpirySweep } from "./proposal-expiry-sweeper.js";
+import { runReceiptAnchor, runReceiptSweep } from "./receipt-sweeper.js";
 
 interface SweeperHealth {
   cycles: number;
@@ -39,6 +40,8 @@ interface DaemonHealth {
   autocloseSweeper: SweeperHealth;
   settlementSweeper: SweeperHealth;
   proposalExpirySweeper: SweeperHealth;
+  receiptSweeper: SweeperHealth;
+  receiptAnchorSweeper: SweeperHealth;
 }
 
 function freshHealth(): SweeperHealth {
@@ -76,6 +79,11 @@ export interface DaemonDeps {
   onStall?: (name: string, stalledMs: number) => void;
   sql: SqlClient;
   chain: ChainClient;
+  /**
+   * Receipt anchoring: broadcast a 0-value self-tx carrying `data` and resolve
+   * once mined. Only wired when a relayer key is configured.
+   */
+  anchorBroadcast?: (data: `0x${string}`) => Promise<{ txHash: string }>;
   log?: (level: "info" | "warn" | "error", msg: string, meta?: Record<string, unknown>) => void;
 }
 
@@ -91,12 +99,15 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
     autocloseSweeper: freshHealth(),
     settlementSweeper: freshHealth(),
     proposalExpirySweeper: freshHealth(),
+    receiptSweeper: freshHealth(),
+    receiptAnchorSweeper: freshHealth(),
   };
 
   type SweeperName = Exclude<keyof DaemonHealth, "ok">;
   const SWEEPERS: SweeperName[] = [
     "ackSweeper", "schellingSweeper", "streamStaleSweeper",
     "autocloseSweeper", "settlementSweeper", "proposalExpirySweeper",
+    "receiptSweeper", "receiptAnchorSweeper",
   ];
   const tickStallMs = config.tickStallMs ?? 60 * 60_000;
 
@@ -186,6 +197,36 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
     config.proposalExpirySweepIntervalMs,
   );
 
+  // ap_v31 M2 — receipts. Off the money path: reads deal records, writes only
+  // receipts / receipt_anchor_batches / receipt_signing_keys.
+  const timers: Array<ReturnType<typeof setInterval>> = [];
+  const { receiptSigningKey, receiptKeyId } = config;
+  if (receiptSigningKey && receiptKeyId) {
+    timers.push(setInterval(
+      () => safeRun("receiptSweeper", () => runReceiptSweep(sql, {
+        signingKey: receiptSigningKey,
+        keyId: receiptKeyId,
+        maxPerTick: config.receiptMaxPerTick ?? 50,
+      })),
+      config.receiptSweepIntervalMs ?? 5 * 60_000,
+    ));
+  } else {
+    log("warn", "receiptSweeper.disabled", { reason: "RECEIPT_SIGNING_KEY and RECEIPT_KEY_ID must both be set" });
+  }
+  const anchorBroadcast = deps.anchorBroadcast;
+  if (config.receiptAnchorEnabled && anchorBroadcast) {
+    timers.push(setInterval(
+      () => safeRun("receiptAnchorSweeper", () => runReceiptAnchor(sql, {
+        enabled: true,
+        broadcast: anchorBroadcast,
+        minIntervalMs: config.receiptAnchorMinIntervalMs,
+      })),
+      config.receiptAnchorCheckIntervalMs ?? 60 * 60_000,
+    ));
+  } else if (config.receiptAnchorEnabled) {
+    log("warn", "receiptAnchorSweeper.disabled", { reason: "RECEIPT_ANCHOR_ENABLED=true but no relayer key is configured" });
+  }
+
   // Stall watchdog: a wedged tick must become visible AND self-heal. The
   // overlap guard alone would turn a hang into permanent silent skipping.
   let stallReported = false;
@@ -221,6 +262,7 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
       clearInterval(acTimer);
       clearInterval(setTimer);
       clearInterval(peTimer);
+      for (const t of timers) clearInterval(t);
       clearInterval(stallTimer);
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
@@ -274,6 +316,7 @@ if (isEntrypoint) {
   // Real implementation uses viem createWalletClient + writeContract.
   // If relayerPrivateKey is absent (e.g. dry-run), fall back to throwing stub.
   let chain: ChainClient;
+  let anchorBroadcast: DaemonDeps["anchorBroadcast"];
 
   if (config.relayerPrivateKey) {
     // Dynamic import so the daemon can boot without viem installed in test
@@ -308,6 +351,18 @@ if (isEntrypoint) {
     if (!escrowAddress) {
       throw new Error("ESCROW_V3_ADDRESS (or ESCROW_V2_ADDRESS) must be set");
     }
+
+    // Receipt anchoring: 0-value tx from the relayer wallet to itself whose
+    // calldata is the Merkle root. Resolves only once mined successfully, so a
+    // reverted or dropped tx is never recorded as an anchor.
+    anchorBroadcast = async (data) => {
+      const { createPublicClient, http: httpTransport } = await import("viem");
+      const publicClient = createPublicClient({ chain: chainObj, transport: httpTransport(config.baseRpcUrl) });
+      const hash = await walletClient.sendTransaction({ account, chain: chainObj, to: account.address, value: 0n, data });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") throw new Error(`anchor tx ${hash} did not succeed (${receipt.status})`);
+      return { txHash: hash };
+    };
 
     chain = {
       async acknowledgeTimeout(intentOnChainId: Buffer) {
@@ -424,7 +479,7 @@ if (isEntrypoint) {
   }
 
   const { stop } = startDaemon({
-    config, sql, chain,
+    config, sql, chain, anchorBroadcast,
     // A wedged tick cannot be un-wedged from inside the process. Exit non-zero
     // so pm2 (autorestart) brings up a fresh one; the stall is logged first.
     onStall: (name, ms) => {

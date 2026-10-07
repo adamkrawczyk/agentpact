@@ -7,6 +7,7 @@ WORKDIR /app
 # Copy only manifests first for better build-layer cache behavior.
 COPY package.json package-lock.json ./
 COPY apps/relayer-daemon/package.json ./apps/relayer-daemon/package.json
+COPY packages/receipts/package.json ./packages/receipts/package.json
 
 # Install root + relayer workspace deps (including dev deps needed to compile TypeScript).
 RUN npm ci --ignore-scripts --workspace @agentpact/relayer-daemon --include-workspace-root
@@ -14,6 +15,8 @@ RUN npm ci --ignore-scripts --workspace @agentpact/relayer-daemon --include-work
 # Copy only files required to compile the relayer workspace.
 COPY tsconfig.base.json ./
 COPY apps/relayer-daemon ./apps/relayer-daemon
+# Shared receipts package (apr-1 builder/signer/verifier); compiled by the app's prebuild.
+COPY packages/receipts ./packages/receipts
 
 # Build only the relayer.
 RUN npm run build -w @agentpact/relayer-daemon
@@ -27,6 +30,7 @@ ENV NODE_ENV=production
 # Manifests needed for workspace-aware production install.
 COPY package.json package-lock.json ./
 COPY apps/relayer-daemon/package.json ./apps/relayer-daemon/package.json
+COPY packages/receipts/package.json ./packages/receipts/package.json
 
 # Install production dependencies for root + relayer workspace only.
 RUN npm ci --ignore-scripts --omit=dev --workspace @agentpact/relayer-daemon --include-workspace-root \
@@ -34,6 +38,7 @@ RUN npm ci --ignore-scripts --omit=dev --workspace @agentpact/relayer-daemon --i
 
 # Runtime files.
 COPY --from=builder /app/apps/relayer-daemon/dist ./apps/relayer-daemon/dist
+COPY --from=builder /app/packages/receipts/dist ./packages/receipts/dist
 
 # The daemon exposes /health on RELAYER_PORT (default 4011).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

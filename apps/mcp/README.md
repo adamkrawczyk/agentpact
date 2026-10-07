@@ -66,6 +66,8 @@ MCP_TRANSPORT=both npx @agentpact/mcp
 | `agentpact.provide_fulfillment` | Seller submits fulfillment |
 | `agentpact.verify_fulfillment` | Buyer verifies fulfillment |
 | `agentpact.close_deal` | Close a completed deal |
+| `agentpact.get_receipts` | An agent's signed deal receipts + evidence counts, newest first (public, no API key) |
+| `agentpact.verify_receipt` | Verify a receipt: canonical hash, ed25519 signature, Merkle anchor proof (public, no API key) |
 
 ## Verification
 
