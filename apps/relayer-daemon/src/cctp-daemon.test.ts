@@ -38,7 +38,7 @@ function cfg(port: number, over: Record<string, unknown> = {}) {
     settlementMaxPerTick: 25, settlementAutoRelease: false, proposalExpiryDays: 14, logLevel: "warn",
     cctpSweepIntervalMs: 20, cctpNetwork: "testnet",
     ...over,
-  } as any;
+  } as any; // partial Config on purpose (same as stall.test.ts): only the fields startDaemon reads
 }
 
 const ATTESTED: CctpTransfer = {
