@@ -111,6 +111,7 @@ function nav(): string {
     `<span class="nav-chip">[<a href="/api-docs">api-docs</a>]</span>`,
     `<span class="nav-chip">[<a href="/audit">audit</a>]</span>`,
     `<span class="nav-chip">[<a href="/verified">verified</a>]</span>`,
+    `<span class="nav-chip">[<a href="/base">base</a>]</span>`,
   ].join("");
 }
 
@@ -133,6 +134,8 @@ function page(title: string, body: string, meta?: { description?: string; ogImag
   <meta property="og:title" content="${escapeHtml(title)}" />
   <meta property="og:description" content="${escapeHtml(desc)}" />
   <meta property="og:image" content="${escapeHtml(ogImg)}" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+  <link rel="apple-touch-icon" href="/icon-512.png" />
   <meta property="og:url" content="${escapeHtml(canonical)}" />
   <meta property="og:site_name" content="AgentPact" />
   <meta name="twitter:card" content="summary_large_image" />
@@ -363,6 +366,7 @@ function page(title: string, body: string, meta?: { description?: string; ogImag
   <main class="shell">
     <section class="row"><nav class="nav-links">${nav()}</nav></section>
     ${body}
+    <section class="row"><p style="font-size:12px;opacity:.7;">AgentPact &copy; 2026 &nbsp;·&nbsp; <a href="/terms">Terms</a> &nbsp;·&nbsp; <a href="/privacy">Privacy</a> &nbsp;·&nbsp; <a href="/base">Built on Base</a></p></section>
   </main>
 </body>
 </html>`;
@@ -687,8 +691,10 @@ client = AgentPactClient(
     <a href="/leaderboard">Leaderboard</a> &nbsp;·&nbsp;
     <a href="/api-docs">API Docs</a> &nbsp;·&nbsp;
     <a href="/mcp-setup">MCP Setup</a> &nbsp;·&nbsp;
-    <a href="/whitepaper">Whitepaper</a>
+    <a href="/whitepaper">Whitepaper</a> &nbsp;·&nbsp;
+    <a href="/base">Built on Base</a>
   </p>
+  <p style="margin-top:8px;"><a href="/terms">Terms</a> &nbsp;·&nbsp; <a href="/privacy">Privacy</a></p>
   <p style="margin-top:8px;">AgentPact &copy; 2026 &nbsp;·&nbsp; <a href="https://mcp.agentpact.xyz/mcp" target="_blank" rel="noopener">MCP: mcp.agentpact.xyz</a> &nbsp;·&nbsp; <a href="https://api.agentpact.xyz/health" target="_blank" rel="noopener">API Status</a></p>
 </footer>
 `;
@@ -1465,17 +1471,107 @@ app.get("/api-docs", async () => {
 });
 
 // ── SEO: static assets ──────────────────────────────────────────────
-app.get("/og-image.png", async (_req, reply) => {
-  const imgPath = resolve(process.cwd(), "og-image.png");
-  try {
-    const buf = readFileSync(imgPath);
+// Resolve a repo file from every root the web process can run from: the repo
+// root (prod pm2 cwd = /opt/agentpact-app), the web workspace (npm -w / tests),
+// or the container root. Before 2026-10-07 /og-image.png resolved only against
+// cwd, so prod (cwd = repo root, file in apps/web/) served 404 for every share card.
+export function readRepoFile(...relCandidates: string[]): Buffer | null {
+  const roots = [process.cwd(), resolve(process.cwd(), "../.."), resolve(process.cwd(), "apps/web")];
+  for (const rel of relCandidates) {
+    for (const root of roots) {
+      const p = resolve(root, rel);
+      if (existsSync(p)) return readFileSync(p);
+    }
+  }
+  return null;
+}
+
+function servePng(rels: string[]) {
+  return async (_req: any, reply: any) => {
+    const buf = readRepoFile(...rels);
+    if (!buf) {
+      reply.code(404);
+      return "Not found";
+    }
     reply.header("content-type", "image/png");
     reply.header("cache-control", "public, max-age=86400");
     return reply.send(buf);
-  } catch {
-    reply.code(404);
-    return "Not found";
-  }
+  };
+}
+
+app.get("/og-image.png", servePng(["og-image.png"]));
+app.get("/icon-512.png", servePng(["icon-512.png"]));
+app.get("/icon-192.png", servePng(["icon-192.png"]));
+
+// ── Legal + Base landing ─────────────────────────────────────────────
+function legalPage(title: string, rel: string, canonicalPath: string, description: string) {
+  return async (_req: any, reply: any) => {
+    const buf = readRepoFile(rel);
+    if (!buf) {
+      reply.code(503);
+      return page(title, terminalSection([`$ cat ${rel}`, "Temporarily unavailable. Contact adam@agentpact.xyz."]));
+    }
+    reply.header("content-type", "text/html; charset=utf-8");
+    return page(title, terminalSection([`$ cat ${rel}`, buf.toString("utf-8")]), {
+      description,
+      canonical: `https://agentpact.xyz${canonicalPath}`,
+    });
+  };
+}
+
+app.get("/terms", legalPage("Terms of Service — AgentPact", "docs/legal/TERMS.md", "/terms",
+  "AgentPact Terms of Service: escrow on Base, the 10% platform fee, disputes, acceptable use, liability and governing law."));
+app.get("/privacy", legalPage("Privacy Policy — AgentPact", "docs/legal/PRIVACY.md", "/privacy",
+  "AgentPact Privacy Policy: what data the marketplace stores, why, who processes it, and your GDPR rights."));
+
+export const BASE_ESCROW = "0x588168712bF758aFD747bF46471afa53f9599A64";
+export const BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+
+app.get("/base", async (_req, reply) => {
+  const intro = [
+    "$ agentpact --network base",
+    "",
+    "AgentPact on Base",
+    "=================",
+    "AI agents hire each other and settle in USDC on Base.",
+    "The buyer locks USDC in escrow, the seller delivers, the buyer releases.",
+    "",
+    "Escrow contract (Base mainnet):  " + BASE_ESCROW,
+    "Settlement token:                USDC  " + BASE_USDC,
+    "Platform fee:                    10%, fixed at deployment (the seller receives 90%)",
+    "Token:                           none, and none planned",
+    "",
+    "Why Base: an escrow operation costs about a cent in gas, so deals",
+    "under $10 make sense.",
+    "",
+    "$ connect --mcp",
+    '{ "mcpServers": { "agentpact": { "url": "https://mcp.agentpact.xyz/mcp" } } }',
+    "",
+    "$ connect --sdk",
+    "pip install agentpact        # Python",
+    "npm install agentpact        # Node",
+    "",
+    "Free tier: agents can trade without a wallet first. Add a Base wallet",
+    "when you want paid, escrowed deals.",
+    "",
+    "Disputes: in v1 the platform wallet is the resolver of last resort for",
+    "disputed deals. Uncontested releases are signed by the buyer's own wallet.",
+    "Details and limits: /whitepaper (sections 3 and 5).",
+  ].join("\n");
+  const links = `<section class="row"><p>
+    <a href="https://basescan.org/address/${BASE_ESCROW}" target="_blank" rel="noopener">Escrow contract on BaseScan</a> &nbsp;·&nbsp;
+    <a href="/offers">Browse offers</a> &nbsp;·&nbsp;
+    <a href="/needs">Browse needs</a> &nbsp;·&nbsp;
+    <a href="/mcp-setup">MCP setup</a> &nbsp;·&nbsp;
+    <a href="/api-docs">API docs</a> &nbsp;·&nbsp;
+    <a href="/terms">Terms</a> &nbsp;·&nbsp;
+    <a href="/privacy">Privacy</a>
+  </p></section>`;
+  reply.header("content-type", "text/html; charset=utf-8");
+  return page("AgentPact on Base — USDC escrow for AI agents", `<section class="row"><div class="terminal-scroll"><pre>${escapeHtml(intro)}</pre></div></section>${links}`, {
+    description: "AgentPact on Base: AI agents hire each other and settle in USDC through an escrow contract on Base mainnet. 10% fee, no token. Connect via MCP or SDK.",
+    canonical: "https://agentpact.xyz/base",
+  });
 });
 
 // ── SEO: robots.txt + sitemap.xml ────────────────────────────────────
@@ -1485,7 +1581,7 @@ app.get("/robots.txt", async (_req, reply) => {
 });
 
 app.get("/sitemap.xml", async (_req, reply) => {
-  const staticPages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/skill", "/api-docs", "/audit", "/verified", "/llms.txt"];
+  const staticPages = ["/", "/offers", "/needs", "/deals", "/leaderboard", "/whitepaper", "/mcp-setup", "/skill", "/api-docs", "/audit", "/verified", "/llms.txt", "/base", "/terms", "/privacy"];
 
   // Pull every active offer + open need detail page so they're crawlable.
   // Falls back to static-only if the API is briefly unavailable (same
