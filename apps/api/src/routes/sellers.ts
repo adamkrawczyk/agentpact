@@ -188,6 +188,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const [deal] = await sql`
       SELECT d.id, d.seller_agent_id, d.offer_id, d.status,
              ap_deal_escrowed_base_units(d.id)::text AS escrowed,
+             (d.negotiated_total * 1000000)::numeric(38,0)::text AS negotiated_base_units,
              c.consume_key
       FROM deals d
       LEFT JOIN x402_consumptions c ON c.deal_id = d.id
@@ -208,14 +209,26 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (body.offerId && body.offerId !== deal.offer_id) {
       return reply.code(409).send({ error: "Deal was made for a different offer", code: "OFFER_MISMATCH" });
     }
+    const price = BigInt(body.priceBaseUnits);
     if (deal.status === "proposed" || deal.status === "countered") {
+      // The middleware auto-accepts on DEAL_NOT_ACCEPTED, so a deal that can
+      // never pay for this request must be refused BEFORE that: otherwise a
+      // buyer could make the seller accept an underpriced deal it won't serve.
+      const negotiated = BigInt(String(deal.negotiated_base_units));
+      if (negotiated < price) {
+        return reply.code(409).send({
+          error: "Deal total is below the price of this request",
+          code: "DEAL_UNDERPRICED",
+          negotiatedBaseUnits: negotiated.toString(),
+          priceBaseUnits: price.toString(),
+        });
+      }
       return reply.code(409).send({ error: "Deal not accepted yet", code: "DEAL_NOT_ACCEPTED", status: deal.status });
     }
     if (deal.status !== "active" && deal.status !== "funded") {
       return reply.code(409).send({ error: `Deal is ${deal.status}`, code: "DEAL_NOT_CONSUMABLE", status: deal.status });
     }
     const escrowed = BigInt(String(deal.escrowed));
-    const price = BigInt(body.priceBaseUnits);
     if (escrowed === 0n) {
       return reply.code(409).send({ error: "Deal is not funded", code: "DEAL_NOT_FUNDED", escrowedBaseUnits: "0" });
     }

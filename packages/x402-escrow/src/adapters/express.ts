@@ -16,6 +16,8 @@ interface ExpressLikeResponse {
   headersSent?: boolean;
   setHeader(name: string, value: string): unknown;
   removeHeader?(name: string): unknown;
+  // `any` mirrors Node's ServerResponse.write/end overloads, which this
+  // structural type must stay assignable from.
   write(chunk: any, ...args: any[]): boolean;
   end(chunk?: any, ...args: any[]): unknown;
 }
@@ -53,16 +55,15 @@ export function x402EscrowExpress(config: X402EscrowConfig | ReturnType<typeof x
     const chunks: Uint8Array[] = [];
     const origWrite = res.write.bind(res);
     const origEnd = res.end.bind(res);
-    const collect = (chunk: unknown, encoding?: unknown) => {
+    const collect = (chunk: unknown) => {
       if (chunk === undefined || chunk === null || typeof chunk === "function") return;
       if (typeof chunk === "string") chunks.push(new TextEncoder().encode(chunk));
       else if (chunk instanceof Uint8Array) chunks.push(chunk);
       else chunks.push(new TextEncoder().encode(String(chunk)));
-      void encoding;
     };
-    res.write = (chunk: unknown, ...args: unknown[]) => { collect(chunk, args[0]); return true; };
-    res.end = ((chunk?: unknown, ...args: unknown[]) => {
-      collect(chunk, args[0]);
+    res.write = (chunk: unknown) => { collect(chunk); return true; };
+    res.end = ((chunk?: unknown) => {
+      collect(chunk);
       const total = chunks.reduce((n, c) => n + c.byteLength, 0);
       const body = new Uint8Array(total);
       let off = 0;
@@ -80,11 +81,11 @@ export function x402EscrowExpress(config: X402EscrowConfig | ReturnType<typeof x
           res.setHeader("Content-Type", "application/json");
           origEnd(JSON.stringify(result.body));
         }
-      }, (err) => {
+      }, () => {
+        // complete() reports through onError; the paid body is never flushed here.
         res.statusCode = 500;
         res.removeHeader?.("Content-Length");
         origEnd(JSON.stringify({ error: "payment_completion_failed" }));
-        void err;
       });
       return res;
     }) as ExpressLikeResponse["end"];
