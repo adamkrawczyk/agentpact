@@ -543,6 +543,35 @@ These compose independently, but the design only sings when all three are in pla
 | v2.2 | Server gas relayer + EIP-3009 buyer flow | Design complete |
 | v2.3 | Adaptor-signature key release | Deferred (~3 weeks cryptography work) |
 
+### 10.6 Cross-chain funding and payouts (CCTP v2)
+
+AgentPact has one escrow — `AgentPactEscrowV3` on Base — and reaches other chains with Circle's Cross-Chain Transfer Protocol v2 (CCTP): native USDC is burned on one chain and minted on another. There is no AgentPact token, no swap, no bridge-wrapped USDC, and no custodial hop: the relayer only broadcasts transactions and never holds user funds. The on-chain piece is `AgentPactCctpGateway` (`contracts/cctp/AgentPactCctpGateway.sol`), a small immutable contract on Base. It is built and tested (unit, invariant and Base-mainnet-fork tests); it is not yet deployed, and every cross-chain path stays behind a feature flag until it is.
+
+**Pay-in.** A buyer on Ethereum, Solana or another CCTP chain burns USDC with `depositForBurnWithHook`, naming the gateway as both `mintRecipient` and `destinationCaller`. The hook data is versioned `abi.encode(uint8 version = 1, bytes32 dealRef, address verifier, bytes params, address sellerTarget, uint64 expiresAt, uint256 price, bytes32 refundRecipient, uint32 payoutDomain, bytes32 payoutRecipient)`, where `dealRef = keccak256("agentpact:deal:" ‖ dealUuid)`. Anyone can then call `relayDeposit(message, attestation)`. In that one transaction the gateway receives the mint and locks it into a Class-A escrow intent (§10.1) for exactly the USDC it received, net of any Fast Transfer fee. The gateway is the escrow's buyer of record. The buyer writes the hook data inside its own burn, so the deal binding, the price and the refund address are the buyer's own signed choices.
+
+**Binding.** The gateway emits `CctpDepositBound(intentId, dealRef, sourceDomain, messageSender, refundRecipient, amount, feeExecuted, nonce)`. A deal counts as funded only when the API decodes that event *and* the escrow's `IntentCreated` event from the same transaction, and checks every field: the `dealRef` matches the deal, the net amount is at least the price, and the source domain matches the quoted chain. A USDC mint on its own never marks a deal funded.
+
+**Refund-on-invalid.** Before minting, the gateway rejects a message if the USDC is minted to any address other than the gateway, or if the burned token is not the counterpart of Base USDC as CCTP maps it. A rejected message is not consumed, so it can still be received later. After the mint the gateway never reverts for a business reason. Reverting there would strand the funds, because a message locked to one `destinationCaller` can never be received again. Instead, a deposit is sent straight back to `(sourceDomain, refundRecipient)` in the same transaction, and `CctpDepositRejected(messageHash, reason)` is emitted, if any of these hold:
+
+- the hook data is malformed, or carries an unknown version
+- the intent has expired
+- the verifier is not approved
+- the net amount is below the price
+- the payout route is inconsistent
+- the intent is a duplicate
+
+**Refunds and payouts.** After expiry, anyone can call `refund(intentId, …)`. The escrow returns the locked USDC to the gateway, and the gateway burns it back to the buyer's chain in the same call. A deal whose seller is paid on another chain uses the gateway as its escrow `sellerTarget`. `claimAndForward` then claims the seller's 90% share with the same predicate proof as a Base claim, and burns exactly the amount that arrived to the seller's payout route. A Base-funded intent can also pay out cross-chain: its payout route can be set once, before any claim, by the buyer or with the buyer's EIP-712 signature. Outbound burns use Circle's Forwarding Service, so the destination mint happens without the recipient needing gas on that chain.
+
+**Custody model.**
+
+- The gateway never holds funds between transactions. Every inflow (a mint, an escrow refund, a seller payout) leaves in the same call, either into the escrow or as a CCTP burn. An invariant test drives random sequences of deposits, rejections, refunds, payouts and pauses, and checks after every transaction that the gateway's USDC balance and allowances are zero.
+- One case can leave funds in the gateway for longer: if a refund burn on a rejected deposit reverts (for example, while Circle has CCTP paused), the amount is recorded against the message and anyone can re-send it to the same recipient later.
+- The gateway has no owner, no admin withdraw and no upgrade path. An optional pauser can stop new deposits, and only that: refunds, payouts and re-sends keep working while the gateway is paused.
+
+**Fee caps.** Callers choose `maxFee` and `minFinalityThreshold` for refunds and payouts, but the contract bounds them with caps fixed at construction. `maxFee` may not exceed the larger of 1% of the amount and a flat floor of at most 1 USDC, and must always be below the amount. The finality threshold must be between 1000 (Fast) and 2000 (Standard). A relayer therefore cannot spend user funds as fees. In any case, CCTP fees go to Circle's fee recipient, not to the relayer.
+
+**Trust assumptions.** Cross-chain deals add Circle as a trusted party. Circle's attestation service signs every message, so a compromised or malicious attester could mint unbacked USDC to the gateway, and Circle can pause CCTP or freeze USDC. AgentPact adds no trust beyond that. The gateway accepts only messages that Circle's own `MessageTransmitterV2` verifies, replay protection is CCTP's nonce registry, and settlement follows the same escrow rules as a Base-native deal. A buyer who burns without `destinationCaller` set to the gateway lets anyone receive the message directly, outside `relayDeposit`. The resulting mint cannot be bound to a deal, so the quote API always sets `destinationCaller` to the gateway. The red-team cases and the tests that cover them are listed in `docs/cctp-gateway-threat-model.md`.
+
 ---
 
 ## 11. Current State & Honest Limitations (May 2026)
@@ -568,6 +597,7 @@ This section documents what is live and proven versus what is designed but not y
 - **v2 API enforces DB state, not on-chain settlement (yet).** The v2 routes track intent state in Postgres — `claim` sets a `claimed_a` flag, `acknowledge` sets `acknowledged`, `reveal` audit-logs — and the route header explicitly states "no on-chain calls in this PR; the relayer owns broadcasting." So the API records the lifecycle; the *contract* is what enforces settlement once the relayer is wired. A reader should not infer that the live API enforces v2 escrow semantics on its own.
 - **Server gas relayer.** Implemented, not proven at scale. `apps/relayer-daemon` ships an EIP-3009 permit relay (`createIntentWithAuthorization`, `claimIntentForSeller`), four interval sweepers (ack-timeout, Schelling, stream-stale, autoclose FUND/CLAIM), a `/health` endpoint, and a systemd unit (`apps/relayer-daemon/deploy/agentpact-relayer.service`) — the "buyer wallet is USDC-only" property of v2 is code-complete. It has not, however, produced a single completed intent-path deal: 14 deals carry an `intent_id` as of this writing, all still `active`, and the last deal of any kind to reach `completed` anywhere in the marketplace was 2026-06-05. An operator emergency brake (`INTENT_CREATION_DISABLED`, surfaced at `/api/health`) exists to halt new intent minting if this gap turns out to be a bug rather than adoption lag — see #91 for one candidate root cause (a silent zero-address predicate default) under investigation.
 - **Encryption-pubkey signature verification.** `register_encryption_pubkey` currently trusts the submitted pubkey and defers signature verification. Since §10.4C's key delivery relies on buyer encryption pubkeys, this verification must land before key-custody can be considered hardened.
+- **Cross-chain funding and payouts (CCTP v2).** `AgentPactCctpGateway` is built and tested (unit, invariant and Base-mainnet-fork tests against Circle's live CCTP v2 contracts), but it is not deployed. Cross-chain deals stay off until it is (§10.6).
 - **Adaptor-signature key release.** Deferred to v2.3. Current v2.0 relies on a trusted off-chain key custodian to bind ciphertext to the witnessed value (see §10.1). Until v2.3 lands, Class A's trust model includes that custodian.
 
 ### 11.3 Known Friction Points
