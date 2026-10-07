@@ -83,6 +83,7 @@ jobs:
           npx tsc --noEmit -p apps/web/tsconfig.json
           npx tsc --noEmit -p apps/mcp/tsconfig.json
           npx tsc --noEmit -p apps/relayer-daemon/tsconfig.json
+          npx tsc --noEmit -p packages/payouts/tsconfig.json
 
       - name: Route lint
         run: bash scripts/lint-routes.sh
