@@ -107,8 +107,13 @@ export interface CctpStore {
   finishRun(runId: string | null, now: Date, counts: RunCounts, error?: string): Promise<void>;
   /** Rows with work to do now, oldest first. Excludes terminal, stuck, bound, leased and backed-off rows. */
   due(now: Date, limit: number): Promise<CctpTransfer[]>;
-  /** Take the broadcast lease on (id, status). False = someone else holds it or the row moved. */
-  lease(id: string, status: CctpStatus, now: Date, leaseUntil: Date): Promise<boolean>;
+  /**
+   * Take the broadcast lease on (id, status, attempts). `attempts` is the
+   * row version a broadcast decision was made on: every broadcast bumps it in
+   * the same write that persists the tx hash, so a reader holding an older
+   * copy can never lease — and never send — again. False = lost the race.
+   */
+  lease(id: string, status: CctpStatus, attempts: number, now: Date, leaseUntil: Date): Promise<boolean>;
   /** CAS on status. Releases the lease. Bumps status_changed_at when the status changes. */
   update(id: string, expectStatus: CctpStatus, patch: TransferPatch, now: Date): Promise<boolean>;
   /** Bound deposits whose intent expired before `cutoff`, not yet settled, intent not claimed/refunded. */
@@ -266,11 +271,11 @@ export function sqlCctpStore(sql: SqlClient): CctpStore {
       return rows.map(rowToTransfer);
     },
 
-    async lease(id, status, now, leaseUntil) {
+    async lease(id, status, attempts, now, leaseUntil) {
       const rows = await sql<{ id: string }>`
         UPDATE cctp_transfers
         SET lease_until = ${leaseUntil}, updated_at = ${now}
-        WHERE id = ${id} AND status = ${status}
+        WHERE id = ${id} AND status = ${status} AND attempts = ${attempts}
           AND (lease_until IS NULL OR lease_until <= ${now})
         RETURNING id
       `;

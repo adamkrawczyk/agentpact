@@ -30,3 +30,6 @@ jobs:
 
       - name: Test MCP (if present)
         run: npm run -w @agentpact/mcp test --if-present
+
+      - name: Test payouts (CCTP library, node --test)
+        run: npm run -w @agentpact/payouts test

@@ -38,6 +38,7 @@
 
 import type { Hex } from "viem";
 import {
+  CCTP_DOMAIN,
   IrisRateLimitedError,
   decodeCctpMessage,
   decodeHookData,
@@ -143,7 +144,7 @@ export interface CctpSweepResult {
   stuck: { count: number; oldestStuckAgeMs: number | null };
 }
 
-const BASE_DOMAIN = 6;
+const BASE_DOMAIN = CCTP_DOMAIN.base;
 
 type Outcome = "acted" | "held" | "failed";
 
@@ -167,7 +168,7 @@ export async function runCctpSweep(deps: CctpSweeperDeps): Promise<CctpSweepResu
       } catch (err) {
         // A bug or an unclassified error on ONE row must not strand the rest.
         outcome = "failed";
-        await ctx.retryOrStick(row, "relay_failed", errMsg(err)).catch(() => {});
+        await ctx.retryOrStick(row, row.direction === "deposit" ? "relay_failed" : "execute_failed", errMsg(err)).catch(() => {});
       }
       result[outcome]++;
     }
@@ -416,7 +417,7 @@ class Tick {
 
     if (await this.d.chain.isNonceUsed(row.nonce)) return this.reconcileUsedNonce(row);
 
-    if (!(await this.d.store.lease(row.id, "attested", t, new Date(t.getTime() + this.cfg.leaseMs)))) return "held";
+    if (!(await this.d.store.lease(row.id, "attested", row.attempts, t, new Date(t.getTime() + this.cfg.leaseMs)))) return "held";
     let txHash: Hex;
     try {
       txHash = await this.d.chain.relayDeposit(row.message, row.attestation);
@@ -564,7 +565,7 @@ class Tick {
       return this.retryOrStick(row, "execute_failed", `fee quote: ${errMsg(err)}`);
     }
 
-    if (!(await this.d.store.lease(row.id, "submitted", t, new Date(t.getTime() + this.cfg.leaseMs)))) return "held";
+    if (!(await this.d.store.lease(row.id, "submitted", row.attempts, t, new Date(t.getTime() + this.cfg.leaseMs)))) return "held";
     let txHash: Hex;
     try {
       txHash = row.direction === "refund"

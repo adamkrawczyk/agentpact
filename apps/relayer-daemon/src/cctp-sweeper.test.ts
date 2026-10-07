@@ -219,9 +219,9 @@ function memoryHarness(): Harness {
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
         .slice(0, limit).map(clone);
     },
-    async lease(id, status, now, until) {
+    async lease(id, status, attempts, now, until) {
       const r = rows.get(id);
-      if (!r || r.status !== status || (r.leaseUntil && r.leaseUntil > now)) return false;
+      if (!r || r.status !== status || r.attempts !== attempts || (r.leaseUntil && r.leaseUntil > now)) return false;
       r.leaseUntil = until;
       r.updatedAt = now;
       return true;
@@ -404,7 +404,7 @@ function rig(h: Harness, over: Partial<CctpSweeperConfig> = {}) {
   let binding: CctpBindingResult = { bound: true, intentId: null, onchainIntentId: INTENT_ID };
   const bindCalls: string[] = [];
   const tick = () => runCctpSweep({
-    store: h.store,
+    get store() { return h.store; },
     chain,
     iris,
     verifyBinding: async (i) => { bindCalls.push(i.transferId); return binding; },
@@ -507,6 +507,25 @@ function scenarios(name: string, make: () => Promise<Harness>) {
       assert.equal(r.chain.relayCalls.length, 1);
       // The losing sweep may legitimately run the NEXT step (bind) on the row.
       assert.ok(["relayed", "bound"].includes((await h.get(id)).status));
+    });
+
+    it("idempotency: a sweep holding a stale copy of the row cannot broadcast again", async () => {
+      const r = rig(h);
+      const n = nonceOf("a");
+      const id = await h.seed({ status: "attested", patch: { message: depositMessage(n), attestation: "0xa77e57", nonce: n, messageHash: keccak256OfMessage(depositMessage(n)) } });
+      const stale = await h.store.due(r.clock.now(), 20); // read before the first sweep acts
+      r.chain.nextReceipt = () => null; // sent, not mined yet: nonce not used, no event
+      await r.tick();
+      assert.equal(r.chain.relayCalls.length, 1);
+      const real = h.store;
+      h.store = { ...real, due: async () => stale };
+      try {
+        await r.tick();
+      } finally {
+        h.store = real;
+      }
+      assert.equal(r.chain.relayCalls.length, 1, "the stale reader must lose the lease");
+      assert.ok((await h.get(id)).destinationTxHash);
     });
 
     it("nonce already used on Base → reconciled from the gateway event, no broadcast", async () => {
