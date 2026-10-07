@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# Monitored callable-service demo (M3): CSV validation sold over x402, batch
+# jobs through AgentPact escrow. Built on packages/x402-escrow.
+
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY packages/x402-escrow/package.json ./packages/x402-escrow/package.json
+COPY apps/demo-x402-seller/package.json ./apps/demo-x402-seller/package.json
+RUN npm ci --ignore-scripts --workspace @agentpact/x402-escrow --workspace @agentpact/demo-x402-seller --include-workspace-root
+COPY tsconfig.base.json ./
+COPY packages/x402-escrow ./packages/x402-escrow
+COPY apps/demo-x402-seller ./apps/demo-x402-seller
+RUN npm run build -w @agentpact/x402-escrow && npm run build -w @agentpact/demo-x402-seller
+
+FROM node:20-alpine AS production
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package.json package-lock.json ./
+COPY packages/x402-escrow/package.json ./packages/x402-escrow/package.json
+COPY apps/demo-x402-seller/package.json ./apps/demo-x402-seller/package.json
+RUN npm ci --ignore-scripts --omit=dev --workspace @agentpact/x402-escrow --workspace @agentpact/demo-x402-seller \
+  && npm cache clean --force
+COPY --from=builder /app/packages/x402-escrow/dist ./packages/x402-escrow/dist
+COPY --from=builder /app/apps/demo-x402-seller/dist ./apps/demo-x402-seller/dist
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:4402/health > /dev/null || exit 1
+EXPOSE 4402
+CMD ["node", "apps/demo-x402-seller/dist/main.js"]

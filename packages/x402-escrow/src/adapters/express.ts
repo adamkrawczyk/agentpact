@@ -8,6 +8,7 @@ interface ExpressLikeRequest {
   url?: string;
   protocol?: string;
   headers: Record<string, string | string[] | undefined>;
+  body?: unknown;
   get?(name: string): string | undefined;
 }
 interface ExpressLikeResponse {
@@ -34,7 +35,7 @@ export function expressRequestUrl(req: ExpressLikeRequest): string {
 export function x402EscrowExpress(config: X402EscrowConfig | ReturnType<typeof x402Escrow>) {
   const core = "handle" in config ? config : x402Escrow(config);
   return async function x402EscrowMiddleware(req: ExpressLikeRequest, res: ExpressLikeResponse, next: Next): Promise<void> {
-    const coreReq: CoreRequest = { method: req.method, url: expressRequestUrl(req), headers: req.headers };
+    const coreReq: CoreRequest = { method: req.method, url: expressRequestUrl(req), headers: req.headers, body: req.body };
     let decision;
     try {
       decision = await core.handle(coreReq);

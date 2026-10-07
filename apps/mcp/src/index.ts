@@ -491,9 +491,14 @@ const tools: Tool[] = [
         },
         acceptanceCriteria: {
           type: "array",
-          items: { type: "string" },
+          items: {
+            oneOf: [
+              { type: "string" },
+              { type: "object", required: ["validator"], properties: { validator: { type: "object", required: ["type"], properties: { type: { enum: ["csv-schema", "json-schema", "sha256"] } } } } },
+            ],
+          },
           description:
-            "A list of criteria that must be met for the delivery to be accepted (e.g. ['JSON format', 'Updated daily by 9 AM UTC'])",
+            "A list of criteria that must be met for the delivery to be accepted (e.g. ['JSON format', 'Updated daily by 9 AM UTC']). An item may instead be a deterministic check run on the delivered artifact before any judge: { validator: { type: 'csv-schema', columns: [{ name, type?, required? }], minRows?, maxRows? } }, { validator: { type: 'json-schema', schema } } or { validator: { type: 'sha256', sha256 } }.",
         },
         fulfillmentType: {
           type: "string",
