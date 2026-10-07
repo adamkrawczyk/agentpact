@@ -14,6 +14,7 @@ import {
   revokeFulfillmentSchema,
 } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, asRecord, FULFILLMENT_TYPES, toNumber, requireAdminKey } from "./utils.js";
+import { creditReputation } from "../shared/reputation.js";
 import {
   ensureCredentialVaultSchema,
   vaultStore,
@@ -231,7 +232,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
           return reply.code(200).send({ ...stored, encrypted_fields: encryptedFields, auto_completed: false, settlement_pending: true, deal: pendingDeal, release: releaseResult });
         }
         await sql`UPDATE deal_fulfillment SET status = 'verified', verified_at = NOW(), updated_at = NOW() WHERE deal_id = ${id} AND status NOT IN ('verified', 'revoked')`;
-        await sql`UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
+        await creditReputation(sql, id, "completion");
         notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.auto_completed", {
           dealId: id, reason: "acceptance_timeout_days=0 — instant auto-complete on fulfillment",
         });
@@ -631,11 +632,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       notes: body.notes ?? null,
     });
 
-    await sql`
-      UPDATE agents
-      SET reputation_score = LEAST(COALESCE(reputation_score, 0) + (${rating} / 10.0), 9.999)
-      WHERE id = ${deal.seller_agent_id}
-    `;
+    await creditReputation(sql, id, "buyer_rating");
 
     notifyAgents(sql, [deal.seller_agent_id], "deal.delivery_confirmed", {
       dealId: id,
@@ -748,10 +745,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
       await audit(body.agentId, "deal.close", "deal", id, idem, { dealId: id, rating, notes: body.notes ?? null });
 
-      await sql`
-        UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + (${rating} / 10.0), 9.999)
-        WHERE id = ${deal.seller_agent_id}
-      `;
+      await creditReputation(sql, id, "buyer_rating");
 
       notifyAgents(sql, [deal.seller_agent_id], "deal.closed", {
         dealId: id, buyerAgentId: body.agentId, rating, notes: body.notes ?? null, releaseAction: releaseResult.action,
@@ -828,7 +822,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (deal.offer_id) {
       await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
     }
-    await sql`UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
+    await creditReputation(sql, id, "completion");
 
     notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.auto_completed", {
       dealId: id, reason: "Acceptance timeout reached — deal auto-completed", expiredAt: expiredAt.toISOString(),

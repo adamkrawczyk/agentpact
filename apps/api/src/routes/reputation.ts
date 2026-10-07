@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import type { Deps } from "./types.js";
+import { getAgentStats } from "../shared/reputation.js";
 
 export const NEUTRAL_REPUTATION_SCORE = 50;
 
@@ -182,7 +183,10 @@ export async function getReputationProfile(
     ) resp ON true
   `;
 
-  return computeProfileFromStats(agentId, stats as Record<string, unknown>, computeTrustTier);
+  const profile = computeProfileFromStats(agentId, stats as Record<string, unknown>, computeTrustTier);
+  // Trust tiers count only capital_at_risk deals (shared/reputation.ts).
+  const evidence = await getAgentStats(db, agentId);
+  return { ...profile, trust_tier: computeTrustTier(evidence.completedDeals, evidence.reputationScore) };
 }
 
 async function listReputationLeaderboard(

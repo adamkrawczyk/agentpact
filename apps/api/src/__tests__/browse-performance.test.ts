@@ -30,7 +30,6 @@ function createSqlCapture(): CapturedSql {
 function createDeps(): Deps {
   return {
     computeTrustTier: () => ({ tier: "new", label: "New", color: "gray" }),
-    getAgentStats: async () => ({ completedDeals: 0, reputationScore: 0 }),
     notifyAgents: async () => undefined,
     autoVerify: async () => ({ success: true, details: "not used" }),
     FULFILLMENT_TYPES: [],

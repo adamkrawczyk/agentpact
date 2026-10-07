@@ -6,6 +6,7 @@ import type { Deps } from "./types.js";
 import { proposeDealSchema, counterDealSchema, consultationResponseSchema, decomposeDealSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber, expandPaymentRails, STRIPE_RAIL_ENABLED, isPayableWalletAddress, isIntentCreationDisabled } from "./utils.js";
 import { describeDealPricing } from "../shared/pricing.js";
+import { checkDealParties } from "../shared/deal-guards.js";
 
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
   await sql`
@@ -315,6 +316,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (!needOwner || needOwner.agent_id !== body.buyerAgentId) {
       return reply.code(403).send({ error: "Not authorized" });
     }
+    const partyRejection = await checkDealParties(sql, body);
+    if (partyRejection) return reply.code(partyRejection.status).send(partyRejection.body);
     // payment-methods rolloutc — payability propose gate (Layer 2). The deal will fund
     // on the EFFECTIVE rail = the intersection of what both parties accept AND
     // can actually service. Stripe is gated off (P1d), so today the only fundable
@@ -386,6 +389,12 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (body.actorAgentId !== deal.buyer_agent_id && body.actorAgentId !== deal.seller_agent_id) {
       return reply.code(403).send({ error: "Not authorized" });
     }
+    const partyRejection = await checkDealParties(sql, {
+      buyerAgentId: String(deal.buyer_agent_id),
+      sellerAgentId: String(deal.seller_agent_id),
+      negotiatedTotal: body.negotiatedTotal,
+    });
+    if (partyRejection) return reply.code(partyRejection.status).send(partyRejection.body);
     if (isZeroPrice(body.negotiatedTotal) && body.milestones.some((milestone) => !isZeroPrice(milestone.amount))) {
       return reply.code(400).send({ error: "Free-tier deals must use zero-value milestones" });
     }
@@ -455,12 +464,21 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (body.actorAgentId !== deal.seller_agent_id) {
       return reply.code(403).send({ error: "Not authorized" });
     }
+    const partyRejection = await checkDealParties(sql, {
+      buyerAgentId: String(deal.buyer_agent_id),
+      sellerAgentId: String(deal.seller_agent_id),
+      negotiatedTotal: deal.negotiated_total as string | number | null,
+    });
+    if (partyRejection) return reply.code(partyRejection.status).send(partyRejection.body);
 
     try {
       await sql.begin(async (txn) => {
+        // The guard above read negotiated_total outside this transaction; pin
+        // the price it judged so a concurrent counter cannot re-price the deal
+        // between the check and the accept.
         const [updated] = await txn.unsafe(
-          "UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = $1 AND status IN ('proposed', 'countered') RETURNING id",
-          [id]
+          "UPDATE deals SET status = 'active', updated_at = NOW() WHERE id = $1 AND status IN ('proposed', 'countered') AND negotiated_total IS NOT DISTINCT FROM $2::numeric RETURNING id",
+          [id, deal.negotiated_total]
         );
         if (!updated) {
           const conflictError = new Error(`Deal ${id} status changed concurrently — accept aborted`);
@@ -987,6 +1005,17 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         childTotal,
         parentTotal: Number(parent.negotiated_total),
       });
+    }
+
+    // Guard every child before creating any, so a rejected child never leaves
+    // its siblings half-created.
+    for (const child of body.children) {
+      const partyRejection = await checkDealParties(sql, {
+        buyerAgentId: requesterAgentId,
+        sellerAgentId: child.sellerAgentId,
+        negotiatedTotal: child.negotiatedTotal,
+      });
+      if (partyRejection) return reply.code(partyRejection.status).send(partyRejection.body);
     }
 
     const childDealIds: string[] = [];

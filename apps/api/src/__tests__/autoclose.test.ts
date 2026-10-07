@@ -42,6 +42,9 @@ async function createAcceptedDeal(options: {
   // (propose_deal payload) instead of a raw SQL UPDATE. This exercises the
   // producer half of the gasless path — the half an agent actually calls.
   hashViaApi?: boolean;
+  // Expected HTTP status of the seller's accept (409 when a paid deal's seller
+  // has no payout wallet — seller_payout_wallet_required).
+  acceptStatus?: number;
 }) {
   const {
     withDeliverableHash = true,
@@ -50,6 +53,7 @@ async function createAcceptedDeal(options: {
     sellerWallet = "0x2222222222222222222222222222222222222222",
     amount = 50,
     hashViaApi = false,
+    acceptStatus = 200,
   } = options;
 
   const { app, sql } = await createTestApp();
@@ -138,9 +142,9 @@ async function createAcceptedDeal(options: {
     headers: sellerHeaders,
     payload: { actorAgentId: sellerId },
   });
-  expect(acceptRes.statusCode).toBe(200);
+  expect(acceptRes.statusCode).toBe(acceptStatus);
 
-  return { app, sql, dealId, buyerId, sellerId, buyerHeaders, sellerHeaders };
+  return { app, sql, dealId, buyerId, sellerId, buyerHeaders, sellerHeaders, acceptRes };
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -309,12 +313,14 @@ describe("autoclose — Change 1: auto-mint Class-A intent on deal accept", () =
     expect(deal.intent_id).toBeNull();
   });
 
-  it("does NOT mint an intent when seller lacks a wallet address", async () => {
-    const { sql, dealId } = await createAcceptedDeal({
+  it("does NOT mint an intent when seller lacks a wallet address (the paid accept is refused)", async () => {
+    const { sql, dealId, acceptRes } = await createAcceptedDeal({
       withDeliverableHash: true,
       freeTier: false,
       sellerWallet: null,
+      acceptStatus: 409,
     });
+    expect(JSON.parse(acceptRes.body).code).toBe("seller_payout_wallet_required");
 
     const [deal] = await sql<Array<{ intent_id: string | null }>>`
       SELECT intent_id FROM deals WHERE id = ${dealId}

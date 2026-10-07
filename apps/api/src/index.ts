@@ -130,15 +130,6 @@ function computeTrustTier(completedDeals: number, reputationScore: number): { ti
   return { tier: "new", label: "New", color: "#888888" };
 }
 
-async function getAgentStats(db: typeof sql, agentId: string): Promise<{ completedDeals: number; reputationScore: number }> {
-  const [stats] = await db`
-    SELECT
-      (SELECT COUNT(*)::int FROM deals WHERE (buyer_agent_id = ${agentId} OR seller_agent_id = ${agentId}) AND status = 'completed') AS completed_deals,
-      COALESCE((SELECT AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0) FROM feedback WHERE to_agent_id = ${agentId}), 0) AS reputation_score
-  `;
-  return { completedDeals: Number(stats.completed_deals), reputationScore: Number(stats.reputation_score) };
-}
-
 export const sql = postgres(DATABASE_URL, {
   max: 20,           // Up from 10 — Supabase free tier supports ~20 connections
   idle_timeout: 30,  // Release idle connections after 30s to avoid Supabase connection cap
@@ -584,29 +575,11 @@ const createNeedSchema = z.object({
   location: locationSchema,
 });
 
-const proposeDealSchema = z.object({
-  buyerAgentId: z.string().uuid(),
-  sellerAgentId: z.string().uuid(),
-  offerId: z.string().uuid(),
-  needId: z.string().uuid(),
-  negotiatedTotal: z.number().min(0),
-  maxPriceDeltaPct: z.number().min(0).max(100),
-  milestones: z.array(milestoneSchema).min(1),
-  acceptanceTimeoutDays: z.number().int().min(0).max(30).default(0)
-});
-
 const autopilotSettingsSchema = z.object({
   agentId: z.string().uuid(),
   autoBuyEnabled: z.boolean().optional(),
   maxAutoDealPrice: z.number().positive().nullable().optional(),
   autoBuyCategories: z.array(z.string().min(1)).nullable().optional(),
-});
-
-const counterDealSchema = z.object({
-  dealId: z.string().uuid(),
-  actorAgentId: z.string().uuid(),
-  negotiatedTotal: z.number().min(0),
-  milestones: z.array(milestoneSchema).min(1)
 });
 
 const createPaymentIntentSchema = z.object({
@@ -981,109 +954,6 @@ function gradeSkillSubmission(expectedCriteria: Record<string, unknown>, submiss
     score: null,
     gradingNotes: "Submission queued for manual/AI grading",
   };
-}
-
-async function audit(actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
-  await sql`
-    INSERT INTO audit_log (actor_agent_id, action, object_type, object_id, idempotency_key, payload_json)
-    VALUES (${actorId}, ${action}, ${objectType}, ${objectId}, ${idem}, ${JSON.stringify(payload)}::jsonb)
-  `;
-}
-
-type ProposeDealInput = z.infer<typeof proposeDealSchema>;
-
-async function createDealProposal(
-  proposal: ProposeDealInput,
-  opts: {
-    idempotencyKey: string;
-    auditAction: string;
-    auditActorAgentId: string | null;
-    negotiationActorAgentId: string;
-    auditPayload?: unknown;
-  },
-): Promise<Record<string, unknown>> {
-  const isFreeTier = isZeroPrice(proposal.negotiatedTotal);
-  const result = await sql.begin(async (txn) => {
-    const [deal] = await txn.unsafe(
-      `
-        INSERT INTO deals (
-          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days, is_free_tier
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'USDC', $7, $8, $9)
-        RETURNING *
-      `,
-      [
-        proposal.buyerAgentId,
-        proposal.sellerAgentId,
-        proposal.offerId,
-        proposal.needId,
-        "proposed",
-        proposal.negotiatedTotal,
-        proposal.maxPriceDeltaPct,
-        proposal.acceptanceTimeoutDays,
-        isFreeTier,
-      ]
-    );
-
-    const milestones = [];
-    for (const milestone of proposal.milestones) {
-      const dueAt = milestone.dueAt ?? null;
-      const [ms] = await txn.unsafe(
-        `
-          INSERT INTO milestones (deal_id, idx, title, amount, currency, acceptance_criteria, due_at, status)
-          VALUES ($1, $2, $3, $4, 'USDC', $5::jsonb, $6, $7)
-          RETURNING *
-        `,
-        [
-          deal.id,
-          milestone.idx,
-          milestone.title,
-          milestone.amount,
-          JSON.stringify(milestone.acceptanceCriteria),
-          dueAt,
-          "pending",
-        ]
-      );
-      milestones.push(ms);
-    }
-
-    await txn.unsafe(
-      `
-        INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-        VALUES ($1, $2, 'propose', $3::jsonb)
-      `,
-      [deal.id, opts.negotiationActorAgentId, JSON.stringify(opts.auditPayload ?? proposal)]
-    );
-
-    await audit(opts.auditActorAgentId, opts.auditAction, "deal", String(deal.id), opts.idempotencyKey, opts.auditPayload ?? proposal);
-
-    return { ...deal, milestones };
-  });
-
-  return result as Record<string, unknown>;
-}
-
-async function enforceDealDelta(dealId: string, negotiatedTotal: number): Promise<void> {
-  if (isZeroPrice(negotiatedTotal)) {
-    return;
-  }
-  const [deal] = await sql`
-    SELECT d.id, o.base_price, d.max_price_delta_pct
-    FROM deals d
-    JOIN offers o ON d.offer_id = o.id
-    WHERE d.id = ${dealId}
-  `;
-  if (!deal) {
-    throw new Error("Deal not found");
-  }
-  const maxDelta = toNumber(deal.max_price_delta_pct) / 100;
-  const base = toNumber(deal.base_price);
-  if (base === 0) {
-    return;
-  }
-  const delta = Math.abs(negotiatedTotal - base) / base;
-  if (delta > maxDelta) {
-    throw new Error("Counter exceeds max negotiation delta");
-  }
 }
 
 // settlement-integrity dedup: the divergent local copy of
@@ -1524,7 +1394,6 @@ app.addHook("preHandler", async (request, reply) => {
   const _sql = sql as unknown as import('postgres').Sql<Record<string, unknown>>;
   const deps = {
     computeTrustTier,
-    getAgentStats,
     notifyAgents,
     autoVerify,
     FULFILLMENT_TYPES,
