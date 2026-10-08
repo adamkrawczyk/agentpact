@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Deps } from "./types.js";
 import { submitDeliverySchema, verifyDeliverySchema, disputeSchema } from "./schemas.js";
 import { getRequesterAgentId, isZeroPrice } from "./utils.js";
+import { extractValidatorSpecs, runDeliveryValidators, validatorRuntime, type ValidatorSpec } from "../shared/validators/index.js";
 import {
   isOnChainMode,
   resolveDisputeOnChain,
@@ -151,6 +152,78 @@ export async function registerRoutes(
       }
     }
 
+    // ── Deterministic validators (M3, shared/validators) ──────────────
+    // `{validator: {...}}` entries in the milestone's OR the need's
+    // acceptance criteria are checked against the artifact before any LLM
+    // judge. Union of both lists: a proposal cannot drop the buyer's need
+    // validator. Fail → 'rejected' with reasons, the milestone stays open,
+    // and the seller may resubmit.
+    // Pass → release-ELIGIBLE (the sweeper releases without the judge) only
+    // when at least one validator was authored by the BUYER, i.e. sits on a
+    // need owned by the deal's buyer. Milestone criteria can be written by
+    // the seller (counter-offers), so a seller-added `{schema: {}}` must not
+    // be able to replace the judge: such a pass only leaves the delivery
+    // 'submitted' for the normal judge path.
+    const [criteriaRow] = await sql`
+      SELECT m.acceptance_criteria AS milestone_criteria, n.acceptance_criteria AS need_criteria,
+             (n.agent_id = d.buyer_agent_id) AS need_is_buyers
+      FROM milestones m
+      JOIN deals d ON d.id = m.deal_id
+      LEFT JOIN needs n ON n.id = d.need_id
+      WHERE m.id = ${body.milestoneId}
+    `;
+    const fromMilestone = extractValidatorSpecs(criteriaRow?.milestone_criteria);
+    const fromNeed = extractValidatorSpecs(criteriaRow?.need_criteria);
+    const buyerAuthored = criteriaRow?.need_is_buyers === true && fromNeed.specs.length > 0;
+    const seenSpecs = new Set<string>();
+    const validatorSpecs: ValidatorSpec[] = [];
+    for (const spec of [...fromMilestone.specs, ...fromNeed.specs]) {
+      const key = JSON.stringify(spec);
+      if (!seenSpecs.has(key)) { seenSpecs.add(key); validatorSpecs.push(spec); }
+    }
+    const invalidSpecs = [...fromMilestone.invalid, ...fromNeed.invalid];
+    let validation: (Awaited<ReturnType<typeof runDeliveryValidators>> & { releaseEligible: boolean }) | null = null;
+    if (validatorSpecs.length > 0 || invalidSpecs.length > 0) {
+      const ran = await runDeliveryValidators(validatorSpecs, body.artifacts, validatorRuntime.options);
+      // Fail closed: a validator the API can no longer interpret is not a pass.
+      const verdicts = [
+        ...ran.verdicts,
+        ...invalidSpecs.map((r) => ({ type: "invalid-spec", artifactIndex: 0, url: null, bytes: 0, sha256: null, passed: false, reasons: [r] })),
+      ];
+      const passed = ran.passed && invalidSpecs.length === 0;
+      validation = { passed, releaseEligible: passed && buyerAuthored, verdicts };
+      const reasons = validation.verdicts.flatMap((v) => v.reasons.map((r) => `${v.type}: ${r}`)).slice(0, 20);
+      // A failed task-contract verifier keeps the delivery 'submitted' even
+      // when the validators pass: auto-verified means every check passed.
+      // Only a buyer-authored pass is 'auto-verified' (see above).
+      let deliveryStatus = "rejected";
+      if (validation.passed) {
+        const taskContractFailed = autoVerifyResult !== null && !autoVerifyResult.success;
+        deliveryStatus = validation.releaseEligible && !taskContractFailed ? "auto-verified" : "submitted";
+      }
+      await sql`
+        UPDATE deliveries
+        SET status = ${deliveryStatus},
+            auto_verify_result = COALESCE(auto_verify_result, '{}'::jsonb) || ${sql.json({ validators: validation } as never)},
+            verified_at = CASE WHEN ${validation.passed} THEN NOW() ELSE verified_at END,
+            verification_notes = COALESCE(verification_notes, '') || ${validation.passed ? " [validators passed]" : ` [validators FAILED: ${reasons.join("; ")}]`}
+        WHERE id = ${delivery.id}
+      `;
+    }
+
+    if (validation && !validation.passed) {
+      // Evidence of the failed attempt is kept (the delivery row), but the
+      // milestone does not flip to 'delivered' and the buyer is not told a
+      // delivery arrived: there is nothing to accept.
+      const [rejected] = await sql`SELECT * FROM deliveries WHERE id = ${delivery.id}`;
+      return reply.code(422).send({
+        error: "Delivery failed its acceptance validators",
+        code: "DELIVERY_VALIDATION_FAILED",
+        delivery: rejected,
+        validation,
+      });
+    }
+
     await sql`UPDATE milestones SET status = 'delivered' WHERE id = ${body.milestoneId}`;
     await sql`
       UPDATE deals SET status = 'delivered', updated_at = NOW()
@@ -190,13 +263,13 @@ export async function registerRoutes(
         },
         acceptanceTimeoutDays: timeoutDays,
         acceptanceDeadline: acceptanceDeadline.toISOString(),
-        autoVerified: autoVerifyResult?.success === true,
+        autoVerified: autoVerifyResult?.success === true || validation?.passed === true,
       });
     }
 
     // Re-fetch delivery with updated status/result
     const [updatedDelivery] = await sql`SELECT * FROM deliveries WHERE id = ${delivery.id}`;
-    return reply.code(201).send({ ...updatedDelivery, auto_verify_result: autoVerifyResult });
+    return reply.code(201).send({ ...updatedDelivery, auto_verify_result: autoVerifyResult, validation });
   });
 
   app.post("/api/deliveries/verify", async (request, reply) => {
