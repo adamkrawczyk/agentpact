@@ -57,6 +57,26 @@ const schema = z.object({
   // it never expires anything itself; the API route owns the deadline.
   proposalExpirySweepIntervalMs: z.coerce.number().int().positive().default(60 * 60_000),
   proposalExpiryDays: z.coerce.number().int().positive().default(14),
+  // ── Receipts (ap_v31 M2) ─────────────────────────────────────────────
+  // Issuance runs only when BOTH the seed and the key id are set; without a
+  // key there is nothing honest to sign with, so the sweeper is not scheduled.
+  // The seed is a base64 32-byte ed25519 seed — validated by packages/receipts
+  // at first use, never logged.
+  receiptSigningKey: z.string().min(1).optional(),
+  receiptKeyId: z.string().min(1).optional(),
+  receiptSweepIntervalMs: z.coerce.number().int().positive().default(5 * 60_000),
+  receiptMaxPerTick: z.coerce.number().int().positive().default(50),
+  // DEFAULT OFF, literal "true" only (same reasoning as settlementAutoRelease:
+  // z.coerce.boolean() turns the string "false" into true). Anchoring spends
+  // relayer gas, so it is a deliberate switch.
+  receiptAnchorEnabled: z
+    .string()
+    .optional()
+    .transform((v) => String(v ?? "").toLowerCase() === "true"),
+  // How often the anchor tick CHECKS; a batch is opened at most once per
+  // receiptAnchorMinIntervalMs (daily).
+  receiptAnchorCheckIntervalMs: z.coerce.number().int().positive().default(60 * 60_000),
+  receiptAnchorMinIntervalMs: z.coerce.number().int().positive().default(24 * 60 * 60_000),
   // A tick in flight longer than this is WEDGED: /health flips to 503 and the
   // process exits so pm2 restarts it. 60 min clears the worst legitimate
   // settlement tick: 25 deals x (3 judge attempts x 20s + one 30s release
@@ -92,6 +112,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     settlementAutoRelease: env.SETTLEMENT_AUTO_RELEASE,
     proposalExpirySweepIntervalMs: env.PROPOSAL_EXPIRY_SWEEP_INTERVAL_MS,
     proposalExpiryDays: env.PROPOSAL_EXPIRY_DAYS,
+    receiptSigningKey: env.RECEIPT_SIGNING_KEY || undefined,
+    receiptKeyId: env.RECEIPT_KEY_ID || undefined,
+    receiptSweepIntervalMs: env.RECEIPT_SWEEP_INTERVAL_MS,
+    receiptMaxPerTick: env.RECEIPT_MAX_PER_TICK,
+    receiptAnchorEnabled: env.RECEIPT_ANCHOR_ENABLED,
+    receiptAnchorCheckIntervalMs: env.RECEIPT_ANCHOR_CHECK_INTERVAL_MS,
+    receiptAnchorMinIntervalMs: env.RECEIPT_ANCHOR_MIN_INTERVAL_MS,
     tickStallMs: env.RELAYER_TICK_STALL_MS,
     logLevel: env.LOG_LEVEL,
   });

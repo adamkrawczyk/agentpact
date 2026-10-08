@@ -1,0 +1,20 @@
+{
+  "name": "@agentpact/receipts",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "description": "AgentPact Receipt v1 (apr-1): canonical payload builder, ed25519 signing/verification and RFC 6962 Merkle anchoring proofs. Zero runtime dependencies.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test tests/*.test.ts"
+  }
+}

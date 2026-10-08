@@ -9,12 +9,15 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "prebuild": "tsc -p ../../packages/receipts/tsconfig.json",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "pretest": "tsc -p ../../packages/receipts/tsconfig.json",
     "test": "node --import tsx --test src/*.test.ts",
     "test:junit": "node --import tsx --test --test-reporter=junit --test-reporter-destination=test-results/relayer.junit.xml src/*.test.ts"
   },
   "dependencies": {
+    "@agentpact/receipts": "0.1.0",
     "postgres": "^3.4.5",
     "viem": "^2.45.3",
     "zod": "^3.24.2"
