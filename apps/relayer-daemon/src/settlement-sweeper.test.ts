@@ -231,6 +231,28 @@ describe("runSettlementSweep", () => {
     assert.equal(decisionFor("deal-0000-0000-0000-000000000001")!.args[2], "skip_self_deal");
   });
 
+  // REGRESSION GUARD (honest_0710/E). 'skip_self_deal' used to be missing from
+  // the candidate query's exclusion, so every self-deal was re-selected on
+  // every tick forever (one junk decision row per self-deal per tick). Because
+  // the query is ORDER BY updated_at ASC LIMIT maxPerTick, once maxPerTick
+  // self-deals are older than a real deal, the real deal is NEVER scanned —
+  // reproduced against a real Postgres: 26 self-deals + 1 real deal,
+  // maxPerTick=25, 5 ticks → the real deal was never selected.
+  // A deal's self-ness is immutable (buyer/seller ids never change), so one
+  // skip receipt is enough and the exclusion must NOT be time-windowed.
+  it("excludes a deal already skipped as a self-deal, permanently (no starvation)", async () => {
+    const { sql, calls } = makeSql([]);
+    await runSettlementSweep(sql, baseCfg());
+    const scan = calls.find((c) => /FROM deals d/i.test(c.text))!.text;
+    const notExists = scan.slice(scan.search(/NOT EXISTS/i));
+    assert.match(notExists, /'skip_self_deal'/, "a recorded self-deal skip must exclude the deal from later ticks");
+    assert.match(
+      notExists,
+      /sd\.outcome\s*=\s*'skip_self_deal'\s*OR/i,
+      "the self-deal exclusion must not sit behind the 24h review window",
+    );
+  });
+
   it("HOLDS when the judge is unavailable — an outage is not a payout", async () => {
     const { sql, decisionFor } = makeSql([dealRow()]);
     const judgeDown = (async (url: unknown, init?: RequestInit) => {
