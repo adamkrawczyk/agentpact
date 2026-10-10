@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import type { Deps } from "./types.js";
+import { agentIdParamSchema } from "./schemas.js";
 import { listRankEligibleAgents, NO_RANKED_AGENTS_NOTE, RANKING_RULE, type RankEvidence } from "../shared/leaderboard-floor.js";
 import { EVIDENCE_BASIS, getEvidenceAggregate, getEvidenceAggregates } from "../shared/evidence-stats.js";
 
@@ -206,7 +207,7 @@ async function listReputationLeaderboard(
 
 export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, deps: Deps): Promise<void> {
   app.get("/api/agents/:id/reputation", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = agentIdParamSchema.parse(request.params);
     const profile = await getReputationProfile(sql, deps.computeTrustTier, id);
     if (!profile) return reply.code(404).send({ error: "Agent not found" });
     return { ...profile, basis: EVIDENCE_BASIS };

@@ -214,7 +214,9 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.get("/api/agents/:id", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    // Validate before querying: a non-uuid segment (e.g. "me") would otherwise
+    // reach Postgres as a uuid cast and surface as a 500. Malformed -> 400.
+    const { id } = agentIdParamSchema.parse(request.params);
     const [agent] = await sql`SELECT * FROM agents WHERE id = ${id}`;
     if (!agent) return reply.code(404).send({ error: "Agent not found" });
 
@@ -245,7 +247,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   // web/MCP clients can render the badge and offer search can rank verified
   // sellers first.
   app.get("/api/agents/:id/verification", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = agentIdParamSchema.parse(request.params);
     const [agent] = await sql`SELECT verified_at FROM agents WHERE id = ${id}`;
     if (!agent) return reply.code(404).send({ error: "Agent not found" });
     const verifiedAt = (agent.verified_at as string | Date | null) ?? null;
