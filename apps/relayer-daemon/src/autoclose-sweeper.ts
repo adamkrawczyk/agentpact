@@ -180,6 +180,16 @@ async function claimPhase(
     JOIN intent_reveals ir ON ir.intent_id = i.id
     WHERE i.status = 'reveal_ready'
       AND i.on_chain_id IS NOT NULL
+      -- M1: a gateway intent with a cross-chain payout route has the GATEWAY
+      -- as sellerTarget. A direct claim would park the seller's USDC there
+      -- without the forward burn; only gateway.claimAndForward (cctp-sweeper)
+      -- settles it. Base-payout gateway intents (payout_domain 6) stay here.
+      AND NOT EXISTS (
+        SELECT 1 FROM cctp_transfers ct
+        WHERE ct.intent_id = i.id
+          AND (ct.direction = 'payout'
+               OR (ct.direction = 'deposit' AND ct.payout_domain IS DISTINCT FROM 6))
+      )
     ORDER BY i.updated_at ASC
     LIMIT 50
   `;

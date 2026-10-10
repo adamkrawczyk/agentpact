@@ -35,6 +35,38 @@ your production host (referred to below as `agentpact-cloud`).
 | `ESCROW_V2_ADDRESS` | Deployed AgentPactEscrowV2 contract address (Phase G). |
 | `PLATFORM_WALLET` | 0x address that receives the 10% platform fee. |
 | `LOG_LEVEL` | `debug` / `info` / `warn` / `error` (default: `info`). |
+| `CCTP_ENABLED` | Cross-chain relay on/off. Only the literal `true` enables it (default off). |
+| `CCTP_NETWORK` | `testnet` (default) or `mainnet`; must match the chain behind `BASE_RPC_URL` (checked at boot). |
+| `CCTP_GATEWAY_ADDRESS` | Deployed `AgentPactCctpGateway` on Base. Required when enabled. |
+| `CCTP_IRIS_BASE_URL` | Override the Iris host (defaults per network). |
+| `CCTP_ATTESTATION_TIMEOUT_MIN` / `CCTP_BIND_TIMEOUT_MIN` / `CCTP_FORWARD_TIMEOUT_MIN` | Watchdog thresholds (45 / 30 / 60). |
+| `CCTP_MAX_ATTEMPTS`, `CCTP_RETRY_BASE_MS`, `CCTP_RETRY_MAX_MS` | Broadcast retries before `stuck` (5, 60s doubling, 30 min cap). |
+| `CCTP_PAYOUT_SPEED` | `standard` (default, 0 bps) or `fast` for refund/payout burns. |
+
+## CCTP relay (M1)
+
+`src/cctp-sweeper.ts` moves `cctp_transfers` rows (migrations 053 + 057)
+through their states. The relayer only broadcasts calls anyone may make on the
+`AgentPactCctpGateway` — it never holds user funds.
+
+- **Deposit** (buyer burned on Ethereum/Solana): `submitted → attestation_pending
+  → attested → relayed → bound`. Iris gives the attested message,
+  `gateway.relayDeposit` mints into the gateway, and the API's binding check
+  (not the relayer) decides the deal is funded.
+- **Refund / payout**: an expired bound deposit gets a `refund` row, a revealed
+  intent with a non-Base payout route gets a `payout` row
+  (`gateway.refund` / `gateway.claimAndForward`, Circle Forwarding Service on
+  the destination). The autoclose claim phase skips those intents.
+- **Idempotent**: per-row lease, tx hash persisted before waiting,
+  `usedNonces` checked before relaying, landed refunds/payouts found from
+  gateway events before any re-send.
+- **Watchdogs**: stuck attestation, failed/reverted relay, mint without a bound
+  intent, retry exhaustion → status `stuck`, one `cctp.alert` error log line,
+  and `/health` → 503 with `cctp.stuckCount` / `cctp.oldestStuckAgeMs`.
+
+The gateway ABI is hand-written in `src/cctp-gateway-abi.ts` until
+`packages/escrow/abi/AgentPactCctpGateway.json` lands. The relayer depends on
+`@agentpact/payouts` (built first by `prebuild` / `pretest`).
 
 ## Deploy on agentpact-cloud
 

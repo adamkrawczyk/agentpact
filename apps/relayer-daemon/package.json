@@ -9,12 +9,16 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "prebuild": "npm run build -w @agentpact/payouts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "pretest": "npm run build -w @agentpact/payouts",
     "test": "node --import tsx --test src/*.test.ts",
+    "pretest:junit": "npm run build -w @agentpact/payouts",
     "test:junit": "node --import tsx --test --test-reporter=junit --test-reporter-destination=test-results/relayer.junit.xml src/*.test.ts"
   },
   "dependencies": {
+    "@agentpact/payouts": "0.1.0",
     "postgres": "^3.4.5",
     "viem": "^2.45.3",
     "zod": "^3.24.2"
