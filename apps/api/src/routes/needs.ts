@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import type { Deps } from "./types.js";
-import { createNeedSchema, parseAndValidateTags, validateAndTruncateQuery } from "./schemas.js";
+import { createNeedSchema, parseAndValidateTags, validateAndTruncateQuery, uuidParamSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, withBrowseStatementTimeout, checkListingPayable, enrichNeedRow } from "./utils.js";
 
 const DEFAULT_BROWSE_LIMIT = 200;
@@ -84,7 +84,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.patch("/api/needs/:id", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = createNeedSchema.partial().parse(request.body);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
@@ -134,7 +134,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/needs/:id/archive", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
     const [existingNeed] = await sql`SELECT agent_id FROM needs WHERE id = ${id}`;
@@ -187,7 +187,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.get("/api/needs/:id", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const [need] = await sql`SELECT * FROM needs WHERE id = ${id}`;
     if (!need) return reply.code(404).send({ error: "Need not found" });
     return enrichNeedRow(need as Record<string, unknown>);

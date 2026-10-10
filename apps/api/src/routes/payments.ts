@@ -5,7 +5,7 @@ import { z } from "zod";
 import { Request as MppRequest } from "mppx/server";
 import type { Hex, Address } from "viem";
 import type { Deps } from "./types.js";
-import { createPaymentIntentSchema, confirmFundingSchema } from "./schemas.js";
+import { createPaymentIntentSchema, confirmFundingSchema, uuidParamSchema } from "./schemas.js";
 import { resolveSellerPayoutAddress } from "../shared/deal-guards.js";
 import { getRequesterAgentId, idempotencyKey, isZeroPrice, PLATFORM_FEE_PCT, PLATFORM_WALLET, toNumber, sendFetchResponse, isPayableWalletAddress } from "./utils.js";
 import {
@@ -377,7 +377,7 @@ export async function registerRoutes(
   });
 
   app.get("/api/deals/:id/payment-methods", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const [deal] = await sql`SELECT id FROM deals WHERE id = ${id}`;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
 
@@ -388,7 +388,7 @@ export async function registerRoutes(
   });
 
   app.post("/api/deals/:id/pay-mpp", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = z.object({ actorAgentId: z.string().uuid() }).parse(request.body);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;

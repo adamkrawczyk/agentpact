@@ -79,13 +79,16 @@ describe("global error handler governs every route (real app)", () => {
   ];
 
   for (const c of junkIdCases) {
-    it(`${c.area}: ${c.method} ${c.url} -> 400 DB_DATA_EXCEPTION, not 500`, async () => {
+    it(`${c.area}: ${c.method} ${c.url} -> 400 VALIDATION_FAILED, not 500`, async () => {
       const { app } = await createTestApp();
       const headers: Record<string, string> = {};
       if (c.withAuth) Object.assign(headers, auth);
       if (c.admin) headers["x-admin-api-key"] = ADMIN_KEY;
       const res = await app.inject({ method: c.method, url: c.url, headers, payload: c.payload as never });
-      expectEnvelope(res, 400, "DB_DATA_EXCEPTION");
+      const body = expectEnvelope(res, 400, "VALIDATION_FAILED");
+      // Rejected by the route's uuid param schema before any SQL: no driver text.
+      expect(res.body).not.toMatch(/invalid input syntax/i);
+      expect((body.details as Array<{ path?: unknown[] }>)[0]?.path).toEqual(["id"]);
     });
   }
 
@@ -118,7 +121,7 @@ describe("global error handler governs every route (real app)", () => {
   it("honours an inbound x-request-id in the error envelope", async () => {
     const { app } = await createTestApp();
     const res = await app.inject({ method: "GET", url: `/api/deals/${JUNK}`, headers: { "x-request-id": "trace-abc-123" } });
-    const body = expectEnvelope(res, 400, "DB_DATA_EXCEPTION");
+    const body = expectEnvelope(res, 400, "VALIDATION_FAILED");
     expect(body.requestId).toBe("trace-abc-123");
   });
 });

@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./types.js";
-import { createOfferSchema, updateOfferSchema, autopilotSettingsSchema, parseAndValidateTags, validateAndTruncateQuery } from "./schemas.js";
+import { createOfferSchema, updateOfferSchema, autopilotSettingsSchema, parseAndValidateTags, validateAndTruncateQuery, uuidParamSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, enrichOfferRow, parseBooleanish, withBrowseStatementTimeout, checkListingPayable } from "./utils.js";
 
 /** Maximum active offers an agent may have at one time (anti-spam). */
@@ -241,7 +241,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.patch("/api/offers/:id", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = updateOfferSchema.parse(request.body);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
@@ -305,7 +305,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/offers/:id/archive", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
     const [existingOffer] = await sql`SELECT agent_id FROM offers WHERE id = ${id}`;
@@ -585,7 +585,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.get("/api/offers/:id", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const [offer] = await sql`
       SELECT o.*, (a.verified_at IS NOT NULL) AS seller_verified
       FROM offers o

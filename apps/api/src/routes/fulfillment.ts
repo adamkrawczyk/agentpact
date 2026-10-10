@@ -12,6 +12,7 @@ import {
   verifyFulfillmentSchema,
   confirmDeliverySchema,
   revokeFulfillmentSchema,
+  uuidParamSchema,
 } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, asRecord, FULFILLMENT_TYPES, toNumber, requireAdminKey } from "./utils.js";
 import { creditReputation } from "../shared/reputation.js";
@@ -133,7 +134,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/deals/:id/fulfillment", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = parseOrReply(reply, provideFulfillmentSchema, request.body);
     if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
@@ -260,7 +261,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/deals/:id/fulfillment/buyer", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = parseOrReply(reply, provideBuyerFulfillmentSchema, request.body);
     if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
@@ -318,7 +319,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.get("/api/deals/:id/fulfillment", { preHandler: app.authenticate }, async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const query = parseOrReply(reply, getFulfillmentSchema, request.query ?? {});
     if (!query) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
@@ -379,7 +380,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/deals/:id/fulfillment/rotate", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = parseOrReply(reply, rotateCredentialSchema, request.body);
     if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
@@ -433,7 +434,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.get("/api/deals/:id/fulfillment/audit", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const query = parseOrReply(reply, z.object({ agentId: z.string().uuid() }), request.query ?? {});
     if (!query) return;
     await ensureCredentialVaultSchema(vaultSql);
@@ -462,7 +463,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/deals/:id/fulfillment/request-rotation", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = parseOrReply(reply, requestRotationSchema, request.body);
     if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
@@ -504,7 +505,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/deals/:id/fulfillment/verify", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = parseOrReply(reply, verifyFulfillmentSchema, request.body);
     if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
@@ -560,11 +561,13 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/deals/:id/confirm-delivery", async (request, reply) => {
+    // Path id first (outside the try): a junk id is a 400 VALIDATION_FAILED
+    // from the global handler, never a body error or a DB round-trip.
+    const { id } = uuidParamSchema.parse(request.params);
     const body = parseOrReply(reply, confirmDeliverySchema, request.body);
     if (!body) return;
 
     try {
-    const { id } = request.params as { id: string };
     const idem = idempotencyKey(request.headers as Record<string, unknown>);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
@@ -668,6 +671,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
   // ── Simplified deal close (one-call completion for buyers) ──────────
   app.post("/api/deals/:id/close", async (request, reply) => {
+    // Path id first (outside the try), as in confirm-delivery above.
+    const { id } = uuidParamSchema.parse(request.params);
     const body = parseOrReply(
       reply,
       // ── §3.3 (2026-05-21): public close endpoint MUST NOT accept
@@ -686,7 +691,6 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     if (!body) return;
 
     try {
-      const { id } = request.params as { id: string };
       const idem = idempotencyKey(request.headers as Record<string, unknown>);
       const requesterAgentId = getRequesterAgentId(request, reply);
       if (!requesterAgentId) return;
@@ -791,7 +795,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     // straight through to completeDealMilestones() below. This route-level gate
     // is the real check, and it fails CLOSED (503) when the key is unset.
     if (!requireAdminKey(request, reply)) return;
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const [deal] = await sql`
       SELECT id, status, buyer_agent_id, seller_agent_id, offer_id, acceptance_timeout_days, updated_at
       FROM deals WHERE id = ${id}
@@ -835,7 +839,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   // NOTE: admin routes (auto-complete-timeouts, force-close) live in routes/admin.ts
 
   app.post("/api/deals/:id/fulfillment/revoke", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = parseOrReply(reply, revokeFulfillmentSchema, request.body);
     if (!body) return;
     const requesterAgentId = getRequesterAgentId(request, reply);
