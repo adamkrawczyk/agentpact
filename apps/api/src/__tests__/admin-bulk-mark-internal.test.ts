@@ -8,7 +8,10 @@ import { cleanDatabase, createTestApp, getAuthHeadersForAgent } from "./helpers/
 // copies of a fleet wallet, and matched placeholder wallets verbatim.
 
 const ZERO = "0x" + "0".repeat(40);
-const W = (n: number) => "0x" + n.toString(16).padStart(40, "0");
+// Realistic owner addresses: a nonzero, letter-bearing prefix so they stay
+// real owners under every placeholder rule (zero address, precompile-style
+// `0x0{36}…` range) and so upper-casing one yields a genuine case variant.
+const W = (n: number) => "0xa1b2c3d4e5f6" + n.toString(16).padStart(28, "0");
 const MIXED = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
 const SOLANA = "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV";
 const ADMIN_KEY = "bulk-mark-internal-admin-key";
