@@ -6,6 +6,8 @@ import { creditReputation } from "../shared/reputation.js";
 import { notifyAgents } from "../webhooks.js";
 import { PLATFORM_FEE_PCT, requireAdminKey } from "./utils.js";
 import { funnelEventsReport, parseSince, usageReport } from "../shared/telemetry-reports.js";
+import { computePaidSettledExternal, PAID_SETTLED_EXTERNAL_DEFINITION } from "../shared/evidence-stats.js";
+import { EXCLUDED_BUCKETS, type ExcludedBucket, externalSplitIntegrity } from "../shared/external-split.js";
 import {
   isOnChainMode,
   resolveDisputeOnChain,
@@ -248,50 +250,81 @@ export default async function adminRoutes(app: FastifyInstance) {
     //
     // The naive GMV above (SUM negotiated_total WHERE completed) is wash-trade
     // blind: it counts a fleet agent paying ANOTHER fleet agent — or itself — as
-    // "revenue". The settlement-marketplace doctrine requires owner-pair tagging
-    // so fleet-to-fleet volume can never masquerade as real GMV. We compute:
+    // "revenue". We compute:
     //
     //   ENGINEERING signal  — funnel conversion (proposals→funded→completed).
     //     Answers "is the settlement machine working?". Improves the moment our
     //     own relayer auto-funds dogfood deals — so it is NOT proof of demand.
     //
-    //   BUSINESS signal     — external-only GMV: completed deals where buyer and
-    //     seller are BOTH non-internal AND have DISTINCT owner wallets. Answers
-    //     "does anyone real want this?". This is the only number allowed to mean
-    //     "money".
+    //   BUSINESS signal     — paid settled external deals: completed
+    //     qualifying_deals with capital_at_risk (migration 052/054), volume =
+    //     USDC escrowed capped at the quote. Answers "does anyone real want
+    //     this?" and is the only number allowed to mean "money". It is read
+    //     through the SAME helper as /api/stats/public (uncached here), so the
+    //     admin and public "external" numbers cannot drift apart.
     //
-    // BLIND-SPOT HONESTY: external_only here depends on agents.is_internal being
-    // set. If zero agents are flagged internal, the split is UNTRUSTWORTHY (every
-    // seed/test agent reads as "external"), so we surface internal_agent_count and
-    // a trust flag rather than silently reporting an inflated number.
-    const [econ] = await sql`
-      WITH classified AS (
-        SELECT
-          d.status,
-          d.negotiated_total,
-          (NOT b.is_internal AND NOT s.is_internal) AS both_external,
-          (b.owner_wallet_address IS DISTINCT FROM s.owner_wallet_address) AS distinct_owners
-        FROM deals d
-        JOIN agents b ON b.id = d.buyer_agent_id
-        JOIN agents s ON s.id = d.seller_agent_id
-      )
-      SELECT
-        COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_total,
-        COALESCE(SUM(negotiated_total) FILTER (WHERE status = 'completed'), 0)::float AS gmv_total,
-        COUNT(*) FILTER (
-          WHERE status = 'completed' AND both_external AND distinct_owners
-        )::int AS completed_external,
-        COALESCE(SUM(negotiated_total) FILTER (
-          WHERE status = 'completed' AND both_external AND distinct_owners
-        ), 0)::float AS gmv_external,
-        COUNT(*) FILTER (
-          WHERE status = 'completed' AND NOT (both_external AND distinct_owners)
-        )::int AS completed_internal_or_self
-      FROM classified
+    //   EXCLUDED            — every other completed deal, bucketed by the FIRST
+    //     reason it is not business, so the gap to naive GMV is explained,
+    //     never hidden. Invariant: sum(excluded.*.deals) + business = completed.
+    //
+    // BLIND-SPOT HONESTY: "external" depends on agents.is_internal. Flagging is
+    // per agent, so a fleet owner wallet can hold flagged AND unflagged agents
+    // (partial flagging) and the unflagged ones read as outsiders. The guard
+    // below trips whenever any canonical owner wallet owns both kinds.
+    const paidSettled = await computePaidSettledExternal(sql);
+
+    const [{ completed_total }] = await sql`
+      SELECT COUNT(*)::int AS completed_total FROM deals WHERE status = 'completed'
     `;
 
-    const [{ internal_agent_count }] = await sql`
-      SELECT COUNT(*) FILTER (WHERE is_internal)::int AS internal_agent_count FROM agents
+    // First-failing-reason buckets over the deal_integrity view. "business" is
+    // decided by the view's own flags (never re-derived); a completed deal that
+    // matches none of the branches lands in "unclassified" and breaks the
+    // reconciliation flag instead of disappearing.
+    const excludedRows = await sql`
+      SELECT bucket, COUNT(*)::int AS deals, COALESCE(SUM(negotiated_total), 0)::float AS negotiated
+      FROM (
+        SELECT
+          di.negotiated_total,
+          CASE
+            WHEN di.qualifying AND di.funded THEN 'business'
+            WHEN b.is_internal OR s.is_internal THEN 'internal_party'
+            WHEN di.buyer_agent_id = di.seller_agent_id THEN 'self_deal'
+            WHEN NOT COALESCE(di.negotiated_total > 0, false) THEN 'unpriced'
+            WHEN ap_wallet_key(b.owner_wallet_address) IS NULL
+              OR ap_wallet_key(s.owner_wallet_address) IS NULL THEN 'unknown_owner_wallet'
+            WHEN ap_wallet_key(b.owner_wallet_address) = ap_wallet_key(s.owner_wallet_address) THEN 'same_owner'
+            WHEN di.integrity_class IS NOT NULL THEN 'quarantined'
+            WHEN di.qualifying THEN 'qualifying_unfunded'
+            ELSE 'unclassified'
+          END AS bucket
+        FROM deal_integrity di
+        JOIN agents b ON b.id = di.buyer_agent_id
+        JOIN agents s ON s.id = di.seller_agent_id
+        WHERE di.status = 'completed'
+      ) c
+      GROUP BY bucket
+    `;
+
+    // Wallet coherence: one canonical owner wallet ⇒ one internal status.
+    // Unknown wallets (ap_wallet_key NULL) are never treated as a shared owner.
+    const [walletCoherence] = await sql`
+      WITH k AS (
+        SELECT id, ap_wallet_key(owner_wallet_address) AS w, is_internal FROM agents
+      ), mixed AS (
+        SELECT w FROM k WHERE w IS NOT NULL
+        GROUP BY w HAVING bool_or(is_internal) AND bool_or(NOT is_internal)
+      )
+      SELECT
+        (SELECT count(*) FILTER (WHERE is_internal) FROM k)::int AS internal_agent_count,
+        (SELECT count(*) FROM mixed)::int AS mixed_owner_wallets,
+        (SELECT count(*) FROM k WHERE NOT is_internal AND w IN (SELECT w FROM mixed))::int AS unflagged_agents_on_internal_wallets,
+        (SELECT count(*) FROM qualifying_deals q
+           JOIN agents b ON b.id = q.buyer_agent_id
+           JOIN agents s ON s.id = q.seller_agent_id
+          WHERE q.capital_at_risk AND q.status = 'completed'
+            AND (ap_wallet_key(b.owner_wallet_address) IN (SELECT w FROM mixed)
+              OR ap_wallet_key(s.owner_wallet_address) IN (SELECT w FROM mixed)))::int AS external_deals_on_mixed_wallets
     `;
 
     const dealProposalsCreated = Number(funnelStats.deal_proposals_created ?? 0);
@@ -371,15 +404,27 @@ export default async function adminRoutes(app: FastifyInstance) {
         auditedPlatformFeeRevenue,
       },
       economics: (() => {
-        const completedTotal = Number(econ.completed_total ?? 0);
-        const completedExternal = Number(econ.completed_external ?? 0);
-        const completedInternalOrSelf = Number(econ.completed_internal_or_self ?? 0);
-        const gmvExternal = Number(econ.gmv_external ?? 0);
-        const internalAgentCount = Number(internal_agent_count ?? 0);
-        // The external split is only trustworthy once at least one agent is
-        // flagged internal. With zero flagged, every seed/test deal reads as
-        // external and gmvExternal is inflated — say so loudly.
-        const externalSplitTrustworthy = internalAgentCount > 0;
+        const completedTotal = Number(completed_total ?? 0);
+        const completedExternal = paidSettled.deals;
+        const gmvExternal = Number(paidSettled.volumeCents) / 100;
+        const bucketOf = new Map(excludedRows.map((r) => [String(r.bucket), r]));
+        const excluded = Object.fromEntries(
+          EXCLUDED_BUCKETS.map((name) => {
+            const r = bucketOf.get(name);
+            return [name, {
+              deals: Number(r?.deals ?? 0),
+              negotiatedUsdc: Number(Number(r?.negotiated ?? 0).toFixed(6)),
+            }];
+          }),
+        ) as Record<ExcludedBucket, { deals: number; negotiatedUsdc: number }>;
+        const excludedDeals = EXCLUDED_BUCKETS.reduce((n, name) => n + excluded[name].deals, 0);
+        const completedNotEvidence = completedTotal - completedExternal;
+        const split = externalSplitIntegrity({
+          internalAgentCount: Number(walletCoherence.internal_agent_count ?? 0),
+          mixedOwnerWallets: Number(walletCoherence.mixed_owner_wallets ?? 0),
+          unflaggedAgentsOnInternalWallets: Number(walletCoherence.unflagged_agents_on_internal_wallets ?? 0),
+          externalDealsOnMixedWallets: Number(walletCoherence.external_deals_on_mixed_wallets ?? 0),
+        });
         return {
           // ENGINEERING signal — is the settlement machine working?
           engineering: {
@@ -389,21 +434,28 @@ export default async function adminRoutes(app: FastifyInstance) {
             acceptToFundRate: rate(proposalsAccepted, dealsFunded),
             fundToCompleteRate: rate(dealsFunded, dealsCompleted),
           },
-          // BUSINESS signal — does anyone real want this? (the only "money" number)
+          // BUSINESS signal — does anyone real want this? (the only "money"
+          // number). Same helper as /api/stats/public paidDealsSettledExternal /
+          // paidVolumeSettledExternalUsd; externalGmv is escrowed USDC capped
+          // at the quote, not the quote.
           business: {
             completedExternalDeals: completedExternal,
             externalGmv: gmvExternal,
             externalFeeRevenue: Number(((gmvExternal * PLATFORM_FEE_PCT) / 100).toFixed(6)),
+            definition: PAID_SETTLED_EXTERNAL_DEFINITION,
           },
+          // Completed deals NOT in business, by first failing reason.
+          excluded,
           // Self-honesty: what the business number is NOT counting + whether it can be trusted.
           integrity: {
             completedTotal,
-            completedInternalOrSelf,
-            internalAgentCount,
-            externalSplitTrustworthy,
-            note: externalSplitTrustworthy
-              ? "External split active: internal agents are flagged."
-              : "UNTRUSTWORTHY: zero agents flagged is_internal — externalGmv likely inflated by seed/test deals. Flag fleet agents via POST /api/admin/agents/internal before trusting business.externalGmv.",
+            completedNotEvidence,
+            /** @deprecated alias of completedNotEvidence (now includes unpriced/unknown-wallet/unfunded deals). */
+            completedInternalOrSelf: completedNotEvidence,
+            // false ⇒ a completed deal matched no bucket (definition drift) —
+            // the breakdown does not reconcile and must not be trusted.
+            excludedReconciles: excludedDeals + completedExternal === completedTotal,
+            ...split,
           },
         };
       })(),
@@ -417,7 +469,9 @@ export default async function adminRoutes(app: FastifyInstance) {
       ["Accepted", metrics.funnel.proposalsAccepted],
       ["Funded", metrics.funnel.dealsFunded],
       ["Completed", metrics.funnel.dealsCompleted],
-      ["GMV", `${metrics.revenue.gmv.toFixed(2)} USDC`],
+      ["GMV (all completed, unfiltered)", `${metrics.revenue.gmv.toFixed(2)} USDC`],
+      ["External paid settled", `${metrics.economics.business.externalGmv.toFixed(2)} USDC`],
+      ["External split", metrics.economics.integrity.externalSplitStatus],
       ["Fee revenue", `${metrics.revenue.platformFeeRevenue.toFixed(2)} USDC`],
       ["Browse p95", `${metrics.browseLatency.overall.p95Ms.toFixed(2)} ms`],
       ["Overdue unswept intents", metrics.deadIntentSweep.overdueUnswept],
@@ -950,6 +1004,8 @@ export default async function adminRoutes(app: FastifyInstance) {
         total: dealStats.total_deals,
         withExternalParty: dealStats.deals_with_external_party,
         fullyExternal: dealStats.fully_external_deals,
+        // Not the same "external" as /api/admin/metrics economics.business.
+        definition: "is_internal-only split, all statuses, no wallet/price/funding checks — NOT a money metric (see /api/admin/metrics economics.business)",
       },
       needs: {
         totalOpen: needStats.total_open_needs,

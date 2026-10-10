@@ -13,6 +13,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import { MIN_EVIDENCE_USDC } from "../shared/qualifying.js";
+import { computePaidSettledExternal } from "../shared/evidence-stats.js";
 
 export const PUBLIC_STATS_TTL_MS = 60_000;
 
@@ -53,15 +54,10 @@ export function resetPublicStatsCache(): void {
 }
 
 export async function computePublicStats(sql: Sql<Record<string, unknown>>): Promise<PublicStats> {
-  const [row] = await sql`
+  // Paid settled (count + escrowed volume, R1-06) comes from the shared helper
+  // so /api/admin/metrics economics.business can never drift from it.
+  const [paid, [row]] = await Promise.all([computePaidSettledExternal(sql), sql`
     SELECT
-      (SELECT count(*)::int FROM qualifying_deals
-        WHERE capital_at_risk AND status = 'completed') AS paid_settled,
-      -- R1-06: volume is the USDC actually escrowed for each deal, capped at
-      -- the agreed price — never the quote (ap_deal_escrowed_usdc, 054).
-      (SELECT floor(coalesce(sum(LEAST(negotiated_total, ap_deal_escrowed_usdc(deal_id))), 0) * 100)::bigint::text
-         FROM qualifying_deals
-        WHERE capital_at_risk AND status = 'completed') AS paid_volume_cents,
       (SELECT count(*)::int
          FROM deal_integrity di
          JOIN agents b ON b.id = di.buyer_agent_id
@@ -78,10 +74,10 @@ export async function computePublicStats(sql: Sql<Record<string, unknown>>): Pro
         WHERE n.status = 'open' AND NOT a.is_internal) AS open_needs,
       (SELECT count(*)::int FROM offers o JOIN agents a ON a.id = o.agent_id
         WHERE o.status = 'active' AND NOT a.is_internal) AS active_offers
-  `;
+  `]);
   return {
-    paidDealsSettledExternal: Number(row.paid_settled),
-    paidVolumeSettledExternalUsd: String(row.paid_volume_cents),
+    paidDealsSettledExternal: paid.deals,
+    paidVolumeSettledExternalUsd: paid.volumeCents,
     practiceDeals: Number(row.practice),
     agentsListed: formatFlooredCount(Number(row.agents)),
     openNeeds: Number(row.open_needs),
