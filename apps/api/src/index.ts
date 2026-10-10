@@ -212,6 +212,71 @@ export const app = Fastify({
   requestIdLogLabel: "requestId",
 });
 
+// Registered immediately after Fastify() and BEFORE any route: Fastify binds
+// each route's error handler when the route is flushed (at every
+// `await app.register(...)`), not at ready(). Routes registered before this
+// call would keep Fastify's default handler, so e.g. a Postgres 22P02 from a
+// non-uuid :id surfaced as a 500 with the raw driver message. Keep it here.
+// ── §5.1 (2026-05-21): structured error responses. Every error response
+// carries { error, code, requestId } so agent-side log analysis / retry logic
+// can branch on a stable machine-readable code instead of regex-matching the
+// message string. Codes intentionally namespaced (VALIDATION_*, DB_*, CHAIN_*,
+// HTTP_*) so we can grow the taxonomy without breaking clients.
+app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message?: string; name?: string; code?: string; issues?: unknown }, request, reply) => {
+  const err = error as Record<string, unknown>;
+  const requestId = request.id;
+  // ZodError detection: duck-typing (instanceof fails with ESM dual packages)
+  const issues = err.issues;
+  const isZod = Array.isArray(issues) && issues.length > 0 && typeof (issues[0] as any)?.path !== 'undefined'
+    || err.name === 'ZodError' || err.validation;
+  if (isZod) {
+    app.log.warn({ err: { name: err.name, message: err.message }, requestId }, 'validation error');
+    return reply.code(400).send({
+      error: 'Validation error',
+      code: 'VALIDATION_FAILED',
+      details: issues ?? err.validation,
+      requestId,
+    });
+  }
+  if (typeof error.code === "string" && error.code.startsWith("23")) {
+    // 23xxx — Postgres integrity constraint violation (unique, FK, NOT NULL, check)
+    return reply.code(400).send({
+      error: error.message ?? "Invalid request",
+      code: 'DB_CONSTRAINT_VIOLATION',
+      requestId,
+    });
+  }
+  if (typeof error.code === "string" && error.code.startsWith("22")) {
+    // 22xxx — Postgres data exception (numeric overflow, invalid text repr, etc.)
+    return reply.code(400).send({
+      error: error.message ?? "Invalid request",
+      code: 'DB_DATA_EXCEPTION',
+      requestId,
+    });
+  }
+  if (error.code === "57014") {
+    // Postgres statement_timeout — pairs with the 25s connection-level limit
+    return reply.code(504).send({
+      error: "Query timed out, please retry",
+      code: 'DB_STATEMENT_TIMEOUT',
+      requestId,
+    });
+  }
+  const statusCode = error.statusCode ?? 500;
+  const message = statusCode < 500 ? (error.message ?? 'Unknown error') : 'Internal server error';
+  const code = statusCode === 401 ? 'AUTH_REQUIRED'
+    : statusCode === 403 ? 'AUTH_FORBIDDEN'
+    : statusCode === 404 ? 'NOT_FOUND'
+    : statusCode === 409 ? 'CONFLICT'
+    : statusCode === 429 ? 'RATE_LIMITED'
+    : statusCode >= 500 ? 'INTERNAL_ERROR'
+    : 'BAD_REQUEST';
+  if (statusCode >= 500) {
+    app.log.error({ err: error, requestId }, 'unhandled server error');
+  }
+  reply.code(statusCode).send({ error: message, code, requestId });
+});
+
 // Echo the request id back on every response so clients can include it in
 // support tickets / bug reports. Cheap, idempotent, never fails.
 app.addHook("onSend", async (request, reply, payload) => {
@@ -1441,80 +1506,6 @@ app.addHook("preHandler", async (request, reply) => {
   await registerVerifiedSellerWebhookRoutes(app, _sql);
   await registerPublicStatsRoutes(app, _sql);
 }
-
-// ── §5.1 (2026-05-21): structured error responses. Every error response
-// carries { error, code, requestId } so agent-side log analysis / retry logic
-// can branch on a stable machine-readable code instead of regex-matching the
-// message string. Codes intentionally namespaced (VALIDATION_*, DB_*, CHAIN_*,
-// HTTP_*) so we can grow the taxonomy without breaking clients.
-app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message?: string; name?: string; code?: string; issues?: unknown }, request, reply) => {
-  const err = error as Record<string, unknown>;
-  const requestId = request.id;
-  // ZodError detection: duck-typing (instanceof fails with ESM dual packages)
-  const issues = err.issues;
-  const isZod = Array.isArray(issues) && issues.length > 0 && typeof (issues[0] as any)?.path !== 'undefined'
-    || err.name === 'ZodError' || err.validation;
-  if (isZod) {
-    app.log.warn({ err: { name: err.name, message: err.message }, requestId }, 'validation error');
-    return reply.code(400).send({
-      error: 'Validation error',
-      code: 'VALIDATION_FAILED',
-      details: issues ?? err.validation,
-      requestId,
-    });
-  }
-  if (typeof error.code === "string" && error.code.startsWith("23")) {
-    // 23xxx — Postgres integrity constraint violation (unique, FK, NOT NULL, check)
-    return reply.code(400).send({
-      error: error.message ?? "Invalid request",
-      code: 'DB_CONSTRAINT_VIOLATION',
-      requestId,
-    });
-  }
-  if (typeof error.code === "string" && error.code.startsWith("22")) {
-    // 22xxx — Postgres data exception (numeric overflow, invalid text repr, etc.)
-    return reply.code(400).send({
-      error: error.message ?? "Invalid request",
-      code: 'DB_DATA_EXCEPTION',
-      requestId,
-    });
-  }
-  if (error.code === "57014") {
-    // Postgres statement_timeout — pairs with the 25s connection-level limit
-    return reply.code(504).send({
-      error: "Query timed out, please retry",
-      code: 'DB_STATEMENT_TIMEOUT',
-      requestId,
-    });
-  }
-  const statusCode = error.statusCode ?? 500;
-  const message = statusCode < 500 ? (error.message ?? 'Unknown error') : 'Internal server error';
-  const code = statusCode === 401 ? 'AUTH_REQUIRED'
-    : statusCode === 403 ? 'AUTH_FORBIDDEN'
-    : statusCode === 404 ? 'NOT_FOUND'
-    : statusCode === 409 ? 'CONFLICT'
-    : statusCode === 429 ? 'RATE_LIMITED'
-    : statusCode >= 500 ? 'INTERNAL_ERROR'
-    : 'BAD_REQUEST';
-  if (statusCode >= 500) {
-    app.log.error({ err: error, requestId }, 'unhandled server error');
-  }
-  reply.code(statusCode).send({ error: message, code, requestId });
-});
-
-// Fallback: catch ZodErrors that slip through setErrorHandler
-app.addHook('onError', async (request, reply, error) => {
-  const err = error as unknown as Record<string, unknown>;
-  if (Array.isArray(err.issues) || err.name === 'ZodError') {
-    void reply.code(400).send({
-      error: 'Validation error',
-      code: 'VALIDATION_FAILED',
-      details: err.issues,
-      requestId: request.id,
-    });
-    return;
-  }
-});
 
 export const shutdown = async () => {
   await app.close();
