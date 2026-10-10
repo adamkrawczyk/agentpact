@@ -254,10 +254,14 @@ jobs:
                # The web tier's /health reports \$BUILD_SHA; smoke-prod's
                # STALE_WEB gate refuses "unknown". The env file is what the
                # start-*.sh wrappers source, so stamp it BEFORE the reload.
+               # Written UNQUOTED: the pm2 ecosystem file parses this env file
+               # with a plain KEY=(.*) regex, so quotes become part of the
+               # value and /health reported build=\"'<sha>'\" (2026-10-10).
+               # A hex SHA needs no shell quoting.
                if grep -q '^BUILD_SHA=' /etc/agentpact/.env; then
-                 sed -i \"s/^BUILD_SHA=.*/BUILD_SHA='$SHA'/\" /etc/agentpact/.env
+                 sed -i \"s/^BUILD_SHA=.*/BUILD_SHA=$SHA/\" /etc/agentpact/.env
                else
-                 echo \"BUILD_SHA='$SHA'\" >> /etc/agentpact/.env
+                 echo \"BUILD_SHA=$SHA\" >> /etc/agentpact/.env
                fi
 
                # ── Reload (zero-downtime) ──────────────────────────────────
@@ -272,7 +276,31 @@ jobs:
                  pm2 jlist
                  exit 1
                fi
-               echo \"All pm2 apps online at $SHA\""
+               echo \"All pm2 apps online at $SHA\"
+
+               # ── Wait for readiness, not just 'online' ──────────────────
+               # pm2 'online' means the process exists, not that it listens.
+               # The API runs boot-time DDL checks before binding, so a smoke
+               # fired right after reload hit the proxy before the port was
+               # open and got a 502 (2026-10-10, run 38023537666: reload ok,
+               # health 502 at +4s, API listening 75 ms later). Poll each HTTP
+               # tier on loopback until /health answers 200, max 60 s each.
+               for svc in \"api:\${API_PORT:-4000}\" \"web:\${WEB_PORT:-3000}\"; do
+                 port=\${svc#*:}
+                 ready=0
+                 for i in \$(seq 1 60); do
+                   if curl -fsS -o /dev/null --max-time 2 \"http://127.0.0.1:\$port/health\"; then
+                     ready=1
+                     break
+                   fi
+                   sleep 1
+                 done
+                 if [[ \"\$ready\" != \"1\" ]]; then
+                   echo \"DEPLOY FAILED: \${svc%%:*} /health not 200 on loopback within 60s\"
+                   exit 1
+                 fi
+                 echo \"\${svc%%:*} ready on loopback (attempt \$i)\"
+               done"
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
