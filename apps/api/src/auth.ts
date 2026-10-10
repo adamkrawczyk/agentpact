@@ -55,7 +55,7 @@ declare module "fastify" {
  * so SHA-256 is perfectly safe — this isn't a password, it's a random token.
  * Using SHA-256 allows O(1) DB lookups instead of scanning all credentials with bcrypt.
  */
-function hashApiKey(apiKey: string): string {
+export function hashApiKey(apiKey: string): string {
   return createHash("sha256").update(apiKey).digest("hex");
 }
 

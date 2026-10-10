@@ -50,6 +50,7 @@ import { registerAuditWebhookRoutes } from './routes/audit-webhook.js';
 import { registerAuditOrdersRoutes } from './routes/audit-orders.js';
 import { registerVerifiedSellerWebhookRoutes } from './routes/verified-seller-webhook.js';
 import { registerPublicStatsRoutes } from './routes/public-stats.js';
+import telemetryPlugin from './plugins/telemetry.js';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -1183,6 +1184,8 @@ await app.register(cors, {
       ],
   credentials: true
 });
+
+await app.register(telemetryPlugin, { sql: sql as unknown as Sql<Record<string, unknown>> });
 
 await app.register(import('@fastify/rate-limit'), {
   max: 100,

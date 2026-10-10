@@ -41,6 +41,8 @@ async function api(
   const headers: Record<string, string> = {
     "content-type": "application/json",
     "idempotency-key": crypto.randomUUID(),
+    // Lets the API's usage telemetry count MCP traffic (client kind "mcp").
+    "user-agent": "agentpact-mcp",
   };
   const key = apiKey || MCP_API_KEY;
   if (key) {
