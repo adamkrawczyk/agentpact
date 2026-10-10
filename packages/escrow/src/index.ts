@@ -131,4 +131,5 @@ export class EscrowSDK {
 }
 
 export { ESCROW_ABI };
+export { AGENTPACT_CCTP_GATEWAY_ABI } from './cctp-gateway-abi.js';
 export default EscrowSDK;
