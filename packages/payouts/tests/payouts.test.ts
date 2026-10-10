@@ -80,4 +80,48 @@ describe('@agentpact/payouts', () => {
       assert.ok(e.message.includes('not implemented') || e.message.includes('Not implemented'), e.message);
     }
   });
+
+  it('NanoXNOAdapter accepts a valid Nano account, then refuses until implemented', async () => {
+    const { NanoXNOAdapter } = await import('../src/index.js');
+    const adapter = new NanoXNOAdapter();
+    for (const recipient of [
+      'nano_1yo6c1t64ahfjdw1dxizmbbnpdmbrckwhw9phbg5pdkeubrizga4qhnjmnx7',
+      'xrb_1yo6c1t64ahfjdw1dxizmbbnpdmbrckwhw9phbg5pdkeubrizga4qhnjmnx7',
+    ]) {
+      try {
+        await adapter.send({ recipient, amount: 1_000_000, currency: 'xno', rail: 'nano-xno' });
+        assert.fail('should have thrown');
+      } catch (e: any) {
+        assert.ok(e.message.includes('not implemented'), e.message);
+      }
+    }
+  });
+
+  it('NanoXNOAdapter rejects invalid account format', async () => {
+    const { NanoXNOAdapter } = await import('../src/index.js');
+    const adapter = new NanoXNOAdapter();
+    try {
+      await adapter.send({ recipient: '0x123456', amount: 1, currency: 'xno', rail: 'nano-xno' });
+      assert.fail('should have thrown');
+    } catch (e: any) {
+      assert.ok(e.message.includes('invalid Nano account') || e.message.includes('invalid'), e.message);
+    }
+  });
+
+  it('NanoXNOAdapter rejects non-nano-xno rail', async () => {
+    const { NanoXNOAdapter } = await import('../src/index.js');
+    const adapter = new NanoXNOAdapter();
+    try {
+      await adapter.send({ recipient: 'nano_1yo6c1t64ahfjdw1dxizmbbnpdmbrckwhw9phbg5pdkeubrizga4qhnjmnx7', amount: 1, currency: 'xno', rail: 'stripe' });
+      assert.fail('should have thrown');
+    } catch (e: any) {
+      assert.ok(e.message.includes('wrong rail'), e.message);
+    }
+  });
+
+  it('NanoXNOAdapter getStatus never reports a payout it did not make', async () => {
+    const { NanoXNOAdapter } = await import('../src/index.js');
+    const adapter = new NanoXNOAdapter();
+    await assert.rejects(() => adapter.getStatus('nano_test123'), /Not implemented/);
+  });
 });
