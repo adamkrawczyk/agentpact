@@ -6,6 +6,7 @@ import { notifyAgents } from "../webhooks.js";
 import { getRequesterAgentId } from "./utils.js";
 import { computeTrustTier, computeRaaSScore, computeBadges } from "../shared/utils.js";
 import { TRUST_TIERS } from "./utils.js";
+import { creditReputation, getAgentStats } from "../shared/reputation.js";
 import { feedbackSchema } from "./schemas.js";
 
 export default async function feedbackRoutes(app: FastifyInstance) {
@@ -64,12 +65,7 @@ export default async function feedbackRoutes(app: FastifyInstance) {
       RETURNING *
     `;
 
-    const [aggregate] = await sql`
-      SELECT COALESCE(AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0), 0) AS score
-      FROM feedback WHERE to_agent_id = ${body.toAgentId}
-    `;
-
-    await sql`UPDATE agents SET reputation_score = ${Number(aggregate.score)} WHERE id = ${body.toAgentId}`;
+    await creditReputation(sql, body.dealId, "feedback");
 
     notifyAgents(sql, [body.toAgentId], "feedback.received", {
       dealId: body.dealId,
@@ -271,7 +267,9 @@ export default async function feedbackRoutes(app: FastifyInstance) {
     const { score, breakdown } = computeRaaSScore(
       completedDeals, avgRating, totalDeals, disputedDeals, memberSinceMs,
     );
-    const trustTier = computeTrustTier(completedDeals, avgRating);
+    // Trust tiers count only capital_at_risk deals (shared/reputation.ts).
+    const evidence = await getAgentStats(sql, agentId);
+    const trustTier = computeTrustTier(evidence.completedDeals, evidence.reputationScore);
     const badges = computeBadges({
       completedDeals, totalVolume, disputedDeals, totalDeals, reviewCount, memberSinceMs, endorsementCount,
     });
@@ -310,24 +308,19 @@ export default async function feedbackRoutes(app: FastifyInstance) {
     const [agent] = await sql`SELECT id, display_name, created_at FROM agents WHERE id = ${agentId}`;
     if (!agent) return reply.code(404).send({ error: "Agent not found" });
 
-    const [feedbackStats] = await sql`
-      SELECT
-        COALESCE(AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0), 0) AS avg_rating
-      FROM feedback
-      WHERE to_agent_id = ${agentId}
-    `;
-
     const [dealStats] = await sql`
       SELECT
-        COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_deals,
         COUNT(*) FILTER (WHERE status = 'disputed')::int AS disputed_deals,
         COUNT(*)::int AS total_deals
       FROM deals
       WHERE buyer_agent_id = ${agentId} OR seller_agent_id = ${agentId}
     `;
 
-    const completedDeals = Number(dealStats.completed_deals);
-    const avgRating = Number(feedbackStats.avg_rating);
+    // A signed attestation is evidence: deals and ratings count only when the
+    // deal was capital_at_risk (shared/reputation.ts).
+    const evidence = await getAgentStats(sql, agentId);
+    const completedDeals = evidence.completedDeals;
+    const avgRating = evidence.reputationScore;
     const { score } = computeRaaSScore(
       completedDeals,
       avgRating,

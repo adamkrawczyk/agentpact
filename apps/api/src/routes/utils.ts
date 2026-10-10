@@ -219,15 +219,6 @@ export function computeTrustTier(completedDeals: number, reputationScore: number
   return { tier: "new", label: "New", color: "#888888" };
 }
 
-export async function getAgentStats(db: Sql<Record<string, unknown>>, agentId: string): Promise<{ completedDeals: number; reputationScore: number }> {
-  const [stats] = await db`
-    SELECT
-      (SELECT COUNT(*)::int FROM deals WHERE (buyer_agent_id = ${agentId} OR seller_agent_id = ${agentId}) AND status = 'completed') AS completed_deals,
-      COALESCE((SELECT AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0) FROM feedback WHERE to_agent_id = ${agentId}), 0) AS reputation_score
-  `;
-  return { completedDeals: Number(stats.completed_deals), reputationScore: Number(stats.reputation_score) };
-}
-
 export function idempotencyKey(headers: Record<string, unknown>): string {
   return String(headers["idempotency-key"] ?? randomUUID());
 }

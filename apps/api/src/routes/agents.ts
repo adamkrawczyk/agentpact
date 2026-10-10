@@ -11,7 +11,8 @@ import {
   startChallengeSchema,
   submitChallengeSchema,
 } from "./schemas.js";
-import { getRequesterAgentId, getAgentStats, computeTrustTier } from "./utils.js";
+import { getRequesterAgentId, computeTrustTier } from "./utils.js";
+import { getAgentStats } from "../shared/reputation.js";
 
 type GradeResult = {
   deterministic: boolean;

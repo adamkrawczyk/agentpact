@@ -13,10 +13,7 @@ import {
   generateAcceptTransaction,
   resolveDisputeOnChain,
 } from "../chain.js";
-import { isZeroPrice, toNumber } from "./utils.js";
-import { proposeDealSchema } from "./schemas.js";
-import { audit } from "./utils.js";
-import type { z } from "zod";
+import { toNumber } from "./utils.js";
 
 export const PLATFORM_FEE_PCT = Number(process.env.PLATFORM_FEE_PCT ?? 10);
 export const PLATFORM_WALLET = process.env.PLATFORM_WALLET ?? "0xAgentPactPlatformUSDC";
@@ -173,30 +170,6 @@ export async function applyFulfillmentExpiryChecks(
   }
 
   return fulfillment;
-}
-
-export async function enforceDealDelta(dealId: string, negotiatedTotal: number): Promise<void> {
-  if (isZeroPrice(negotiatedTotal)) {
-    return;
-  }
-  const [deal] = await sql`
-    SELECT d.id, o.base_price, d.max_price_delta_pct
-    FROM deals d
-    JOIN offers o ON d.offer_id = o.id
-    WHERE d.id = ${dealId}
-  `;
-  if (!deal) {
-    throw new Error("Deal not found");
-  }
-  const maxDelta = toNumber(deal.max_price_delta_pct) / 100;
-  const base = toNumber(deal.base_price);
-  if (base === 0) {
-    return;
-  }
-  const delta = Math.abs(negotiatedTotal - base) / base;
-  if (delta > maxDelta) {
-    throw new Error("Counter exceeds max negotiation delta");
-  }
 }
 
 // Discriminated result for a single-milestone release. Mirrors the action
@@ -704,77 +677,4 @@ export async function completeDealMilestones(
   await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
 
   return { mode, action: "released" };
-}
-
-export type ProposeDealInput = z.infer<typeof proposeDealSchema>;
-
-export async function createDealProposal(
-  proposal: ProposeDealInput,
-  opts: {
-    idempotencyKey: string;
-    auditAction: string;
-    auditActorAgentId: string | null;
-    negotiationActorAgentId: string;
-    auditPayload?: unknown;
-  },
-): Promise<Record<string, unknown>> {
-  const isFreeTier = isZeroPrice(proposal.negotiatedTotal);
-  const result = await sql.begin(async (txn) => {
-    const [deal] = await txn.unsafe(
-      `INSERT INTO deals (
-          buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct, acceptance_timeout_days, is_free_tier
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'USDC', $7, $8, $9)
-        RETURNING *`,
-      [
-        proposal.buyerAgentId,
-        proposal.sellerAgentId,
-        proposal.offerId,
-        proposal.needId,
-        "proposed",
-        proposal.negotiatedTotal,
-        proposal.maxPriceDeltaPct,
-        proposal.acceptanceTimeoutDays,
-        isFreeTier,
-      ]
-    );
-
-    const milestones = [];
-    for (const milestone of proposal.milestones) {
-      const dueAt = milestone.dueAt ?? null;
-      const [ms] = await txn.unsafe(
-        `INSERT INTO milestones (deal_id, idx, title, amount, currency, acceptance_criteria, due_at, status)
-          VALUES ($1, $2, $3, $4, 'USDC', $5::jsonb, $6, $7)
-          RETURNING *`,
-        [
-          deal.id,
-          milestone.idx,
-          milestone.title,
-          milestone.amount,
-          JSON.stringify(milestone.acceptanceCriteria),
-          dueAt,
-          "pending",
-        ]
-      );
-      milestones.push(ms);
-    }
-
-    await txn.unsafe(
-      `INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-        VALUES ($1, $2, 'propose', $3::jsonb)`,
-      [deal.id, opts.negotiationActorAgentId, JSON.stringify(opts.auditPayload ?? proposal)]
-    );
-
-    await audit(
-      opts.auditActorAgentId,
-      opts.auditAction,
-      "deal",
-      String(deal.id),
-      opts.idempotencyKey,
-      opts.auditPayload ?? proposal
-    );
-
-    return { ...deal, milestones };
-  });
-
-  return result as Record<string, unknown>;
 }

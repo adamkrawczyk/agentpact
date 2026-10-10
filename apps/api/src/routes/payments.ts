@@ -6,6 +6,7 @@ import { Request as MppRequest } from "mppx/server";
 import type { Hex, Address } from "viem";
 import type { Deps } from "./types.js";
 import { createPaymentIntentSchema, confirmFundingSchema } from "./schemas.js";
+import { resolveSellerPayoutAddress } from "../shared/deal-guards.js";
 import { getRequesterAgentId, idempotencyKey, isZeroPrice, PLATFORM_FEE_PCT, PLATFORM_WALLET, toNumber, sendFetchResponse, isPayableWalletAddress } from "./utils.js";
 import {
   isOnChainMode,
@@ -148,7 +149,12 @@ export async function registerRoutes(
     // confirmed latent bug where a NULL/invalid seller_wallet_address was cast
     // straight to viem's Address (and written into payment_intents) — a wallet-less
     // seller's deal would otherwise target a null address at createMilestone time.
-    if (!isPayableWalletAddress(milestone.seller_wallet_address)) {
+    // R1-02: pay the destination the accept guard approved — the owner wallet,
+    // or the verified payout route when the owner wallet is missing/zero. Never
+    // the raw owner_wallet_address, which may be the zero address.
+    const sellerPayoutAddress = await resolveSellerPayoutAddress(sql, String(milestone.seller_agent_id));
+    milestone.seller_wallet_address = sellerPayoutAddress;
+    if (!sellerPayoutAddress || !isPayableWalletAddress(sellerPayoutAddress)) {
       return reply.code(400).send({
         error:
           "Seller has no valid payout wallet — the 'usdc' rail cannot be funded. The seller must link a wallet address before this milestone can be funded.",

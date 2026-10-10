@@ -12,7 +12,6 @@ export type CompleteDealMilestonesResult = {
 
 export interface Deps {
   computeTrustTier: (completedDeals: number, reputationScore: number) => { tier: string; label: string; color: string };
-  getAgentStats: (db: Sql<Record<string, unknown>>, agentId: string) => Promise<{ completedDeals: number; reputationScore: number }>;
   notifyAgents: typeof notifyAgents;
   autoVerify: typeof autoVerify;
   FULFILLMENT_TYPES: typeof FULFILLMENT_TYPES;

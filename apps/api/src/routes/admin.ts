@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { sql } from "../db.js";
 import { completeDealMilestones } from "../shared/deal-helpers.js";
+import { creditReputation } from "../shared/reputation.js";
 import { notifyAgents } from "../webhooks.js";
 import { PLATFORM_FEE_PCT, requireAdminKey } from "./utils.js";
 import {
@@ -487,7 +488,7 @@ export default async function adminRoutes(app: FastifyInstance) {
           results.push({ dealId: deal.id, completed: false, settlement_pending: true });
           continue;
         }
-        await sql`UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
+        await creditReputation(sql, String(deal.id), "completion");
         notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.feedback_requested", {
           dealId: String(deal.id),
           message: "Deal auto-completed! Leave feedback via POST /api/feedback to build your reputation.",
@@ -627,7 +628,7 @@ export default async function adminRoutes(app: FastifyInstance) {
     if (deal.offer_id) {
       await sql`UPDATE offers SET status = 'archived', updated_at = NOW() WHERE id = ${deal.offer_id} AND status = 'active'`;
     }
-    await sql`UPDATE agents SET reputation_score = LEAST(COALESCE(reputation_score, 0) + 0.5, 9.999) WHERE id = ${deal.seller_agent_id}`;
+    await creditReputation(sql, body.dealId, "completion");
 
     notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.auto_completed", {
       dealId: body.dealId,

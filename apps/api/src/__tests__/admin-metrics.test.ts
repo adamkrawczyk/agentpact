@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanDatabase, createTestApp, getAuthHeadersForAgent } from "./helpers/testApp.js";
 
+const SAME_OWNER_WALLET = "0x1234567890123456789012345678901234567890";
+
 describe("Admin metrics", () => {
   const originalAdminKey = process.env.ADMIN_API_KEY;
   let buyerId: string;
@@ -17,8 +19,10 @@ describe("Admin metrics", () => {
 
     buyerId = randomUUID();
     sellerId = randomUUID();
-    const buyerHeaders = await getAuthHeadersForAgent(buyerId);
-    const sellerHeaders = await getAuthHeadersForAgent(sellerId);
+    // Buyer + seller share ONE owner wallet: the seeded completed deal below is
+    // a legacy same-owner deal (new ones are refused at propose — 403 same_owner).
+    const buyerHeaders = await getAuthHeadersForAgent(buyerId, { walletAddress: SAME_OWNER_WALLET });
+    const sellerHeaders = await getAuthHeadersForAgent(sellerId, { walletAddress: SAME_OWNER_WALLET });
 
     const offerRes = await app.inject({
       method: "POST",
@@ -156,8 +160,8 @@ describe("Admin metrics", () => {
   });
 
   it("economics: a same-owner completed deal counts as naive GMV but NOT external GMV", async () => {
-    // The default test setup registers buyer + seller with the SAME owner wallet
-    // (0x1234…7890), so the completed 120-USDC deal is a SELF-deal. Naive gmv
+    // The setup registers buyer + seller with the SAME owner wallet
+    // (SAME_OWNER_WALLET), so the completed 120-USDC deal is a SELF-deal. Naive gmv
     // must include it (120); business.externalGmv must EXCLUDE it (0).
     const { app } = await createTestApp();
 

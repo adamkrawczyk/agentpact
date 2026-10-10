@@ -16,7 +16,10 @@
  * deals never count as evidence.
  */
 
-const EVM_RE = /^0x[0-9a-fA-F]{40}$/;
+// Same acceptance as SQL `ap_wallet_key` (`~*`, case-insensitive including the
+// `0x`/`0X` prefix): a `0X…` copy of a wallet must canonicalise to the same key,
+// or the runtime same-owner guard and the view disagree (R1-11).
+const EVM_RE = /^0x[0-9a-f]{40}$/i;
 const EVM_ZERO_RE = /^0x0{40}$/i;
 const SOLANA_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const SOLANA_NULL_RE = /^1+$/;
@@ -74,3 +77,13 @@ export function isCapitalAtRisk(d: DealIntegrityInput & { funded: boolean }): bo
 /** Name of the SQL views every SQL consumer must read instead of re-deriving the rule. */
 export const DEAL_INTEGRITY_VIEW = "deal_integrity" as const;
 export const QUALIFYING_DEALS_VIEW = "qualifying_deals" as const;
+
+/**
+ * Reputation evidence = completed capital_at_risk deals whose escrowed USDC
+ * (capped at the negotiated total) is at least MIN_EVIDENCE_USDC — dust deals
+ * never build a track record (R1-07). SQL twin: ap_min_evidence_usdc() and the
+ * `reputation_evidence_deals` view (migration 054). Reputation, trust tiers and
+ * the leaderboard floor read this view.
+ */
+export const MIN_EVIDENCE_USDC = 0.01;
+export const REPUTATION_EVIDENCE_VIEW = "reputation_evidence_deals" as const;

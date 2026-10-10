@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { app, sql } from "../../index.js";
 
 const TEST_AGENT_ID = "550e8400-e29b-41d4-a716-446655440000";
@@ -28,7 +28,7 @@ export async function getAuthHeadersForAgent(agentId: string, options?: { wallet
       payload.walletAddress = options.walletAddress;
     }
   } else {
-    payload.walletAddress = "0x1234567890123456789012345678901234567890";
+    payload.walletAddress = defaultTestWallet(agentId);
   }
 
   const registerRes = await app.inject({
@@ -40,6 +40,15 @@ export async function getAuthHeadersForAgent(agentId: string, options?: { wallet
   const headers = { "x-api-key": apiKey };
   authHeadersCache.set(agentId, headers);
   return headers;
+}
+
+/**
+ * A distinct, stable owner wallet per test agent. Agents sharing one owner
+ * wallet are "same owner": paid deals between them are refused (403
+ * same_owner) and never count as evidence, so fixtures must not share one.
+ */
+export function defaultTestWallet(agentId: string): string {
+  return `0x${createHash("sha256").update(agentId).digest("hex").slice(0, 40)}`;
 }
 
 export function clearAuthHeadersCache() { authHeadersCache.clear(); }

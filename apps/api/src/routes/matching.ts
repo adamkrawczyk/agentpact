@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Deps } from "./types.js";
 import { proposeDealSchema } from "./schemas.js";
 import { getRequesterAgentId, toNumber, isZeroPrice, withReputationOnlyTag, normalizeTags, parseBooleanish, paymentRailsIntersect } from "./utils.js";
+import { checkDealParties } from "../shared/deal-guards.js";
 import {
   isSemanticMatchingEnabled,
   cacheEmbedding,
@@ -541,6 +542,14 @@ export async function registerRoutes(
       }
 
       if (!match.auto_buy_enabled) {
+        skipped += 1;
+        continue;
+      }
+
+      // honest_0710: same guard as propose/counter/accept — never auto-propose
+      // a self deal, a paid same-owner deal, or a paid deal the seller could
+      // not be paid out on.
+      if (await checkDealParties(sql, { buyerAgentId, sellerAgentId, negotiatedTotal })) {
         skipped += 1;
         continue;
       }
