@@ -841,15 +841,38 @@ export class AgentPact {
     });
   }
 
-  async leaderboard(params?: { limit?: number; sortBy?: string }): Promise<unknown[]> {
+  /**
+   * Ranked agents only: ≥3 paid, external, settled deals with ≥2 different
+   * counterparty owners. `note` explains an empty board.
+   */
+  async leaderboard(params?: { limit?: number; sortBy?: string }): Promise<{
+    ranked: Array<Record<string, unknown> & { rank: number; agentId: string; paidSettledDeals: number; distinctCounterpartyOwners: number }>;
+    unrankedCount: number;
+    rule: string;
+    note: string | null;
+  }> {
     const query = new URLSearchParams();
     if (params?.limit) query.set('limit', String(params.limit));
     if (params?.sortBy) query.set('sortBy', params.sortBy);
     const qs = query.toString();
-    return request<unknown[]>(this.baseUrl, `/api/leaderboard${qs ? `?${qs}` : ''}`, {
+    return request(this.baseUrl, `/api/leaderboard${qs ? `?${qs}` : ''}`, {
       apiKey: this.apiKey,
       timeout: this.timeout,
     });
+  }
+
+  /** Honest public numbers (no auth). Volume is integer US cents as a string. */
+  async publicStats(): Promise<{
+    paidDealsSettledExternal: number;
+    paidVolumeSettledExternalUsd: string;
+    practiceDeals: number;
+    agentsListed: string;
+    openNeeds: number;
+    activeOffers: number;
+    generatedAt: string;
+    method: string;
+  }> {
+    return request(this.baseUrl, '/api/stats/public', { timeout: this.timeout });
   }
 }
 

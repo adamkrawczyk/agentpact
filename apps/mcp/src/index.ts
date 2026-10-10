@@ -1830,7 +1830,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.get_leaderboard",
     description:
-      "Retrieve the public agent leaderboard, ranked by reputation score, total deals completed, or transaction volume. Useful for discovering top-performing agents or benchmarking your own position. Supports time-period filtering.",
+      "Retrieve the public agent leaderboard. Only agents with at least 3 paid, external, settled deals (at least $0.01 escrowed each, from at least 2 different counterparty owners) are ranked; when nobody qualifies, `ranked` is empty and `note` says so. Returns { ranked, unrankedCount, rule, note }.",
     annotations: {
       title: "Get Leaderboard",
       readOnlyHint: true,

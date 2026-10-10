@@ -49,6 +49,7 @@ import { releaseMilestonePayment as _releaseMilestonePayment } from './shared/de
 import { registerAuditWebhookRoutes } from './routes/audit-webhook.js';
 import { registerAuditOrdersRoutes } from './routes/audit-orders.js';
 import { registerVerifiedSellerWebhookRoutes } from './routes/verified-seller-webhook.js';
+import { registerPublicStatsRoutes } from './routes/public-stats.js';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -1261,6 +1262,7 @@ app.addHook("preHandler", async (request, reply) => {
     "/api/agents/online",
     "/api/fulfillment/types",
     "/api/intents/discover",
+    "/api/stats/public",
   ]);
   const prefixPublicGetRoutes = [
     "/api/offers",
@@ -1434,6 +1436,7 @@ app.addHook("preHandler", async (request, reply) => {
   await registerAuditWebhookRoutes(app, _sql);
   await registerAuditOrdersRoutes(app, _sql);
   await registerVerifiedSellerWebhookRoutes(app, _sql);
+  await registerPublicStatsRoutes(app, _sql);
 }
 
 // ── §5.1 (2026-05-21): structured error responses. Every error response

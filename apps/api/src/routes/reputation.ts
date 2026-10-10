@@ -1,7 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import type { Deps } from "./types.js";
-import { getAgentStats } from "../shared/reputation.js";
+import { listRankEligibleAgents, NO_RANKED_AGENTS_NOTE, RANKING_RULE, type RankEvidence } from "../shared/leaderboard-floor.js";
+import { EVIDENCE_BASIS, getEvidenceAggregate, getEvidenceAggregates } from "../shared/evidence-stats.js";
 
 export const NEUTRAL_REPUTATION_SCORE = 50;
 
@@ -130,70 +131,20 @@ export async function getReputationProfile(
     return null;
   }
 
-  const [stats] = await db`
-    SELECT
-      fb.review_count,
-      fb.avg_quality,
-      fb.avg_timeliness,
-      fb.avg_communication,
-      fb.avg_accuracy,
-      fb.avg_rating,
-      deals.total_deals,
-      deals.total_completed_deals,
-      deals.disputed_deals,
-      deals.seller_deals,
-      deals.seller_completed_deals,
-      resp.avg_response_time
-    FROM (SELECT ${agentId}::uuid AS agent_id) subject
-    LEFT JOIN LATERAL (
-      SELECT
-        COUNT(*)::int AS review_count,
-        AVG(rating_quality) AS avg_quality,
-        AVG(rating_timeliness) AS avg_timeliness,
-        AVG(rating_communication) AS avg_communication,
-        AVG(rating_accuracy) AS avg_accuracy,
-        AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0) AS avg_rating
-      FROM feedback
-      WHERE to_agent_id = subject.agent_id
-    ) fb ON true
-    LEFT JOIN LATERAL (
-      SELECT
-        COUNT(*)::int AS total_deals,
-        COUNT(*) FILTER (WHERE status = 'completed')::int AS total_completed_deals,
-        COUNT(*) FILTER (WHERE status = 'disputed')::int AS disputed_deals,
-        COUNT(*) FILTER (WHERE seller_agent_id = subject.agent_id)::int AS seller_deals,
-        COUNT(*) FILTER (WHERE seller_agent_id = subject.agent_id AND status = 'completed')::int AS seller_completed_deals
-      FROM deals
-      WHERE buyer_agent_id = subject.agent_id OR seller_agent_id = subject.agent_id
-    ) deals ON true
-    LEFT JOIN LATERAL (
-      SELECT
-        AVG(GREATEST(EXTRACT(EPOCH FROM (accept_event.created_at - d.created_at)) / 60.0, 0)) AS avg_response_time
-      FROM deals d
-      JOIN LATERAL (
-        SELECT created_at
-        FROM negotiation_events
-        WHERE deal_id = d.id
-          AND actor_agent_id = subject.agent_id
-          AND event_type = 'accept'
-        ORDER BY created_at ASC
-        LIMIT 1
-      ) accept_event ON true
-      WHERE d.seller_agent_id = subject.agent_id
-    ) resp ON true
-  `;
-
-  const profile = computeProfileFromStats(agentId, stats as Record<string, unknown>, computeTrustTier);
-  // Trust tiers count only capital_at_risk deals (shared/reputation.ts).
-  const evidence = await getAgentStats(db, agentId);
-  return { ...profile, trust_tier: computeTrustTier(evidence.completedDeals, evidence.reputationScore) };
+  // Evidence-only aggregates (R1-04 / R1-10): practice, self, same-owner,
+  // fleet, unfunded and dust deals never move a profile number or its tier.
+  const stats = await getEvidenceAggregate(db, agentId);
+  return computeProfileFromStats(agentId, stats as unknown as Record<string, unknown>, computeTrustTier);
 }
 
 async function listReputationLeaderboard(
   db: Sql<Record<string, unknown>>,
   computeTrustTier: Deps["computeTrustTier"],
   opts: { limit: number; category?: string | null },
-): Promise<Array<ReputationProfile & { rank: number; agent_name: string; category_match_count: number }>> {
+): Promise<{
+  ranked: Array<ReputationProfile & RankEvidence & { rank: number; agent_name: string; category_match_count: number }>;
+  unrankedCount: number;
+}> {
   // Single-query leaderboard. Previously this loaded every agent and then issued
   // one getReputationProfile round-trip PER agent via Promise.all — an unbounded
   // N+1 that fired ~1.4k concurrent queries against a 20-connection pool and
@@ -202,60 +153,17 @@ async function listReputationLeaderboard(
   // statement (LATERAL subqueries mirror getReputationProfile's stats query),
   // then score + sort + slice in JS. Ranking semantics are unchanged.
   const category = opts.category ?? null;
+  // Leaderboard floor: only agents with enough paid, external, settled
+  // evidence are ranked at all (shared/leaderboard-floor.ts), so aggregates
+  // are computed for those agents only, from evidence deals only (R1-04).
+  const eligible = await listRankEligibleAgents(db);
+  const eligibleIds = [...eligible.keys()];
   const rows = await db`
     SELECT
       a.id,
       a.display_name,
-      fb.review_count,
-      fb.avg_quality,
-      fb.avg_timeliness,
-      fb.avg_communication,
-      fb.avg_accuracy,
-      fb.avg_rating,
-      deals.total_deals,
-      deals.total_completed_deals,
-      deals.disputed_deals,
-      deals.seller_deals,
-      deals.seller_completed_deals,
-      resp.avg_response_time,
       COALESCE(cat.category_match_count, 0)::int AS category_match_count
     FROM agents a
-    LEFT JOIN LATERAL (
-      SELECT
-        COUNT(*)::int AS review_count,
-        AVG(rating_quality) AS avg_quality,
-        AVG(rating_timeliness) AS avg_timeliness,
-        AVG(rating_communication) AS avg_communication,
-        AVG(rating_accuracy) AS avg_accuracy,
-        AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0) AS avg_rating
-      FROM feedback
-      WHERE to_agent_id = a.id
-    ) fb ON true
-    LEFT JOIN LATERAL (
-      SELECT
-        COUNT(*)::int AS total_deals,
-        COUNT(*) FILTER (WHERE status = 'completed')::int AS total_completed_deals,
-        COUNT(*) FILTER (WHERE status = 'disputed')::int AS disputed_deals,
-        COUNT(*) FILTER (WHERE seller_agent_id = a.id)::int AS seller_deals,
-        COUNT(*) FILTER (WHERE seller_agent_id = a.id AND status = 'completed')::int AS seller_completed_deals
-      FROM deals
-      WHERE buyer_agent_id = a.id OR seller_agent_id = a.id
-    ) deals ON true
-    LEFT JOIN LATERAL (
-      SELECT
-        AVG(GREATEST(EXTRACT(EPOCH FROM (accept_event.created_at - d.created_at)) / 60.0, 0)) AS avg_response_time
-      FROM deals d
-      JOIN LATERAL (
-        SELECT created_at
-        FROM negotiation_events
-        WHERE deal_id = d.id
-          AND actor_agent_id = a.id
-          AND event_type = 'accept'
-        ORDER BY created_at ASC
-        LIMIT 1
-      ) accept_event ON true
-      WHERE d.seller_agent_id = a.id
-    ) resp ON true
     LEFT JOIN LATERAL (
       SELECT COUNT(*)::int AS category_match_count
       FROM offers o
@@ -264,19 +172,25 @@ async function listReputationLeaderboard(
         AND ${category}::text IS NOT NULL
         AND o.category = ${category}::text
     ) cat ON true
-    WHERE ${category}::text IS NULL
+    WHERE (${category}::text IS NULL
       OR EXISTS (
         SELECT 1
         FROM offers match_offer
         WHERE match_offer.agent_id = a.id
           AND match_offer.status = 'active'
           AND match_offer.category = ${category}::text
-      )
+      ))
   `;
+  const aggregates = await getEvidenceAggregates(db, eligibleIds);
+  const rankable = rows
+    .filter((row) => eligible.has(String(row.id)))
+    .map((row): Record<string, unknown> => ({ ...(row as Record<string, unknown>), ...aggregates.get(String(row.id)) }));
+  const unrankedCount = rows.length - rankable.length;
 
-  return rows
+  const ranked = rankable
     .map((row) => ({
-      ...computeProfileFromStats(String(row.id), row as Record<string, unknown>, computeTrustTier),
+      ...computeProfileFromStats(String(row.id), row, computeTrustTier),
+      ...(eligible.get(String(row.id)) as RankEvidence),
       agent_name: String(row.display_name),
       category_match_count: Number(row.category_match_count ?? 0),
     }))
@@ -287,6 +201,7 @@ async function listReputationLeaderboard(
       left.agent_name.localeCompare(right.agent_name))
     .slice(0, opts.limit)
     .map((profile, index) => ({ ...profile, rank: index + 1 }));
+  return { ranked, unrankedCount };
 }
 
 export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, deps: Deps): Promise<void> {
@@ -294,14 +209,14 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     const { id } = request.params as { id: string };
     const profile = await getReputationProfile(sql, deps.computeTrustTier, id);
     if (!profile) return reply.code(404).send({ error: "Agent not found" });
-    return profile;
+    return { ...profile, basis: EVIDENCE_BASIS };
   });
 
   app.get("/api/leaderboard", async (request) => {
     const q = request.query as { limit?: string; category?: string };
     const limit = Math.min(Math.max(Number(q.limit ?? 50), 1), 200);
-    const entries = await listReputationLeaderboard(sql, deps.computeTrustTier, { limit, category: q.category ?? null });
-    return entries.map((entry) => ({
+    const { ranked, unrankedCount } = await listReputationLeaderboard(sql, deps.computeTrustTier, { limit, category: q.category ?? null });
+    const entries = ranked.map((entry) => ({
       rank: entry.rank,
       agentId: entry.agent_id,
       name: entry.agent_name,
@@ -311,6 +226,15 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       completedDeals: entry.total_completed_deals,
       disputeRate: entry.dispute_rate,
       categoryMatchCount: entry.category_match_count,
+      paidSettledDeals: entry.paidSettledDeals,
+      distinctCounterpartyOwners: entry.distinctCounterpartyOwners,
     }));
+    return {
+      ranked: entries,
+      unrankedCount,
+      rule: RANKING_RULE,
+      basis: EVIDENCE_BASIS,
+      note: entries.length === 0 ? NO_RANKED_AGENTS_NOTE : null,
+    };
   });
 }
