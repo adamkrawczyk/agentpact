@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { sql } from "../db.js";
 import { completeDealMilestones } from "../shared/deal-helpers.js";
+import { walletKey } from "../shared/qualifying.js";
 import { creditReputation } from "../shared/reputation.js";
 import { notifyAgents } from "../webhooks.js";
 import { PLATFORM_FEE_PCT, requireAdminKey } from "./utils.js";
@@ -850,13 +851,27 @@ export default async function adminRoutes(app: FastifyInstance) {
     }).parse(request.body);
 
     const results: Array<{ id: string; handle: string; isInternal: boolean }> = [];
+    const unrecognizedWallets: string[] = [];
 
     if (body.walletAddresses && body.walletAddresses.length > 0) {
-      const wallets = body.walletAddresses;
-      const rows = await sql`
+      // Match by canonical owner key (ap_wallet_key — the key qualifying_deals and
+      // the economics.integrity guard group by), not raw text: a case-variant
+      // copy of a fleet EVM wallet is the same owner and must flip with it.
+      // Unknown/placeholder inputs (zero address, garbage) have a NULL key and
+      // match NOTHING — never every NULL-wallet agent, never a verbatim copy.
+      const keys: string[] = [];
+      for (const w of body.walletAddresses) {
+        const k = walletKey(w);
+        if (k === null) unrecognizedWallets.push(w);
+        else keys.push(k);
+      }
+      const rows = keys.length === 0 ? [] : await sql`
         UPDATE agents
         SET is_internal = ${body.isInternal}
-        WHERE owner_wallet_address = ANY(${wallets}::text[])
+        WHERE ap_wallet_key(owner_wallet_address) IS NOT NULL
+          AND ap_wallet_key(owner_wallet_address) = ANY(
+            SELECT ap_wallet_key(x) FROM unnest(${keys}::text[]) AS x
+          )
         RETURNING id, handle, is_internal
       `;
       results.push(...(rows as unknown as Array<{ id: string; handle: string; is_internal: boolean }>).map(r => ({
@@ -878,7 +893,7 @@ export default async function adminRoutes(app: FastifyInstance) {
       }
     }
 
-    return { ok: true, updated: results.length, agents: results };
+    return { ok: true, updated: results.length, agents: results, unrecognizedWallets };
   });
 
   // ── Real traction metrics (external agents only) ─────────────────
