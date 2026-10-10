@@ -269,7 +269,12 @@ jobs:
                NOT_ONLINE=\$(pm2 jlist | python3 -c \"import json,sys; procs=json.load(sys.stdin); bad=[p['name'] for p in procs if p['pm2_env'].get('status') != 'online']; print(','.join(bad))\")
                if [[ -n \"\$NOT_ONLINE\" ]]; then
                  echo \"DEPLOY FAILED: process(es) not online after reload: \$NOT_ONLINE\"
-                 pm2 jlist
+                 # NEVER print raw pm2 jlist here: each entry's pm2_env embeds
+                 # the full process env (DATABASE_URL, JWT_SECRET, private
+                 # keys, Stripe key...) and this repo's Actions logs are
+                 # PUBLIC. Box-side env is not a repo secret, so GitHub does
+                 # not mask it. Print name/status/restarts only.
+                 pm2 jlist | python3 -c \"import json,sys; [print(p.get('name'), (p.get('pm2_env') or {}).get('status'), 'restarts=%s' % (p.get('pm2_env') or {}).get('restart_time')) for p in json.load(sys.stdin)]\" 2>/dev/null || echo \"(pm2 status summary unavailable)\"
                  exit 1
                fi
                echo \"All pm2 apps online at $SHA\""
