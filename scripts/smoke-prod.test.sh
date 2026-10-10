@@ -46,6 +46,11 @@ class H(http.server.BaseHTTPRequestHandler):
         if mode == "garbage":
             self.send_response(200); self.end_headers(); self.wfile.write(b"not json"); return
         # ok
+        if self.path.endswith("/settlement"):
+            # The real route answers an unknown deal with its own 404 body
+            # (FRESHNESS_PROBES expects exactly 404 there).
+            self.send_response(404); self.send_header("Content-Type","application/json")
+            self.end_headers(); self.wfile.write(b'{"error":"Deal not found"}'); return
         payload = b'{"ok":true}' if self.path == "/api/health" else b'[{"id":"x"}]'
         self.send_response(200); self.send_header("Content-Type","application/json"); self.end_headers(); self.wfile.write(payload)
 
