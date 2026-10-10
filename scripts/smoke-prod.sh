@@ -60,6 +60,9 @@ PROBES=(
 # The two are distinguished by body inspection below, not by status code.
 FRESHNESS_PROBES=(
   "settlement_audit|/api/deals/00000000-0000-0000-0000-000000000000/settlement|PR#106 (2026-08-17)|404"
+  # Public, unauthenticated since #158. A build without it answers 401 (the global
+  # auth hook runs before not-found), so only the expected-code check sees it.
+  "public_stats|/api/stats/public|PR#158 (2026-10-10)|200"
 )
 
 # ── WEB freshness probes ────────────────────────────────────────────────────
@@ -178,6 +181,13 @@ if [[ "$SKIP_FRESHNESS" != "1" ]]; then
       fpass=false
       all_pass=false
       fail_summary+=("freshness:${fname} unreachable")
+    elif [[ -n "${_fexpected:-}" && "$fcode" != "$_fexpected" ]]; then
+      # A route can be absent without Fastify's not-found body (e.g. an /api/*
+      # path that a stale build still guards with 401), so the 4th column is
+      # enforced: anything but the expected code is a stale or regressed build.
+      fpass=false
+      all_pass=false
+      fail_summary+=("STALE_BUILD:${fname} (expected http ${_fexpected}, got ${fcode}; route from ${fshipped})")
     fi
 
     if [[ "$JSON_OUTPUT" == "false" ]]; then
