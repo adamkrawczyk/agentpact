@@ -3,6 +3,12 @@ import { createHmac, randomBytes } from "node:crypto";
 import { z } from "zod";
 import type postgres from "postgres";
 
+// Same shape as routes/schemas.ts `uuidParamSchema`, defined locally because
+// importing routes/schemas.js here would close an import cycle
+// (routes/schemas -> routes/utils -> webhooks). Parsed before any SQL so a junk
+// :id is a 400 VALIDATION_FAILED, not a Postgres 22P02.
+const webhookIdParamSchema = z.object({ id: z.string().uuid() });
+
 // ── Schemas ──────────────────────────────────────────────────────────
 
 const VALID_EVENTS = [
@@ -208,7 +214,7 @@ export function registerWebhookRoutes(
     const agentId = request.agentId;
     if (!agentId) return reply.code(401).send({ error: "Authentication required" });
 
-    const { id } = request.params as { id: string };
+    const { id } = webhookIdParamSchema.parse(request.params);
 
     const [deleted] = await db`
       DELETE FROM agent_webhooks
@@ -225,7 +231,7 @@ export function registerWebhookRoutes(
     const agentId = request.agentId;
     if (!agentId) return reply.code(401).send({ error: "Authentication required" });
 
-    const { id } = request.params as { id: string };
+    const { id } = webhookIdParamSchema.parse(request.params);
 
     const [webhook] = await db`
       SELECT id, url, secret
