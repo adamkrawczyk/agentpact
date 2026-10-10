@@ -5,6 +5,7 @@ import { completeDealMilestones } from "../shared/deal-helpers.js";
 import { creditReputation } from "../shared/reputation.js";
 import { notifyAgents } from "../webhooks.js";
 import { PLATFORM_FEE_PCT, requireAdminKey } from "./utils.js";
+import { funnelEventsReport, parseSince, usageReport } from "../shared/telemetry-reports.js";
 import {
   isOnChainMode,
   resolveDisputeOnChain,
@@ -31,6 +32,30 @@ export default async function adminRoutes(app: FastifyInstance) {
   // Bare conversion ratio (0..1) or null when the denominator is 0.
   function rate(fromCount: number, toCount: number): number | null {
     return fromCount > 0 ? Number((toCount / fromCount).toFixed(4)) : null;
+  }
+
+  // Point-in-time deal-state funnel (all deals, current status). Shared by
+  // /api/admin/metrics and /api/admin/funnel so the two cannot disagree.
+  async function dealStateFunnelRow() {
+    const [row] = await sql`
+      SELECT
+        COUNT(*)::int AS deal_proposals_created,
+        COUNT(*) FILTER (WHERE status IN ('accepted', 'active', 'funded', 'delivered', 'completed'))::int AS proposals_accepted,
+        COUNT(*) FILTER (
+          WHERE status IN ('funded', 'delivered', 'completed')
+             OR EXISTS (
+               SELECT 1
+               FROM milestones m
+               JOIN payment_intents pi ON pi.milestone_id = m.id
+               WHERE m.deal_id = deals.id
+                 AND pi.status IN ('funded', 'released')
+             )
+        )::int AS deals_funded,
+        COUNT(*) FILTER (WHERE status = 'completed')::int AS deals_completed,
+        COALESCE(SUM(negotiated_total) FILTER (WHERE status = 'completed'), 0)::float AS gmv
+      FROM deals
+    `;
+    return row;
   }
 
   async function getMetrics() {
@@ -82,24 +107,7 @@ export default async function adminRoutes(app: FastifyInstance) {
       LIMIT 20
     `;
 
-    const [funnelStats] = await sql`
-      SELECT
-        COUNT(*)::int AS deal_proposals_created,
-        COUNT(*) FILTER (WHERE status IN ('accepted', 'active', 'funded', 'delivered', 'completed'))::int AS proposals_accepted,
-        COUNT(*) FILTER (
-          WHERE status IN ('funded', 'delivered', 'completed')
-             OR EXISTS (
-               SELECT 1
-               FROM milestones m
-               JOIN payment_intents pi ON pi.milestone_id = m.id
-               WHERE m.deal_id = deals.id
-                 AND pi.status IN ('funded', 'released')
-             )
-        )::int AS deals_funded,
-        COUNT(*) FILTER (WHERE status = 'completed')::int AS deals_completed,
-        COALESCE(SUM(negotiated_total) FILTER (WHERE status = 'completed'), 0)::float AS gmv
-      FROM deals
-    `;
+    const funnelStats = await dealStateFunnelRow();
 
     const [auditedFeeStats] = await sql`
       SELECT COALESCE(SUM((payload_json->>'feeAmount')::numeric), 0)::float AS platform_fee_revenue
@@ -462,6 +470,32 @@ export default async function adminRoutes(app: FastifyInstance) {
     if (!requireAdminKey(request, reply)) return;
     const metrics = await getMetrics();
     return reply.type("text/html").send(renderMetricsHtml(metrics));
+  });
+
+  // ── Telemetry (honest_0710 phase D) ──────────────────────────────
+  // api_usage is written by plugins/telemetry.ts; funnel_events by the
+  // migration-055 triggers. Report SQL lives in shared/telemetry-reports.ts.
+  app.get("/api/admin/usage", async (request, reply) => {
+    if (!requireAdminKey(request, reply)) return;
+    const since = parseSince(request.query);
+    return usageReport(sql, since, app.hasDecorator("telemetry") ? app.telemetry.stats() : null);
+  });
+
+  app.get("/api/admin/funnel", async (request, reply) => {
+    if (!requireAdminKey(request, reply)) return;
+    const since = parseSince(request.query);
+    const [events, state] = await Promise.all([funnelEventsReport(sql, since), dealStateFunnelRow()]);
+    return {
+      ...events,
+      // All-time, current-status view (same numbers as /api/admin/metrics
+      // funnel) — a cross-check while funnel_events history is still short.
+      stateSnapshot: {
+        dealProposalsCreated: Number(state.deal_proposals_created ?? 0),
+        proposalsAccepted: Number(state.proposals_accepted ?? 0),
+        dealsFunded: Number(state.deals_funded ?? 0),
+        dealsCompleted: Number(state.deals_completed ?? 0),
+      },
+    };
   });
 
   app.post("/api/admin/auto-complete-timeouts", async (request, reply) => {

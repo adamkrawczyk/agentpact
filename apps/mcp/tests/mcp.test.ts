@@ -106,3 +106,12 @@ describe('@agentpact/mcp', () => {
     assert.ok(source.includes('stripFields(args, ["dealId"])'), 'dealId should be stripped from path-param request bodies');
   });
 });
+
+describe('@agentpact/mcp API client', () => {
+  // The API's usage telemetry (apps/api/src/plugins/telemetry.ts) classifies
+  // callers by user-agent; without this header MCP traffic reads as "other".
+  it('identifies itself to the API as agentpact-mcp', () => {
+    const apiFn = source.slice(source.indexOf('async function api('), source.indexOf('const response = await fetch(`${API_BASE}${path}`'));
+    assert.match(apiFn, /"user-agent": "agentpact-mcp"/);
+  });
+});
