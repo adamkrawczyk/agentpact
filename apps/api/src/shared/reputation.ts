@@ -17,7 +17,7 @@
  * deals.integrity_class, which calls the same function.
  */
 import type { Sql } from "postgres";
-import { QUALIFYING_DEALS_VIEW } from "./qualifying.js";
+import { QUALIFYING_DEALS_VIEW, REPUTATION_EVIDENCE_VIEW } from "./qualifying.js";
 
 type Db = Sql<Record<string, unknown>>;
 
@@ -58,20 +58,20 @@ export async function creditReputation(sql: Db, dealId: string, kind: Reputation
 }
 
 /**
- * The ONE trust-tier input. `completedDeals` counts completed capital_at_risk
- * deals on either side; `reputationScore` is the mean 1–5 rating the agent
- * received in feedback on such deals (0 when none).
+ * The ONE trust-tier input. `completedDeals` counts reputation-evidence deals
+ * (completed, capital_at_risk, >= MIN_EVIDENCE_USDC escrowed) on either side;
+ * `reputationScore` is the mean 1–5 rating the agent received in feedback on
+ * such deals (0 when none).
  */
 export async function getAgentStats(db: Db, agentId: string): Promise<{ completedDeals: number; reputationScore: number }> {
   const [stats] = await db`
     SELECT
-      (SELECT COUNT(*)::int FROM ${db(QUALIFYING_DEALS_VIEW)} q
-        WHERE q.capital_at_risk AND q.status = 'completed'
-          AND (q.buyer_agent_id = ${agentId} OR q.seller_agent_id = ${agentId})) AS completed_deals,
+      (SELECT COUNT(*)::int FROM ${db(REPUTATION_EVIDENCE_VIEW)} q
+        WHERE (q.buyer_agent_id = ${agentId} OR q.seller_agent_id = ${agentId})) AS completed_deals,
       COALESCE((
         SELECT AVG((f.rating_quality + f.rating_timeliness + f.rating_communication + f.rating_accuracy) / 4.0)
         FROM feedback f
-        JOIN ${db(QUALIFYING_DEALS_VIEW)} q ON q.deal_id = f.deal_id AND q.capital_at_risk
+        JOIN ${db(REPUTATION_EVIDENCE_VIEW)} q ON q.deal_id = f.deal_id
         WHERE f.to_agent_id = ${agentId}
       ), 0) AS reputation_score
   `;

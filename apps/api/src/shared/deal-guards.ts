@@ -80,3 +80,58 @@ export async function checkDealParties(
 
   return null;
 }
+
+/**
+ * The EVM address a Base escrow milestone pays out to (honest_0710 R1-02).
+ *
+ * The H guard above accepts a paid deal when the seller has EITHER a known
+ * owner wallet OR a verified default payout route, so the funding path must
+ * pay whichever of the two exists — never the raw `owner_wallet_address`,
+ * which may be the zero address. Order:
+ *   1. the owner wallet, when it is a known (non-zero, non-placeholder) EVM address;
+ *   2. the verified, unrevoked default payout route, when it is an EVM address.
+ * Returns null when neither exists: callers must refuse to fund (400), never
+ * embed a zero/placeholder address in calldata. Returned lowercased (a valid
+ * viem Address; `walletKey` canonical form).
+ */
+export async function resolveSellerPayoutAddress(sql: Db, sellerAgentId: string): Promise<string | null> {
+  const [row] = await sql`
+    SELECT
+      a.owner_wallet_address AS owner_wallet,
+      (SELECT r.address FROM agent_payout_routes r
+        WHERE r.agent_id = a.id AND r.is_default AND r.revoked_at IS NULL AND r.verified_at IS NOT NULL
+        LIMIT 1) AS route_address
+    FROM agents a WHERE a.id = ${sellerAgentId}
+  `;
+  if (!row) return null;
+  for (const candidate of [row.owner_wallet, row.route_address] as Array<string | null>) {
+    const key = walletKey(candidate);
+    if (key !== null && key.startsWith("0x")) return key;
+  }
+  return null;
+}
+
+/**
+ * Money already moved for this deal? (honest_0710 R1-03.) True when any
+ * milestone carries a payment intent (any status — even a `created` intent has
+ * funding calldata in a buyer's hands), or a settlement intent bound to the
+ * deal has left `awaiting_funding`. Re-pricing such a deal would orphan or
+ * delete the funding record, so counter / decompose must refuse it.
+ */
+export async function dealHasFunding(sql: Db, dealId: string): Promise<boolean> {
+  const [row] = await sql`
+    SELECT
+      EXISTS (SELECT 1 FROM milestones m JOIN payment_intents pi ON pi.milestone_id = m.id WHERE m.deal_id = ${dealId})
+      OR EXISTS (
+        SELECT 1 FROM intents i JOIN deals d ON d.id = ${dealId}
+        WHERE (i.id = d.intent_id OR i.deal_id = d.id) AND i.status <> 'awaiting_funding'
+      ) AS funded
+  `;
+  return Boolean(row?.funded);
+}
+
+export const DEAL_FUNDED_REJECTION = {
+  error: "This deal already has funding, so it can no longer be re-priced or split",
+  code: "deal_funded",
+  hint: "Funded deals settle as agreed. To change scope, complete or dispute this deal and propose a new one.",
+} as const;

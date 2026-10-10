@@ -59,6 +59,15 @@ describe("migration 054_reputation_recompute", () => {
   beforeAll(async () => {
     ({ sql } = await createTestApp());
     await cleanDatabase();
+    // Model the pre-054 database: no recompute triggers yet, so the fixture's
+    // inherited scores survive until the migration snapshots them. Re-applying
+    // the migration below recreates every trigger.
+    await sql.unsafe(`
+      DROP TRIGGER IF EXISTS trg_deals_recompute_seller_reputation ON deals;
+      DROP TRIGGER IF EXISTS trg_agents_recompute_counterparty_reputation ON agents;
+      DROP TRIGGER IF EXISTS trg_payment_intents_recompute_seller_reputation ON payment_intents;
+      DROP TRIGGER IF EXISTS trg_intents_recompute_seller_reputation ON intents;
+    `);
 
     ids.farmer = await mkAgent(W(7), 9.5);         // self + same-owner + free farm
     ids.farmTwin = await mkAgent(W(7), 3);
@@ -139,6 +148,16 @@ describe("migration 054_reputation_recompute", () => {
       const [r] = await sql`SELECT ap_reputation_score(${id}::uuid) AS s`;
       expect(Number(r.s)).toBe(await score(id));
     }
+  });
+
+  it("re-creates every recompute trigger", async () => {
+    const rows = await sql`SELECT tgname FROM pg_trigger WHERE tgname LIKE 'trg_%recompute%reputation' ORDER BY tgname`;
+    expect(rows.map((r) => r.tgname)).toEqual([
+      "trg_agents_recompute_counterparty_reputation",
+      "trg_deals_recompute_seller_reputation",
+      "trg_intents_recompute_seller_reputation",
+      "trg_payment_intents_recompute_seller_reputation",
+    ]);
   });
 
   it("re-applying is idempotent and never overwrites the snapshot", async () => {

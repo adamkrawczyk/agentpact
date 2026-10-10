@@ -6,7 +6,7 @@ import type { Deps } from "./types.js";
 import { proposeDealSchema, counterDealSchema, consultationResponseSchema, decomposeDealSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber, expandPaymentRails, STRIPE_RAIL_ENABLED, isPayableWalletAddress, isIntentCreationDisabled } from "./utils.js";
 import { describeDealPricing } from "../shared/pricing.js";
-import { checkDealParties } from "../shared/deal-guards.js";
+import { checkDealParties, dealHasFunding, DEAL_FUNDED_REJECTION, resolveSellerPayoutAddress } from "../shared/deal-guards.js";
 
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
   await sql`
@@ -384,10 +384,19 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       return reply.code(403).send({ error: "Not authorized to act as this agent" });
     }
 
-    const [deal] = await sql`SELECT buyer_agent_id, seller_agent_id FROM deals WHERE id = ${id}`;
+    const [deal] = await sql`SELECT buyer_agent_id, seller_agent_id, status FROM deals WHERE id = ${id}`;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
     if (body.actorAgentId !== deal.buyer_agent_id && body.actorAgentId !== deal.seller_agent_id) {
       return reply.code(403).send({ error: "Not authorized" });
+    }
+    // R1-03: a counter replaces every milestone (DELETE below cascades to
+    // payment_intents), so it is only legal while the deal is still a proposal
+    // and no money has moved. Re-checked under a row lock in the transaction.
+    if (!["proposed", "countered"].includes(String(deal.status))) {
+      return reply.code(409).send({ error: `Cannot counter deal in status '${deal.status}'`, code: "deal_not_negotiable" });
+    }
+    if (await dealHasFunding(sql, id)) {
+      return reply.code(409).send(DEAL_FUNDED_REJECTION);
     }
     const partyRejection = await checkDealParties(sql, {
       buyerAgentId: String(deal.buyer_agent_id),
@@ -402,36 +411,50 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     await enforceDealDelta(sql, id, body.negotiatedTotal);
     const isFreeTier = isZeroPrice(body.negotiatedTotal);
 
-    await sql.begin(async (txn) => {
-      await txn.unsafe("DELETE FROM milestones WHERE deal_id = $1", [id]);
-      for (const milestone of body.milestones) {
-        const dueAt = milestone.dueAt ?? null;
+    try {
+      await sql.begin(async (txn) => {
+        const [locked] = await txn.unsafe("SELECT status FROM deals WHERE id = $1 FOR UPDATE", [id]);
+        if (!locked || !["proposed", "countered"].includes(String(locked.status))
+            || await dealHasFunding(txn as unknown as typeof sql, id)) {
+          const conflict = new Error(`Deal ${id} changed concurrently — counter aborted`);
+          conflict.name = "DealCounterConflictError";
+          throw conflict;
+        }
+        await txn.unsafe("DELETE FROM milestones WHERE deal_id = $1", [id]);
+        for (const milestone of body.milestones) {
+          const dueAt = milestone.dueAt ?? null;
+          await txn.unsafe(
+            `
+              INSERT INTO milestones (deal_id, idx, title, amount, acceptance_criteria, due_at)
+              VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+            `,
+            [id, milestone.idx, milestone.title, milestone.amount, JSON.stringify(milestone.acceptanceCriteria), dueAt]
+          );
+        }
+
         await txn.unsafe(
           `
-            INSERT INTO milestones (deal_id, idx, title, amount, acceptance_criteria, due_at)
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+            UPDATE deals
+            SET status = 'countered', negotiated_total = $1, is_free_tier = $2, updated_at = NOW()
+            WHERE id = $3
           `,
-          [id, milestone.idx, milestone.title, milestone.amount, JSON.stringify(milestone.acceptanceCriteria), dueAt]
+          [body.negotiatedTotal, isFreeTier, id]
         );
+
+        await txn.unsafe(
+          `
+            INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+            VALUES ($1, $2, 'counter', $3::jsonb)
+          `,
+          [id, body.actorAgentId, JSON.stringify(body)]
+        );
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "DealCounterConflictError") {
+        return reply.code(409).send({ error: "Deal changed while countering (accepted or funded concurrently)", code: "deal_not_negotiable" });
       }
-
-      await txn.unsafe(
-        `
-          UPDATE deals
-          SET status = 'countered', negotiated_total = $1, is_free_tier = $2, updated_at = NOW()
-          WHERE id = $3
-        `,
-        [body.negotiatedTotal, isFreeTier, id]
-      );
-
-      await txn.unsafe(
-        `
-          INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-          VALUES ($1, $2, 'counter', $3::jsonb)
-        `,
-        [id, body.actorAgentId, JSON.stringify(body)]
-      );
-    });
+      throw err;
+    }
 
     return { ok: true };
   });
@@ -470,6 +493,9 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       negotiatedTotal: deal.negotiated_total as string | number | null,
     });
     if (partyRejection) return reply.code(partyRejection.status).send(partyRejection.body);
+    // R1-02: the auto-minted intent targets the seller's real payout address
+    // (owner wallet, else verified payout route) — never a zero/placeholder.
+    const sellerPayoutAddress = await resolveSellerPayoutAddress(sql, String(deal.seller_agent_id));
 
     try {
       await sql.begin(async (txn) => {
@@ -523,7 +549,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
           dealCurrency === "USDC" &&
           deal.deliverable_hash != null &&
           deal.buyer_wallet != null &&
-          deal.seller_wallet != null;
+          sellerPayoutAddress != null;
         if (eligible) {
           const hashHex = ("0x" + Buffer.from(deal.deliverable_hash as Buffer).toString("hex")) as `0x${string}`;
           // The relayer broadcasts createIntentWithAuthorization with these fields,
@@ -563,7 +589,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
               hash: hashHex,
               verifier: HASH_PREIMAGE_PREDICATE,
               params: encodedParams,
-              seller_target: deal.seller_wallet,
+              seller_target: sellerPayoutAddress,
             });
             // Class-A intents auto-expire 7 days out if never funded/claimed.
             //
@@ -995,6 +1021,11 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     }
     if (!["active", "proposed"].includes(parent.status)) {
       return reply.code(400).send({ error: `Parent deal status '${parent.status}' is not decomposable (must be active or proposed)` });
+    }
+    // R1-03: the parent's budget is already escrowed once funded — splitting it
+    // into child deals would commit the same money twice.
+    if (await dealHasFunding(sql, body.parentDealId)) {
+      return reply.code(409).send(DEAL_FUNDED_REJECTION);
     }
 
     // Validate that child totals don't exceed parent budget
