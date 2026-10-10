@@ -118,3 +118,35 @@ export async function getEvidenceAggregates(db: Db, agentIds: string[]): Promise
 export async function getEvidenceAggregate(db: Db, agentId: string): Promise<EvidenceAggregateRow> {
   return (await getEvidenceAggregates(db, [agentId])).get(agentId) as EvidenceAggregateRow;
 }
+
+// ── Paid settled external: the ONE money number (admin + public) ────────────
+
+/**
+ * Definition label shipped next to every consumer of computePaidSettledExternal().
+ * Same wording family as PUBLIC_STATS_METHOD.
+ */
+export const PAID_SETTLED_EXTERNAL_DEFINITION =
+  "qualifying_deals.capital_at_risk AND status='completed'; volume = LEAST(negotiated_total, escrowed)";
+
+export type PaidSettledExternal = {
+  deals: number;
+  /** Integer US cents as a decimal string (USDC is 1:1 USD), floored. */
+  volumeCents: string;
+};
+
+/**
+ * Completed, capital-at-risk, qualifying deals and the USDC actually escrowed
+ * for them (capped at the agreed price — R1-06). `/api/stats/public` and
+ * `/api/admin/metrics` both read this, so "external" can only mean one thing.
+ * Uncached: callers that need caching (the public route) cache around it.
+ */
+export async function computePaidSettledExternal(db: Db): Promise<PaidSettledExternal> {
+  const [row] = await db`
+    SELECT
+      count(*)::int AS deals,
+      floor(coalesce(sum(LEAST(negotiated_total, ap_deal_escrowed_usdc(deal_id))), 0) * 100)::bigint::text AS volume_cents
+    FROM ${db(QUALIFYING_DEALS_VIEW)}
+    WHERE capital_at_risk AND status = 'completed'
+  `;
+  return { deals: Number(row.deals ?? 0), volumeCents: String(row.volume_cents ?? "0") };
+}

@@ -198,7 +198,7 @@ describe("Admin metrics", () => {
     expect(body.economics.engineering.dealsCompleted).toBe(1);
   });
 
-  it("economics: a completed deal between DISTINCT external owners counts as external GMV", async () => {
+  it("economics: a FUNDED completed deal between DISTINCT external owners counts as external GMV; an unfunded one does not", async () => {
     const { app, sql } = await createTestApp();
     await cleanDatabase();
 
@@ -219,11 +219,30 @@ describe("Admin metrics", () => {
     });
     const extNeedId = (JSON.parse(needRes.body) as { id: string }).id;
 
-    await sql`
+    // Business = qualifying_deals.capital_at_risk: the 90-USDC deal is funded
+    // (released payment intent), the 30-USDC one never escrowed anything.
+    const [funded] = await sql`
       INSERT INTO deals (
         buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct
       ) VALUES (
         ${extBuyer}, ${extSeller}, ${extOfferId}, ${extNeedId}, 'completed', 90, 'USDC', 20
+      )
+      RETURNING id
+    `;
+    const [milestone] = await sql`
+      INSERT INTO milestones (deal_id, idx, title, amount, currency)
+      VALUES (${funded.id}, 1, 'm', 90, 'USDC') RETURNING id
+    `;
+    await sql`
+      INSERT INTO payment_intents (milestone_id, buyer_agent_id, seller_agent_id, amount, status, buyer_wallet_address, seller_wallet_address, platform_wallet_address)
+      VALUES (${milestone.id}, ${extBuyer}, ${extSeller}, 90, 'released',
+        '0xAAAA000000000000000000000000000000000001', '0xBBBB000000000000000000000000000000000002', '0x9999999999999999999999999999999999999999')
+    `;
+    await sql`
+      INSERT INTO deals (
+        buyer_agent_id, seller_agent_id, offer_id, need_id, status, negotiated_total, currency, max_price_delta_pct
+      ) VALUES (
+        ${extBuyer}, ${extSeller}, ${extOfferId}, ${extNeedId}, 'completed', 30, 'USDC', 20
       )
     `;
 
@@ -237,6 +256,7 @@ describe("Admin metrics", () => {
     const body = JSON.parse(response.body) as {
       economics: {
         business: { completedExternalDeals: number; externalGmv: number; externalFeeRevenue: number };
+        excluded: { qualifying_unfunded: { deals: number; negotiatedUsdc: number } };
       };
     };
 
@@ -244,6 +264,8 @@ describe("Admin metrics", () => {
     expect(body.economics.business.externalGmv).toBe(90);
     // 10% fee on real external GMV.
     expect(body.economics.business.externalFeeRevenue).toBe(9);
+    // The unfunded twin is explained, not counted.
+    expect(body.economics.excluded.qualifying_unfunded).toEqual({ deals: 1, negotiatedUsdc: 30 });
   });
 
   // ── Dead-intent-sweep SLA (issue #107) ──────────────────────────────────
