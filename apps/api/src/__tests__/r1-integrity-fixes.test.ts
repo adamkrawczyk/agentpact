@@ -11,7 +11,8 @@ import * as chain from "../chain.js";
 // RED against the pre-fix branch head (72e1b41).
 
 const ZERO = "0x" + "0".repeat(40);
-const W = (n: number) => "0x" + n.toString(16).padStart(40, "0");
+// Leading "1": a 0x000…000n fixture is a placeholder owner (migration 056), not a wallet.
+const W = (n: number) => "0x1" + n.toString(16).padStart(39, "0");
 const ADMIN_KEY = "r1-integrity-admin-key";
 
 type App = Awaited<ReturnType<typeof createTestApp>>["app"];
@@ -264,6 +265,9 @@ describe("R1-11 — one wallet canonicalisation (TS == SQL)", () => {
       "0XABCDEF0123456789ABCDEF0123456789ABCDEF01", ZERO, ZERO.replace("0x", "0X"),
       `  ${W(5)}  `, "0xAgentPactPlatformUSDC", "", "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV",
       "11111111111111111111111111111111", "0x123", "1".repeat(40),
+      // migration 056 placeholders (unknown) and the 35-zero boundary (known)
+      "0x" + "0".repeat(39) + "1", "0X" + "0".repeat(39) + "6", "0x" + "0".repeat(36) + "dEaD",
+      "0x" + "0".repeat(36) + "ffff", "0x" + "0".repeat(35) + "10000",
     ];
     for (const w of inputs) {
       const [r] = await sql`SELECT ap_wallet_key(${w}) AS k`;

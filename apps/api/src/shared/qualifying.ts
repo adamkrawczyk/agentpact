@@ -20,7 +20,10 @@
 // `0x`/`0X` prefix): a `0X…` copy of a wallet must canonicalise to the same key,
 // or the runtime same-owner guard and the view disagree (R1-11).
 const EVM_RE = /^0x[0-9a-f]{40}$/i;
-const EVM_ZERO_RE = /^0x0{40}$/i;
+// Placeholder EVM owners are unknown, not owners (migration 056): the zero
+// address, 0x…0001-style precompile/system addresses and the 0x…dEaD burn
+// address all have 36+ leading zero hex digits. No real key does.
+const EVM_PLACEHOLDER_RE = /^0x0{36}/i;
 const SOLANA_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const SOLANA_NULL_RE = /^1+$/;
 
@@ -28,7 +31,7 @@ const SOLANA_NULL_RE = /^1+$/;
 export function walletKey(wallet: string | null | undefined): string | null {
   if (wallet == null) return null;
   const w = wallet.trim();
-  if (EVM_RE.test(w)) return EVM_ZERO_RE.test(w) ? null : w.toLowerCase();
+  if (EVM_RE.test(w)) return EVM_PLACEHOLDER_RE.test(w) ? null : w.toLowerCase();
   if (SOLANA_RE.test(w)) return SOLANA_NULL_RE.test(w) ? null : w;
   return null;
 }
