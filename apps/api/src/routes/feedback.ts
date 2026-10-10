@@ -6,8 +6,10 @@ import { notifyAgents } from "../webhooks.js";
 import { getRequesterAgentId } from "./utils.js";
 import { computeTrustTier, computeRaaSScore, computeBadges } from "../shared/utils.js";
 import { TRUST_TIERS } from "./utils.js";
-import { creditReputation, getAgentStats } from "../shared/reputation.js";
+import { creditReputation } from "../shared/reputation.js";
+import { EVIDENCE_BASIS, getEvidenceAggregate, getEvidenceAggregates } from "../shared/evidence-stats.js";
 import { feedbackSchema } from "./schemas.js";
+import { listRankEligibleAgents, NO_RANKED_AGENTS_NOTE, RANKING_RULE } from "../shared/leaderboard-floor.js";
 
 export default async function feedbackRoutes(app: FastifyInstance) {
   // ── Feedback ──────────────────────────────────────────────────────
@@ -149,41 +151,42 @@ export default async function feedbackRoutes(app: FastifyInstance) {
     const limit = Math.min(Math.max(Number(q.limit ?? 50), 1), 200);
     const tierFilter = q.tier ?? null;
 
-    const rows = await sql`
+    // Leaderboard floor (shared/leaderboard-floor.ts): unranked agents are
+    // omitted from the ranking entirely.
+    const eligible = await listRankEligibleAgents(sql);
+    const eligibleIds = [...eligible.keys()];
+    const [{ total_agents: totalAgents }] = await sql`SELECT count(*)::int AS total_agents FROM agents`;
+
+    // Tier, score, ratings, counts and volume are evidence-only (R1-04):
+    // practice-deal reviews can no longer buy a tier on the public board.
+    const aggregates = await getEvidenceAggregates(sql, eligibleIds);
+    const agentRows = await sql`
       SELECT
         a.id AS agent_id,
         a.display_name AS name,
         a.created_at AS member_since,
-        COALESCE(f.avg_score, 0) AS avg_rating,
-        COALESCE(f.review_count, 0)::int AS review_count,
-        COALESCE(ds.completed_deals, 0)::int AS completed_deals,
-        COALESCE(ds.total_volume, 0) AS total_volume,
-        COALESCE(ds.disputed_deals, 0)::int AS disputed_deals,
-        COALESCE(ds.total_deals, 0)::int AS total_deals,
         COALESCE(e.endorsement_count, 0)::int AS endorsement_count
       FROM agents a
-      LEFT JOIN LATERAL (
-        SELECT
-          AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0) AS avg_score,
-          COUNT(*)::int AS review_count
-        FROM feedback WHERE to_agent_id = a.id
-      ) f ON true
-      LEFT JOIN LATERAL (
-        SELECT
-          COUNT(*) FILTER (WHERE d.status = 'completed')::int AS completed_deals,
-          COALESCE(SUM(d.negotiated_total) FILTER (WHERE d.status = 'completed'), 0) AS total_volume,
-          COUNT(*) FILTER (WHERE d.status = 'disputed')::int AS disputed_deals,
-          COUNT(*)::int AS total_deals
-        FROM deals d
-        WHERE d.buyer_agent_id = a.id OR d.seller_agent_id = a.id
-      ) ds ON true
       LEFT JOIN LATERAL (
         SELECT COUNT(*)::int AS endorsement_count
         FROM endorsements WHERE endorsed_id = a.id
       ) e ON true
+      WHERE a.id = ANY(${eligibleIds}::uuid[])
       ORDER BY a.reputation_score DESC, a.created_at ASC
       LIMIT ${limit}
     `;
+    const rows = agentRows.map((row): Record<string, unknown> => {
+      const agg = aggregates.get(String(row.agent_id));
+      return {
+        ...(row as Record<string, unknown>),
+        avg_rating: agg?.avg_rating ?? 0,
+        review_count: agg?.review_count ?? 0,
+        completed_deals: agg?.total_completed_deals ?? 0,
+        total_volume: agg?.total_volume ?? 0,
+        disputed_deals: agg?.disputed_deals ?? 0,
+        total_deals: agg?.total_deals ?? 0,
+      };
+    });
 
     const entries = rows.map((row, idx: number) => {
       const completedDeals = Number(row.completed_deals);
@@ -209,6 +212,8 @@ export default async function feedbackRoutes(app: FastifyInstance) {
         totalVolume: Number(Number(row.total_volume).toFixed(2)),
         endorsementCount: Number(row.endorsement_count),
         memberSince: row.member_since,
+        paidSettledDeals: eligible.get(String(row.agent_id))?.paidSettledDeals ?? 0,
+        distinctCounterpartyOwners: eligible.get(String(row.agent_id))?.distinctCounterpartyOwners ?? 0,
       };
     });
 
@@ -220,7 +225,13 @@ export default async function feedbackRoutes(app: FastifyInstance) {
     const filtered = tierFilter ? entries.filter(e => e.trustTier === tierFilter) : entries;
 
     return {
+      ranked: filtered,
+      // Kept for existing consumers; identical to `ranked`.
       leaderboard: filtered,
+      unrankedCount: Number(totalAgents) - eligible.size,
+      rule: RANKING_RULE,
+      basis: EVIDENCE_BASIS,
+      note: filtered.length === 0 ? NO_RANKED_AGENTS_NOTE : null,
       meta: { total: filtered.length, tierDistribution: tierDist },
     };
   });
@@ -231,23 +242,9 @@ export default async function feedbackRoutes(app: FastifyInstance) {
     const [agent] = await sql`SELECT id, display_name, created_at FROM agents WHERE id = ${agentId}`;
     if (!agent) return reply.code(404).send({ error: "Agent not found" });
 
-    const [feedbackStats] = await sql`
-      SELECT
-        COALESCE(AVG((rating_quality + rating_timeliness + rating_communication + rating_accuracy) / 4.0), 0) AS avg_rating,
-        COUNT(*)::int AS review_count
-      FROM feedback
-      WHERE to_agent_id = ${agentId}
-    `;
-
-    const [dealStats] = await sql`
-      SELECT
-        COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_deals,
-        COALESCE(SUM(negotiated_total) FILTER (WHERE status = 'completed'), 0) AS total_volume,
-        COUNT(*) FILTER (WHERE status = 'disputed')::int AS disputed_deals,
-        COUNT(*)::int AS total_deals
-      FROM deals
-      WHERE buyer_agent_id = ${agentId} OR seller_agent_id = ${agentId}
-    `;
+    // Evidence-only (R1-10): the counts shown next to the tier are the same
+    // deals the tier is computed from, never practice/self/fleet/dust deals.
+    const agg = await getEvidenceAggregate(sql, agentId);
 
     const [endorseStats] = await sql`
       SELECT COUNT(*)::int AS endorsement_count
@@ -255,21 +252,19 @@ export default async function feedbackRoutes(app: FastifyInstance) {
       WHERE endorsed_id = ${agentId}
     `;
 
-    const completedDeals = Number(dealStats.completed_deals);
-    const avgRating = Number(feedbackStats.avg_rating);
-    const totalVolume = Number(Number(dealStats.total_volume).toFixed(2));
-    const reviewCount = Number(feedbackStats.review_count);
-    const disputedDeals = Number(dealStats.disputed_deals);
-    const totalDeals = Number(dealStats.total_deals);
+    const completedDeals = agg.total_completed_deals;
+    const avgRating = agg.avg_rating ?? 0;
+    const totalVolume = Number(agg.total_volume.toFixed(2));
+    const reviewCount = agg.review_count;
+    const disputedDeals = agg.disputed_deals;
+    const totalDeals = agg.total_deals;
     const endorsementCount = Number(endorseStats.endorsement_count);
     const memberSinceMs = new Date(agent.created_at as string).getTime();
 
     const { score, breakdown } = computeRaaSScore(
       completedDeals, avgRating, totalDeals, disputedDeals, memberSinceMs,
     );
-    // Trust tiers count only capital_at_risk deals (shared/reputation.ts).
-    const evidence = await getAgentStats(sql, agentId);
-    const trustTier = computeTrustTier(evidence.completedDeals, evidence.reputationScore);
+    const trustTier = computeTrustTier(completedDeals, avgRating);
     const badges = computeBadges({
       completedDeals, totalVolume, disputedDeals, totalDeals, reviewCount, memberSinceMs, endorsementCount,
     });
@@ -299,6 +294,7 @@ export default async function feedbackRoutes(app: FastifyInstance) {
       },
       scoreBreakdown: breakdown,
       badges,
+      basis: EVIDENCE_BASIS,
     };
   });
 
@@ -308,24 +304,16 @@ export default async function feedbackRoutes(app: FastifyInstance) {
     const [agent] = await sql`SELECT id, display_name, created_at FROM agents WHERE id = ${agentId}`;
     if (!agent) return reply.code(404).send({ error: "Agent not found" });
 
-    const [dealStats] = await sql`
-      SELECT
-        COUNT(*) FILTER (WHERE status = 'disputed')::int AS disputed_deals,
-        COUNT(*)::int AS total_deals
-      FROM deals
-      WHERE buyer_agent_id = ${agentId} OR seller_agent_id = ${agentId}
-    `;
-
-    // A signed attestation is evidence: deals and ratings count only when the
-    // deal was capital_at_risk (shared/reputation.ts).
-    const evidence = await getAgentStats(sql, agentId);
-    const completedDeals = evidence.completedDeals;
-    const avgRating = evidence.reputationScore;
+    // A signed attestation is evidence: every input is evidence-only, the
+    // same aggregates as the profile (shared/evidence-stats.ts).
+    const agg = await getEvidenceAggregate(sql, agentId);
+    const completedDeals = agg.total_completed_deals;
+    const avgRating = agg.avg_rating ?? 0;
     const { score } = computeRaaSScore(
       completedDeals,
       avgRating,
-      Number(dealStats.total_deals),
-      Number(dealStats.disputed_deals),
+      agg.total_deals,
+      agg.disputed_deals,
       new Date(agent.created_at as string).getTime(),
     );
     const trustTier = computeTrustTier(completedDeals, avgRating);
