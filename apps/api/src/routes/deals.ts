@@ -3,7 +3,7 @@ import type { Sql } from "postgres";
 import { z } from "zod";
 import { encodeAbiParameters } from "viem";
 import type { Deps } from "./types.js";
-import { proposeDealSchema, counterDealSchema, consultationResponseSchema, decomposeDealSchema } from "./schemas.js";
+import { proposeDealSchema, counterDealSchema, consultationResponseSchema, decomposeDealSchema, uuidParamSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber, expandPaymentRails, STRIPE_RAIL_ENABLED, isPayableWalletAddress, isIntentCreationDisabled } from "./utils.js";
 import { describeDealPricing } from "../shared/pricing.js";
 import { checkDealParties, dealHasFunding, dealHoldsFunds, type DbOrTxn, dealNotFundable, CANCEL_REJECTIONS, DEAL_FUNDED_REJECTION, resolveSellerPayoutAddress } from "../shared/deal-guards.js";
@@ -458,7 +458,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/deals/:id/counter", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const requestBody = request.body && typeof request.body === "object" ? request.body : {};
     const body = counterDealSchema.parse({ ...requestBody, dealId: id });
     const requesterAgentId = getRequesterAgentId(request, reply);
@@ -543,7 +543,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/deals/:id/accept", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = z.object({ actorAgentId: z.string().uuid() }).parse(request.body);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
@@ -730,7 +730,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   // 'queued' row and broadcasts createIntentWithAuthorization on EscrowV3,
   // pulling the buyer's USDC into escrow with zero buyer-side gas.
   app.post("/api/deals/:id/funding-authorization", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = z
       .object({
         actorAgentId: z.string().uuid().optional(),
@@ -840,7 +840,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   //     provider BEFORE the transaction; if Stripe says money moved → 409.
   // R3  fail closed: any error rolls the whole transaction back.
   app.post("/api/deals/:id/cancel", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = z.object({ actorAgentId: z.string().uuid(), reason: z.string().optional() }).parse(request.body);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
@@ -1045,7 +1045,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.get("/api/deals/:id", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     await maybeAutoCompleteConsultationDeal(sql, deps, id);
     const [deal] = await sql`SELECT * FROM deals WHERE id = ${id}`;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
@@ -1073,7 +1073,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   // Reputation grading (rank-8 candidate: agents who rush vs. agents who ghost)
   // can now query ONE endpoint instead of reconstructing this from three tables.
   app.get("/api/deals/:id/settlement", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const [deal] = await sql`SELECT id, status, buyer_agent_id, seller_agent_id, created_at, updated_at FROM deals WHERE id = ${id}`;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
 
@@ -1148,7 +1148,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.post("/api/deals/:id/consultation-response", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const body = consultationResponseSchema.parse(request.body);
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
@@ -1200,7 +1200,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   });
 
   app.get("/api/deals/:id/consultation-responses", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const query = z.object({ agentId: z.string().uuid() }).parse(request.query ?? {});
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;

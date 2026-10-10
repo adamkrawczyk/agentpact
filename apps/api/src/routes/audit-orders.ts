@@ -11,6 +11,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Sql } from "postgres";
 import { z } from "zod";
+import { uuidParamSchema } from "./schemas.js";
 import { constructWebhookEvent as _unused } from "../stripe.js"; // ensure stripe module loads
 import Stripe from "stripe";
 import { sendEmail, buildAuditEmailBody } from "../services/email.js";
@@ -113,7 +114,7 @@ export async function registerAuditOrdersRoutes(
   app.patch("/api/audit/orders/:id/claim", async (request, reply) => {
     if (!requireAdminKey(request.headers as Record<string, string | string[] | undefined>, reply)) return;
 
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
 
     const [existing] = await sql`SELECT id, status FROM audit_orders WHERE id = ${id}`;
     if (!existing) {
@@ -138,7 +139,7 @@ export async function registerAuditOrdersRoutes(
   app.post("/api/audit/orders/:id/report", async (request, reply) => {
     if (!requireAdminKey(request.headers as Record<string, string | string[] | undefined>, reply)) return;
 
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
 
     let body: z.infer<typeof reportBodySchema>;
     try {
@@ -272,7 +273,7 @@ export async function registerAuditOrdersRoutes(
   app.post("/api/audit/orders/:id/refund", async (request, reply) => {
     if (!requireAdminKey(request.headers as Record<string, string | string[] | undefined>, reply)) return;
 
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
 
     let body: z.infer<typeof refundBodySchema> = {};
     try {

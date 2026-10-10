@@ -8,7 +8,7 @@ import { computeTrustTier, computeRaaSScore, computeBadges } from "../shared/uti
 import { TRUST_TIERS } from "./utils.js";
 import { creditReputation } from "../shared/reputation.js";
 import { EVIDENCE_BASIS, getEvidenceAggregate, getEvidenceAggregates } from "../shared/evidence-stats.js";
-import { feedbackSchema } from "./schemas.js";
+import { feedbackSchema, agentIdPathParamSchema } from "./schemas.js";
 import { listRankEligibleAgents, NO_RANKED_AGENTS_NOTE, RANKING_RULE } from "../shared/leaderboard-floor.js";
 
 export default async function feedbackRoutes(app: FastifyInstance) {
@@ -237,7 +237,7 @@ export default async function feedbackRoutes(app: FastifyInstance) {
   });
 
   app.get("/api/reputation/:agentId", async (request, reply) => {
-    const { agentId } = request.params as { agentId: string };
+    const { agentId } = agentIdPathParamSchema.parse(request.params);
 
     const [agent] = await sql`SELECT id, display_name, created_at FROM agents WHERE id = ${agentId}`;
     if (!agent) return reply.code(404).send({ error: "Agent not found" });
@@ -299,7 +299,7 @@ export default async function feedbackRoutes(app: FastifyInstance) {
   });
 
   app.get("/api/reputation/:agentId/attestation", async (request, reply) => {
-    const { agentId } = request.params as { agentId: string };
+    const { agentId } = agentIdPathParamSchema.parse(request.params);
 
     const [agent] = await sql`SELECT id, display_name, created_at FROM agents WHERE id = ${agentId}`;
     if (!agent) return reply.code(404).send({ error: "Agent not found" });
@@ -343,7 +343,7 @@ export default async function feedbackRoutes(app: FastifyInstance) {
   });
 
   app.post("/api/reputation/:agentId/endorse", async (request, reply) => {
-    const { agentId } = request.params as { agentId: string };
+    const { agentId } = agentIdPathParamSchema.parse(request.params);
     const body = z.object({
       skillTag: z.string().min(2).max(64),
       message: z.string().max(500).optional(),

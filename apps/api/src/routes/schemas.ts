@@ -295,6 +295,19 @@ export const agentIdParamSchema = z.object({
   id: z.string().uuid(),
 });
 
+// Shared path-param schemas for every `/:id` route whose id is a uuid column.
+// Parse with these BEFORE any SQL or body validation: a junk id then fails as
+// a 400 VALIDATION_FAILED (issue path ["id"]) through the global error handler,
+// instead of reaching Postgres and coming back as a 22P02 DB_DATA_EXCEPTION
+// that echoes the driver message.
+export const uuidParamSchema = z.object({
+  id: z.string().uuid(),
+});
+
+export const agentIdPathParamSchema = z.object({
+  agentId: z.string().uuid(),
+});
+
 export const listChallengesQuerySchema = z.object({
   category: z.string().min(2).optional(),
 });
