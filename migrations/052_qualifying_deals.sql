@@ -26,6 +26,8 @@ CREATE INDEX IF NOT EXISTS idx_deals_integrity_class
 -- Canonical wallet key. NULL means "unknown" (missing, zero address, Solana
 -- system program, or a non-address placeholder such as a config default).
 -- EVM addresses compare case-insensitively; Solana base58 is case-sensitive.
+-- Superseded by 056_wallet_key_placeholders.sql (36+ leading zero hex digits
+-- = placeholder = unknown); this file keeps its original body for history.
 CREATE OR REPLACE FUNCTION ap_wallet_key(w TEXT) RETURNS TEXT
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
   SELECT CASE
