@@ -1037,10 +1037,16 @@ async function completeDealMilestones(
 ): Promise<{ mode: "simulation" | "on-chain"; action: "released" | "buyer_sign_required" | "completed_without_onchain_release" | "settlement_pending"; txData?: Array<{ milestoneId: string; to: string; data: string; value: string; description: string }>; onChainReleaseResults?: Array<{ milestoneId: string; txHash?: string; error?: string }> }> {
   const mode = isOnChainMode() ? "on-chain" : "simulation";
   const [deal] = await sql`
-    SELECT is_free_tier
+    SELECT is_free_tier, status
     FROM deals
     WHERE id = ${dealId}
   `;
+  // cancel-refund-guard §4.7 (twin of shared/deal-helpers.ts): never complete —
+  // or release money on — a cancelled deal. Refused before any chain call or write.
+  if (deal?.status === "cancelled") {
+    console.warn(`[completeDealMilestones] deal ${dealId} is cancelled — refusing to release or complete it.`);
+    return { mode, action: "settlement_pending" };
+  }
   const skipPaymentRelease = opts.skipPaymentRelease ?? Boolean(deal?.is_free_tier);
   const milestones = await sql`
     SELECT id
@@ -1054,15 +1060,17 @@ async function completeDealMilestones(
   }
 
   if (skipPaymentRelease) {
-    await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-    await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
+    await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId} AND status <> 'cancelled'`;
+    await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'
+      AND EXISTS (SELECT 1 FROM deals WHERE id = ${dealId} AND status <> 'cancelled')`;
     return { mode, action: "released" };
   }
 
   if (mode === "on-chain") {
     if (opts.skipOnChainRelease) {
-      await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-      await sql`UPDATE milestones SET status = 'accepted' WHERE deal_id = ${dealId} AND status != 'accepted'`;
+      await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId} AND status <> 'cancelled'`;
+      await sql`UPDATE milestones SET status = 'accepted' WHERE deal_id = ${dealId} AND status != 'accepted'
+      AND EXISTS (SELECT 1 FROM deals WHERE id = ${dealId} AND status <> 'cancelled')`;
       return { mode, action: "completed_without_onchain_release" };
     }
 
@@ -1104,8 +1112,9 @@ async function completeDealMilestones(
 
       if (allReleased) {
         // Happy path — converge DB state.
-        await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId}`;
-        await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
+        await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId} AND status <> 'cancelled'`;
+        await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'
+      AND EXISTS (SELECT 1 FROM deals WHERE id = ${dealId} AND status <> 'cancelled')`;
         await sql`UPDATE payment_intents SET status = 'released', released_at = NOW(), updated_at = NOW() WHERE milestone_id = ANY(${milestones.map(m => String(m.id))}) AND status = 'funded'`;
 
         return {
@@ -1120,7 +1129,7 @@ async function completeDealMilestones(
         `[completeDealMilestones] On-chain release deferred for deal ${dealId}: ${releaseResults.filter(r => !r.txHash).length}/${releaseResults.length} milestones failed on-chain. DB state held at release_pending_chain.`,
       );
 
-      await sql`UPDATE deals SET status = 'release_pending_chain', updated_at = NOW() WHERE id = ${dealId}`;
+      await sql`UPDATE deals SET status = 'release_pending_chain', updated_at = NOW() WHERE id = ${dealId} AND status <> 'cancelled'`;
 
       try {
         await sql`
@@ -1200,7 +1209,7 @@ async function completeDealMilestones(
       console.warn(
         `[completeDealMilestones] settlement_pending: fee-bearing deal ${dealId} has ${unbacked.n} milestone(s) with no real-money funded intent in on-chain mode. Holding at 'delivered' (no phantom complete, no fake fee). Milestones stay fundable.`,
       );
-      await sql`UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
+      await sql`UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId} AND status NOT IN ('completed', 'cancelled')`;
       return { mode, action: "settlement_pending" };
     }
   }
@@ -1226,15 +1235,16 @@ async function completeDealMilestones(
     console.warn(
       `[completeDealMilestones] settlement_pending: deal ${dealId} had a milestone refuse release (buyer_sign_required or not_released) in the fall-through tail. Holding, not force-completing.`,
     );
-    await sql`UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
+    await sql`UPDATE deals SET status = 'delivered', updated_at = NOW() WHERE id = ${dealId} AND status NOT IN ('completed', 'cancelled')`;
     return { mode, action: "settlement_pending" };
   }
 
   // Ensure deal and milestones are always transitioned to completed/accepted,
   // even when no funded payment_intent exists (e.g. intent never created or already
   // released upstream). Without this explicit UPDATE the deal stays stuck at 'delivered'.
-  await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId} AND status != 'completed'`;
-  await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'`;
+  await sql`UPDATE deals SET status = 'completed', updated_at = NOW() WHERE id = ${dealId} AND status NOT IN ('completed', 'cancelled')`;
+  await sql`UPDATE milestones SET status = 'accepted', accepted_at = NOW() WHERE deal_id = ${dealId} AND status != 'accepted'
+      AND EXISTS (SELECT 1 FROM deals WHERE id = ${dealId} AND status <> 'cancelled')`;
 
   return { mode, action: "released" };
 }

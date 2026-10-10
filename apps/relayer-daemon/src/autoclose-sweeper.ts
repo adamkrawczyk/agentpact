@@ -67,6 +67,8 @@ async function fundPhase(
   //   • joined to a 'queued' funding authorization
   //   • the buyer agent has autoclose_enabled = true
   //   • max_price_usdc within the relayer spend cap
+  //   • the linked deal is still 'active' — never pull a buyer's USDC into
+  //     escrow for a cancelled or settled deal (cancel-refund-guard §4.4)
   const rows = await sql<FundRow>`
     SELECT
       i.id                        AS intent_id,
@@ -91,6 +93,7 @@ async function fundPhase(
     FROM intents i
     JOIN agents a ON a.id = i.buyer_agent_id
     JOIN intent_funding_authorizations ifa ON ifa.intent_id = i.id
+    JOIN deals d ON d.id = i.deal_id AND d.status = 'active'
     WHERE i.status = 'awaiting_funding'
       AND i.on_chain_id IS NULL
       AND ifa.status = 'queued'
@@ -103,6 +106,22 @@ async function fundPhase(
   const result: SweeperResult = { scanned: rows.length, acted: 0, failed: [] };
 
   for (const row of rows) {
+    // Claim the row BEFORE broadcasting (cancel-refund-guard §4.4). Deal cancel
+    // closes 'awaiting_funding' intents under the deal row lock and treats
+    // 'funding_in_flight' as money held, so exactly one side wins: either
+    // cancel closed the intent (0 rows here → skip, no chain call) or this
+    // claim landed first and cancel answers 409 deal_funded.
+    const claimed = await sql<{ id: string }>`
+      UPDATE intents
+      SET status = 'funding_in_flight',
+          updated_at = NOW()
+      WHERE id = ${row.intent_id}
+        AND status = 'awaiting_funding'
+        AND EXISTS (SELECT 1 FROM deals d WHERE d.id = intents.deal_id AND d.status = 'active')
+      RETURNING id
+    `;
+    if (claimed.length === 0) continue;
+
     try {
       const maxPrice = parseUsdc(row.max_price_usdc);
       const value = parseUsdc(row.value_usdc);
@@ -132,7 +151,7 @@ async function fundPhase(
             on_chain_funding_tx = ${txHash},
             updated_at = NOW()
         WHERE id = ${row.intent_id}
-          AND status = 'awaiting_funding'
+          AND status = 'funding_in_flight'
       `;
 
       // Mark the authorization consumed so it can't be replayed.
@@ -147,11 +166,33 @@ async function fundPhase(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // Benign: a duplicate intent means someone else (or a prior sweeper run)
-      // already funded this intent. Skip, don't fail.
+      // already funded this intent. Skip, don't fail. The intent stays
+      // 'funding_in_flight' (money IS on chain) until reconciled.
       if (/dup intent|already funded|intent already exists/i.test(msg)) {
         continue;
       }
-      result.failed.push({ intentId: row.intent_id, error: msg });
+      // A revert moved no money (simulation revert before broadcast, or a
+      // mined revert that undid the transfer): release the claim so the next
+      // sweep retries. Anything else (timeout, lost receipt, missing event)
+      // may have mined — keep 'funding_in_flight' so cancel stays refused.
+      if (/execution reverted|reverted/i.test(msg)) {
+        await sql`
+          UPDATE intents
+          SET status = 'awaiting_funding',
+              updated_at = NOW()
+          WHERE id = ${row.intent_id}
+            AND status = 'funding_in_flight'
+        `;
+        result.failed.push({ intentId: row.intent_id, error: msg });
+        continue;
+      }
+      // No reconciler exists yet (cancel-refund-guard spec §6.1): name the
+      // stuck state so the failure report tells an operator what to repair.
+      result.failed.push({
+        intentId: row.intent_id,
+        error: `${msg} [intent left in funding_in_flight — may have mined; needs chain reconciliation before it can open or be released]`,
+      });
+      continue;
     }
   }
 
@@ -178,8 +219,12 @@ async function claimPhase(
       COALESCE(ir.ciphertext, ''::bytea) AS ciphertext
     FROM intents i
     JOIN intent_reveals ir ON ir.intent_id = i.id
+    LEFT JOIN deals d ON d.id = i.deal_id
     WHERE i.status = 'reveal_ready'
       AND i.on_chain_id IS NOT NULL
+      -- never pay a seller against a cancelled deal (cancel-refund-guard §4.5);
+      -- standalone intents (no deal) are unaffected
+      AND (d.id IS NULL OR d.status <> 'cancelled')
     ORDER BY i.updated_at ASC
     LIMIT 50
   `;

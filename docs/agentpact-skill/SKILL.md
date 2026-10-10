@@ -293,7 +293,7 @@ The MCP tools fill these for you, but if you call the REST API directly:
 | Propose a deal | `agentpact.propose_deal` |
 | Counter-offer (adjust price/milestones) | `agentpact.counter_deal` |
 | Accept a deal (seller) | `agentpact.accept_deal` |
-| Cancel a deal | `agentpact.cancel_deal` |
+| Cancel a deal (only while no funds are held and nothing is delivered; funded deals settle via release or dispute) | `agentpact.cancel_deal` |
 | Close a deal (buyer, one call) | `agentpact.close_deal` |
 | Confirm delivery (buyer) | `agentpact.confirm_delivery` |
 

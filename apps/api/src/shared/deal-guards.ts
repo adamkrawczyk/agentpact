@@ -13,10 +13,12 @@
  * canonicalisation the qualifying_deals view uses (EVM case-insensitive,
  * zero/placeholder addresses = unknown).
  */
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import { walletKey } from "./qualifying.js";
 
 type Db = Sql<Record<string, unknown>>;
+/** A pooled client or an open transaction — guards that must run inside the caller's transaction take either. */
+export type DbOrTxn = Db | TransactionSql<Record<string, unknown>>;
 
 export interface DealGuardRejection {
   status: 403 | 409;
@@ -135,3 +137,89 @@ export const DEAL_FUNDED_REJECTION = {
   code: "deal_funded",
   hint: "Funded deals settle as agreed. To change scope, complete or dispute this deal and propose a new one.",
 } as const;
+
+/**
+ * HELD — money for deal `d` currently sits in escrow or with the platform
+ * (cancel-refund-guard spec §2). Deliberately NARROWER than dealHasFunding:
+ * a `created` / `failed` payment intent or an unbroadcast `awaiting_funding`
+ * intent holds no money. Written against the alias `d` (a `deals` row) so the
+ * per-deal guard and the global "no cancelled deal holds funds" invariant
+ * evaluate the exact same predicate.
+ *
+ *  - a milestone payment intent in funded / pending_funding / pending_refund / disputed
+ *  - a linked V3 intent the relayer is broadcasting (`funding_in_flight`)
+ *  - a linked V3 intent with an on-chain id that has not been claimed,
+ *    cancelled or refunded — `expired` included: the DB may say expired while
+ *    the chain still holds the USDC until refundExpiredIntent runs
+ *  - an MPP receipt, or the MPP-only deal status `funded`
+ */
+export const DEAL_HOLDS_FUNDS_PREDICATE = `(
+  d.status = 'funded'
+  OR d.mpp_receipt IS NOT NULL
+  OR EXISTS (
+    SELECT 1 FROM milestones m JOIN payment_intents pi ON pi.milestone_id = m.id
+    WHERE m.deal_id = d.id
+      AND pi.status IN ('funded', 'pending_funding', 'pending_refund', 'disputed')
+  )
+  OR EXISTS (
+    SELECT 1 FROM intents i
+    WHERE (i.id = d.intent_id OR i.deal_id = d.id)
+      AND (
+        i.status = 'funding_in_flight'
+        OR (i.on_chain_id IS NOT NULL
+            AND i.status NOT IN ('claimed', 'claimed_a', 'stream_cancelled', 'cancelled', 'refunded'))
+      )
+  )
+)`;
+
+/** Is money held for this deal right now? (HELD, spec §2.) */
+export async function dealHoldsFunds(db: DbOrTxn, dealId: string): Promise<boolean> {
+  const [row] = await db.unsafe(
+    `SELECT ${DEAL_HOLDS_FUNDS_PREDICATE} AS held FROM deals d WHERE d.id = $1`,
+    [dealId],
+  );
+  return Boolean(row?.held);
+}
+
+/** Global invariant: cancelled deals that still hold money. Must always be 0. */
+export async function cancelledDealsHoldingFunds(db: DbOrTxn): Promise<string[]> {
+  const rows = await db.unsafe(
+    `SELECT d.id FROM deals d WHERE d.status = 'cancelled' AND ${DEAL_HOLDS_FUNDS_PREDICATE}`,
+  );
+  return rows.map((r) => String(r.id));
+}
+
+export type CancelRejectionCode = "deal_funded" | "deal_delivered" | "deal_disputed" | "deal_not_cancellable";
+
+/** 409 bodies for POST /api/deals/:id/cancel (spec §3.4). */
+export const CANCEL_REJECTIONS: Record<CancelRejectionCode, { error: string; code: CancelRejectionCode; hint: string }> = {
+  deal_funded: {
+    error: "Funds are held for this deal, so it cannot be cancelled",
+    code: "deal_funded",
+    hint: "Funds are held for this deal. Release them by accepting delivery, or open a dispute (POST /api/disputes/open); refunds are adjudicated. This applies to buyer and seller alike.",
+  },
+  deal_delivered: {
+    error: "Work was delivered for this deal, so it cannot be cancelled",
+    code: "deal_delivered",
+    hint: "Work was delivered. Accept or reject it via /api/deliveries/verify, or open a dispute.",
+  },
+  deal_disputed: {
+    error: "A dispute is open on this deal, so it cannot be cancelled",
+    code: "deal_disputed",
+    hint: "A dispute is open; it settles through adjudication.",
+  },
+  deal_not_cancellable: {
+    error: "This deal is already settled and cannot be cancelled",
+    code: "deal_not_cancellable",
+    hint: "Completed deals are final.",
+  },
+};
+
+/** 409 body when a funding path is used on a deal that can no longer take money. */
+export function dealNotFundable(dealStatus: string) {
+  return {
+    error: `Deal status ${dealStatus} cannot be funded`,
+    code: "deal_not_fundable" as const,
+    hint: "This deal cannot take new money in its current status. A cancelled or settled deal never does; refresh the deal before retrying.",
+  };
+}

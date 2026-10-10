@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { Sql } from "postgres";
+import type { Row, Sql } from "postgres";
 import { z } from "zod";
 import { Request as MppRequest } from "mppx/server";
 import type { Hex, Address } from "viem";
 import type { Deps } from "./types.js";
 import { createPaymentIntentSchema, confirmFundingSchema } from "./schemas.js";
-import { resolveSellerPayoutAddress } from "../shared/deal-guards.js";
+import { dealNotFundable, resolveSellerPayoutAddress } from "../shared/deal-guards.js";
 import { getRequesterAgentId, idempotencyKey, isZeroPrice, PLATFORM_FEE_PCT, PLATFORM_WALLET, toNumber, sendFetchResponse, isPayableWalletAddress } from "./utils.js";
 import {
   isOnChainMode,
@@ -24,10 +24,40 @@ import {
 } from "../chain.js";
 import {
   createPaymentIntent as stripeCreatePaymentIntent,
+  cancelPaymentIntent as stripeCancelPaymentIntent,
   constructWebhookEvent,
   isStripeEnabled,
 } from "../stripe.js";
 import { chargeDeal, getAvailableDealPaymentMethods, getMppConfigurationError, type DealPaymentMethod } from "../mpp.js";
+
+// cancel-refund-guard §4.1: deals that must never take new money on confirm-funding.
+const NOT_FUNDABLE_DEAL_STATUSES = new Set(["cancelled", "completed", "release_pending_chain"]);
+
+// cancel-refund-guard §4.2: deals create-intent may fund. The spec says
+// 'active' only; 'delivered' is kept because completeDealMilestones holds an
+// unbacked paid deal at 'delivered' (settlement_pending) and documents it as
+// "recoverable by funding then re-closing". A delivered deal can never be
+// party-cancelled (409 deal_delivered), so this does not weaken the guard.
+const FUNDABLE_DEAL_STATUSES = new Set(["active", "delivered"]);
+
+/**
+ * Insert a payment intent only while the deal is still fundable, under the
+ * deal row lock (cancel-refund-guard §4.2). Serialises with deal cancel, so a
+ * fundable row can never appear on a deal that cancel already closed.
+ * Returns null when the deal is no longer fundable.
+ */
+async function insertIntentIfDealActive(
+  sql: Sql<Record<string, unknown>>,
+  dealId: string,
+  insert: (txn: Sql<Record<string, unknown>>) => Promise<Row[]>,
+): Promise<Row | null> {
+  return sql.begin(async (txn) => {
+    const [locked] = await txn`SELECT status FROM deals WHERE id = ${dealId} FOR UPDATE`;
+    if (!FUNDABLE_DEAL_STATUSES.has(String(locked?.status))) return null;
+    const [row] = await insert(txn as unknown as Sql<Record<string, unknown>>);
+    return row ?? null;
+  }) as Promise<Row | null>;
+}
 
 function getDealPaymentMethodFromReceipt(method: string): DealPaymentMethod {
   return method === "tempo" ? "mpp-crypto" : "mpp-fiat";
@@ -50,6 +80,27 @@ export async function registerRoutes(
     `;
   }
 
+  /**
+   * confirm-funding refused because the deal can no longer take money. On-chain
+   * the money may already be in escrow (legacy calldata cannot be revoked), so
+   * leave a durable, operator-visible trace: audit row + error log.
+   */
+  async function recordRefusedFunding(
+    intent: Row,
+    dealStatus: string,
+    txHash: string,
+    idem: string,
+    verifiedOnChain: boolean | null,
+  ) {
+    app.log.error(
+      { paymentIntentId: intent.id, dealStatus, txHash, verifiedOnChain },
+      "confirm-funding refused on a non-fundable deal — escrowed funds may need an operator refund",
+    );
+    await audit(intent.buyer_agent_id, "payment.confirm_funding.refused", "payment_intent", intent.id, idem, {
+      txHash, dealStatus, verifiedOnChain,
+    });
+  }
+
   app.post("/api/payments/create-intent", async (request, reply) => {
     const idem = idempotencyKey(request.headers as Record<string, unknown>);
     const body = createPaymentIntentSchema.parse(request.body);
@@ -70,6 +121,10 @@ export async function registerRoutes(
     if (!milestone) return reply.code(404).send({ error: "Milestone not found" });
     if (milestone.buyer_agent_id !== requesterAgentId) {
       return reply.code(403).send({ error: "Not authorized" });
+    }
+    // cancel-refund-guard §4.2: a cancelled / proposed / settled deal is never funded.
+    if (!FUNDABLE_DEAL_STATUSES.has(String(milestone.deal_status))) {
+      return reply.code(409).send(dealNotFundable(String(milestone.deal_status)));
     }
     if (!["in_progress", "pending"].includes(milestone.status)) {
       return reply.code(400).send({ error: `Milestone status ${milestone.status} cannot be funded` });
@@ -105,20 +160,40 @@ export async function registerRoutes(
         return reply.code(502).send({ error: `Stripe payment intent creation failed: ${message}` });
       }
 
-      const [intent] = await sql`
-        INSERT INTO payment_intents (
-          milestone_id, buyer_agent_id, seller_agent_id, amount, currency, chain, status,
-          buyer_wallet_provider, buyer_wallet_address, seller_wallet_address, platform_wallet_address,
-          payment_provider, stripe_payment_intent_id, stripe_client_secret, fiat_currency, fiat_amount_cents
-        ) VALUES (
-          ${body.milestoneId}, ${body.buyerAgentId}, ${milestone.seller_agent_id},
-          ${milestone.amount}, 'USDC', 'fiat', 'created',
-          null, null, null, ${PLATFORM_WALLET},
-          'stripe', ${stripeIntent.id}, ${stripeIntent.client_secret},
-          ${fiatCurrency}, ${amountCents}
-        )
-        RETURNING *
-      `;
+      const cancelOrphanStripePI = async () => {
+        try {
+          await stripeCancelPaymentIntent(stripeIntent.id);
+        } catch (err) {
+          app.log.error({ err, stripePaymentIntentId: stripeIntent.id }, "create-intent: orphan Stripe PI could not be cancelled — needs operator cancel at Stripe");
+        }
+      };
+      let intent: Row | null;
+      try {
+        intent = await insertIntentIfDealActive(sql, String(milestone.deal_id), (txn) => txn`
+          INSERT INTO payment_intents (
+            milestone_id, buyer_agent_id, seller_agent_id, amount, currency, chain, status,
+            buyer_wallet_provider, buyer_wallet_address, seller_wallet_address, platform_wallet_address,
+            payment_provider, stripe_payment_intent_id, stripe_client_secret, fiat_currency, fiat_amount_cents
+          ) VALUES (
+            ${body.milestoneId}, ${body.buyerAgentId}, ${milestone.seller_agent_id},
+            ${milestone.amount}, 'USDC', 'fiat', 'created',
+            null, null, null, ${PLATFORM_WALLET},
+            'stripe', ${stripeIntent.id}, ${stripeIntent.client_secret},
+            ${fiatCurrency}, ${amountCents}
+          )
+          RETURNING *
+        `);
+      } catch (err) {
+        // The PI exists at Stripe but was never recorded: kill it, then fail.
+        await cancelOrphanStripePI();
+        throw err;
+      }
+      if (!intent) {
+        // The deal left 'active' (e.g. cancelled) while we created the Stripe
+        // PI: kill it at the provider so its client secret can never capture.
+        await cancelOrphanStripePI();
+        return reply.code(409).send(dealNotFundable("no longer fundable"));
+      }
 
       await audit(body.buyerAgentId, "payment.create_intent.stripe", "payment_intent", intent.id, idem, {
         stripePaymentIntentId: stripeIntent.id,
@@ -177,7 +252,7 @@ export async function registerRoutes(
         milestone.seller_wallet_address as Address,
       );
 
-      const [intent] = await sql`
+      const intent = await insertIntentIfDealActive(sql, String(milestone.deal_id), (txn) => txn`
         INSERT INTO payment_intents (
           milestone_id, buyer_agent_id, seller_agent_id, amount, currency, chain, status,
           buyer_wallet_provider, buyer_wallet_address, seller_wallet_address, platform_wallet_address,
@@ -188,7 +263,8 @@ export async function registerRoutes(
           'usdc'
         )
         RETURNING *
-      `;
+      `);
+      if (!intent) return reply.code(409).send(dealNotFundable("no longer fundable"));
 
       // Record resolved chain on the deal for reference
       await sql`UPDATE deals SET chain = ${resolvedChain} WHERE id = ${milestone.deal_id}`;
@@ -227,7 +303,7 @@ export async function registerRoutes(
     }
 
     // Simulation mode — immediate funding (legacy behavior)
-    const [intent] = await sql`
+    const intent = await insertIntentIfDealActive(sql, String(milestone.deal_id), (txn) => txn`
       INSERT INTO payment_intents (
         milestone_id, buyer_agent_id, seller_agent_id, amount, currency, chain, status,
         buyer_wallet_provider, buyer_wallet_address, seller_wallet_address, platform_wallet_address, tx_hash,
@@ -238,7 +314,8 @@ export async function registerRoutes(
         'usdc'
       )
       RETURNING *
-    `;
+    `);
+    if (!intent) return reply.code(409).send(dealNotFundable("no longer fundable"));
 
     // Record resolved chain on the deal
     await sql`UPDATE deals SET chain = ${resolvedChain} WHERE id = ${milestone.deal_id}`;
@@ -304,6 +381,19 @@ export async function registerRoutes(
     if (intent.buyer_agent_id !== requesterAgentId) {
       return reply.code(403).send({ error: "Not authorized" });
     }
+    // cancel-refund-guard §4.1: a cancelled / settled deal never takes new
+    // money. Checked before the intent status so the caller gets the real
+    // reason (cancel flips the intent to 'failed').
+    const [intentDeal] = await sql`
+      SELECT d.id, d.status FROM deals d JOIN milestones m ON m.deal_id = d.id WHERE m.id = ${intent.milestone_id}
+    `;
+    if (intentDeal && NOT_FUNDABLE_DEAL_STATUSES.has(String(intentDeal.status))) {
+      // The buyer may already have broadcast the escrow tx with the calldata
+      // they hold — the DB cannot stop that. Keep the tx traceable so an
+      // operator can drive the on-chain refund (dispute → force-refund).
+      await recordRefusedFunding(intent, String(intentDeal.status), body.txHash, idem, null);
+      return reply.code(409).send(dealNotFundable(String(intentDeal.status)));
+    }
     if (intent.status !== "created") {
       return reply.code(400).send({ error: `Intent status is ${intent.status}, expected created` });
     }
@@ -329,7 +419,16 @@ export async function registerRoutes(
       });
     }
 
-    await sql.begin(async (txn) => {
+    const funded = await sql.begin(async (txn) => {
+      // Lock the deal first: serialises with POST /api/deals/:id/cancel, which
+      // closes 'created' intents under the same lock. Whichever commits first
+      // wins; the other sees the result (never cancelled + funded).
+      const [lockedDeal] = await txn`
+        SELECT d.status FROM deals d JOIN milestones m ON m.deal_id = d.id WHERE m.id = ${intent.milestone_id} FOR UPDATE OF d
+      `;
+      if (lockedDeal && NOT_FUNDABLE_DEAL_STATUSES.has(String(lockedDeal.status))) {
+        return { ok: false as const, dealStatus: String(lockedDeal.status) };
+      }
       // Atomic CAS: only update if still 'created' — prevents TOCTOU double-fund
       const [updated] = await txn.unsafe(
         `UPDATE payment_intents SET status = 'funded', tx_hash = $1, updated_at = NOW()
@@ -344,7 +443,14 @@ export async function registerRoutes(
         `UPDATE milestones SET status = 'funded' WHERE id = $1 AND status IN ('in_progress','pending')`,
         [intent.milestone_id]
       );
+      return { ok: true as const };
     });
+    if (!funded.ok) {
+      // verifyFunding PROVED the USDC is in escrow: a cancel committed while
+      // the buyer's tx was in flight. Record it for the operator refund path.
+      await recordRefusedFunding(intent, funded.dealStatus, body.txHash, idem, true);
+      return reply.code(409).send(dealNotFundable(funded.dealStatus));
+    }
 
     await audit(intent.buyer_agent_id, "payment.confirm_funding", "payment_intent", intent.id, idem, { txHash: body.txHash });
 
@@ -411,6 +517,12 @@ export async function registerRoutes(
     if (deal.status === "funded") {
       return { ok: true, alreadyFunded: true, dealId: id };
     }
+    // cancel-refund-guard (beyond spec §4, flagged): MPP has no refund path, so
+    // charging a cancelled / proposed / settled deal would strand the buyer's
+    // money with no way back. Refuse BEFORE the charge.
+    if (deal.status !== "active") {
+      return reply.code(409).send(dealNotFundable(String(deal.status)));
+    }
 
     const mppConfigError = getMppConfigurationError();
     if (mppConfigError) {
@@ -426,7 +538,11 @@ export async function registerRoutes(
 
     const paymentMethod = getDealPaymentMethodFromReceipt(paymentResult.receipt.method);
 
-    await sql.begin(async (txn) => {
+    const recorded = await sql.begin(async (txn) => {
+      // Re-check under the deal row lock: a cancel may have committed during
+      // the (slow, external) charge. Never write 'funded' over 'cancelled'.
+      const [locked] = await txn`SELECT status FROM deals WHERE id = ${id} FOR UPDATE`;
+      if (locked?.status !== "active") return false;
       await txn.unsafe(
         `
           UPDATE deals
@@ -447,7 +563,15 @@ export async function registerRoutes(
         `,
         [id],
       );
+      return true;
     });
+    if (!recorded) {
+      // MPP has no refund path: the charge succeeded on a deal that left
+      // 'active' mid-charge. Do not touch the deal row; surface for operators.
+      app.log.error({ dealId: id, receiptReference: (paymentResult.receipt as { reference?: unknown }).reference ?? null }, "pay-mpp: deal left active during the charge — charged money needs operator reconciliation");
+      await audit(body.actorAgentId, "payment.mpp.refused_after_charge", "deal", id, randomUUID(), { receipt: paymentResult.receipt });
+      return reply.code(409).send(dealNotFundable("no longer fundable"));
+    }
 
     notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "payment.funded", {
       dealId: id,
@@ -644,15 +768,36 @@ export async function registerRoutes(
           LIMIT 1
         `;
 
+        if (intent && intent.status !== "created" && intent.status !== "funded") {
+          // Stripe captured money for a PI we no longer consider open (e.g.
+          // cancel failed it). Must never happen — cancel kills the PI at
+          // Stripe first — so leave an operator-visible trace.
+          app.log.error({ paymentIntentId: intent.id, status: intent.status, stripePaymentIntentId }, "stripe-webhook: succeeded event for a non-open payment intent — not marking funded, needs operator review");
+        }
+
         if (intent && intent.status === "created") {
-          await sql`
-            UPDATE payment_intents
-            SET status = 'funded', updated_at = NOW()
-            WHERE id = ${intent.id}
-          `;
-          await sql`
-            UPDATE milestones SET status = 'funded' WHERE id = ${intent.milestone_id}
-          `;
+          // CAS on 'created', with the milestone write in the same
+          // transaction (cancel-refund-guard R2): deal cancel flips a Stripe PI
+          // to 'failed' only after cancelling it at Stripe, so a stale
+          // succeeded event must not resurrect it.
+          const cas = await sql.begin(async (txn) => {
+            const [row] = await txn`
+              UPDATE payment_intents
+              SET status = 'funded', updated_at = NOW()
+              WHERE id = ${intent.id} AND status = 'created'
+              RETURNING id
+            `;
+            if (!row) return false;
+            await txn`
+              UPDATE milestones SET status = 'funded'
+              WHERE id = ${intent.milestone_id} AND status IN ('in_progress', 'pending')
+            `;
+            return true;
+          });
+          if (!cas) {
+            app.log.error({ paymentIntentId: intent.id, stripePaymentIntentId }, "stripe-webhook: payment intent left 'created' before the succeeded event was recorded — not marking funded, needs operator review");
+            return reply.code(200).send({ received: true });
+          }
 
           await audit(null, "payment.stripe.funded", "payment_intent", intent.id, randomUUID(), {
             stripePaymentIntentId,
