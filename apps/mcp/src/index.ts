@@ -915,7 +915,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.cancel_deal",
     description:
-      "Cancel an active or proposed deal, preventing any further milestones from being funded or delivered. Funded but unreleased milestones may be eligible for refund. Provide a reason for audit purposes.",
+      "Cancel a proposed, countered, accepted or active deal, preventing any further milestones from being funded or delivered. Only deals with no funds held, no delivery and no open dispute can be cancelled; funded deals settle via release or dispute (a held-funds cancel returns 409 deal_funded, a delivered one 409 deal_delivered, a disputed one 409 deal_disputed, a completed one 409 deal_not_cancellable). Cancelling an already-cancelled deal is an idempotent 200 { ok: true, alreadyCancelled: true }. Provide a reason for audit purposes.",
     annotations: {
       title: "Cancel Deal",
       readOnlyHint: false,

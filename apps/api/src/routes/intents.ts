@@ -349,10 +349,33 @@ export async function registerRoutes(
       if (!["awaiting_funding", "open"].includes(intent.status)) {
         return reply.code(409).send({ error: `Intent status is ${intent.status}`, code: "INTENT_BAD_STATE" });
       }
+      // cancel-refund-guard §4.6: no claim path for a cancelled deal.
+      const [linked] = await sql`
+        SELECT EXISTS (
+          SELECT 1 FROM deals d JOIN intents i ON i.id = ${id}
+          WHERE (d.id = i.deal_id OR d.intent_id = i.id) AND d.status = 'cancelled'
+        ) AS cancelled
+      `;
+      if (linked?.cancelled) {
+        return reply.code(409).send({ error: "The deal for this intent is cancelled", code: "DEAL_CANCELLED" });
+      }
 
       const preimageBuf = Buffer.from(body.preimage.slice(2), "hex");
       const ciphertextBuf = body.ciphertext ? Buffer.from(body.ciphertext.slice(2), "hex") : null;
-      await sql.begin(async (txn) => {
+      const revealed = await sql.begin(async (txn) => {
+        // CAS first (cancel-refund-guard §4.6): a deal cancel that committed
+        // after the checks above has closed this intent — never reopen it.
+        const flipped = await txn.unsafe(
+          `UPDATE intents SET status = 'reveal_ready', updated_at = now()
+           WHERE id = $1 AND status IN ('awaiting_funding', 'open')
+             AND NOT EXISTS (
+               SELECT 1 FROM deals d
+               WHERE (d.id = intents.deal_id OR d.intent_id = intents.id) AND d.status = 'cancelled'
+             )
+           RETURNING id`,
+          [id],
+        );
+        if (flipped.length === 0) return false;
         await txn.unsafe(
           `
             INSERT INTO intent_reveals (intent_id, preimage, ciphertext)
@@ -362,8 +385,11 @@ export async function registerRoutes(
           `,
           [id, preimageBuf, ciphertextBuf]
         );
-        await txn.unsafe("UPDATE intents SET status = 'reveal_ready', updated_at = now() WHERE id = $1", [id]);
+        return true;
       });
+      if (!revealed) {
+        return reply.code(409).send({ error: "Intent is no longer revealable (its status or deal changed)", code: "INTENT_BAD_STATE" });
+      }
       await audit(sql, body.agentId, "intent.reveal", "intent", id,
         idempotencyKey(request.headers as Record<string, unknown>), { agentId: body.agentId });
       return reply.code(200).send({ ok: true, intent_id: id, status: "reveal_ready" });

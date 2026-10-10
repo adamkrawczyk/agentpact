@@ -35,13 +35,21 @@ function baseConfig(overrides: Partial<Config> = {}): Config {
 
 // Fake sql that records every call and returns pre-programmed row arrays.
 // We give each query a sequential index so callers can assert order.
-interface SqlCall { args: unknown[] }
+interface SqlCall { text: string; args: unknown[] }
 
-function makeSql(responseMap: Record<number, unknown[]>) {
+// The FUND phase claims each row (awaiting_funding → funding_in_flight) before
+// broadcasting. By default the fake grants that claim (returns the id);
+// `claimGranted: false` simulates losing it — e.g. deal cancel closed the
+// intent between the SELECT and the claim.
+function makeSql(responseMap: Record<number, unknown[]>, opts: { claimGranted?: boolean } = {}) {
   const calls: SqlCall[] = [];
-  const sql = ((_tpl: TemplateStringsArray, ...values: unknown[]) => {
+  const sql = ((tpl: TemplateStringsArray, ...values: unknown[]) => {
     const idx = calls.length;
-    calls.push({ args: values });
+    const text = tpl.join("?");
+    calls.push({ text, args: values });
+    if (/SET status = 'funding_in_flight'/.test(text)) {
+      return Promise.resolve(opts.claimGranted === false ? [] : [{ id: values[0] }]);
+    }
     return Promise.resolve(responseMap[idx] ?? []);
   }) as unknown as SqlClient;
   return { sql, calls };
@@ -85,27 +93,31 @@ function claimRow(overrides: Record<string, unknown> = {}) {
 
 /** Fake ChainClient — call behaviour driven by per-method options. */
 interface FakeChainOpts {
-  fundBehavior?:  "ok" | "dup" | "fail";
+  fundBehavior?:  "ok" | "dup" | "fail" | "timeout";
   claimBehavior?: "ok" | "already_claimed" | "fail";
   onChainId?: Buffer;
 }
 
-function fakeChain(opts: FakeChainOpts = {}): ChainClient {
+function fakeChain(opts: FakeChainOpts = {}): ChainClient & { fundCalls: number } {
   const onChainId = opts.onChainId ?? Buffer.alloc(32, 0xaa);
-  return {
+  const chain = {
+    fundCalls: 0,
     async acknowledgeTimeout() { return { txHash: "0xack" }; },
     async settleSchelling()    { return { txHash: "0xsch" }; },
-    async createIntentWithAuthorization(_args) {
+    async createIntentWithAuthorization(_args: unknown) {
+      chain.fundCalls++;
       if (opts.fundBehavior === "dup")  throw new Error("execution reverted: Escrow: dup intent");
       if (opts.fundBehavior === "fail") throw new Error("execution reverted: chain panic");
+      if (opts.fundBehavior === "timeout") throw new Error("Timed out while waiting for transaction receipt");
       return { txHash: "0xfund", onChainId };
     },
-    async claimIntent(_id, _ct, _w) {
+    async claimIntent(_id: Buffer, _ct: Buffer, _w: Buffer) {
       if (opts.claimBehavior === "already_claimed") throw new Error("execution reverted: not class a open");
       if (opts.claimBehavior === "fail")            throw new Error("execution reverted: chain panic");
       return { txHash: "0xclaim" };
     },
   };
+  return chain as unknown as ChainClient & { fundCalls: number };
 }
 
 // ── FUND phase tests ─────────────────────────────────────────────────────────
@@ -280,5 +292,65 @@ describe("autoclose sweeper — combined phases", () => {
     assert.equal(res.fund.acted, 0);
     assert.equal(res.claim.scanned, 0);
     assert.equal(res.claim.acted, 0);
+  });
+});
+
+// ── cancel-refund-guard §4.4 / §4.5: never move money for a cancelled deal ──
+
+describe("autoclose sweeper — cancel-refund guard", () => {
+  it("FUND selects only intents whose deal is active", async () => {
+    const { sql, calls } = makeSql({ 0: [], 1: [] });
+    await runAutoCloseSweep(sql, fakeChain(), baseConfig());
+    const fundSelect = calls.find((c) => /FROM intents i/.test(c.text) && /intent_funding_authorizations/.test(c.text));
+    assert.ok(fundSelect, "fund SELECT issued");
+    assert.match(fundSelect!.text, /JOIN deals d ON d\.id = i\.deal_id AND d\.status = 'active'/);
+  });
+
+  it("claims the row as funding_in_flight BEFORE broadcasting, then opens it from funding_in_flight", async () => {
+    const { sql, calls } = makeSql({ 0: [fundRow()], 1: [] });
+    const chain = fakeChain({ fundBehavior: "ok" });
+    const res = await runAutoCloseSweep(sql, chain, baseConfig());
+    assert.equal(res.fund.acted, 1);
+    const claimIdx = calls.findIndex((c) => /SET status = 'funding_in_flight'/.test(c.text));
+    const openIdx = calls.findIndex((c) => /status = 'open'/.test(c.text));
+    assert.ok(claimIdx >= 0 && openIdx > claimIdx, "claim precedes the open UPDATE");
+    assert.match(calls[claimIdx].text, /AND status = 'awaiting_funding'/);
+    assert.match(calls[claimIdx].text, /d\.status = 'active'/);
+    assert.match(calls[openIdx].text, /AND status = 'funding_in_flight'/);
+  });
+
+  it("a lost claim (cancel closed the intent) skips the row with NO chain call", async () => {
+    const { sql } = makeSql({ 0: [fundRow()], 1: [] }, { claimGranted: false });
+    const chain = fakeChain({ fundBehavior: "ok" });
+    const res = await runAutoCloseSweep(sql, chain, baseConfig());
+    assert.equal(chain.fundCalls, 0, "no createIntentWithAuthorization for a lost claim");
+    assert.equal(res.fund.acted, 0);
+    assert.equal(res.fund.failed.length, 0);
+  });
+
+  it("a revert (no money moved) releases the claim back to awaiting_funding", async () => {
+    const { sql, calls } = makeSql({ 0: [fundRow()], 1: [] });
+    const res = await runAutoCloseSweep(sql, fakeChain({ fundBehavior: "fail" }), baseConfig());
+    assert.equal(res.fund.failed.length, 1);
+    const release = calls.find((c) => /SET status = 'awaiting_funding'/.test(c.text));
+    assert.ok(release, "claim released");
+    assert.match(release!.text, /AND status = 'funding_in_flight'/);
+  });
+
+  it("an ambiguous failure (may have mined) keeps funding_in_flight so cancel stays refused", async () => {
+    const { sql, calls } = makeSql({ 0: [fundRow()], 1: [] });
+    const res = await runAutoCloseSweep(sql, fakeChain({ fundBehavior: "timeout" }), baseConfig());
+    assert.equal(res.fund.failed.length, 1);
+    assert.equal(calls.some((c) => /SET status = 'awaiting_funding'/.test(c.text)), false, "claim NOT released");
+    assert.match(res.fund.failed[0].error, /funding_in_flight.*needs chain reconciliation/, "operator-visible stuck state");
+  });
+
+  it("CLAIM never pays out against a cancelled deal (standalone intents still claim)", async () => {
+    const { sql, calls } = makeSql({ 0: [], 1: [] });
+    await runAutoCloseSweep(sql, fakeChain(), baseConfig());
+    const claimSelect = calls.find((c) => /JOIN intent_reveals/.test(c.text));
+    assert.ok(claimSelect);
+    assert.match(claimSelect!.text, /LEFT JOIN deals d ON d\.id = i\.deal_id/);
+    assert.match(claimSelect!.text, /d\.id IS NULL OR d\.status <> 'cancelled'/);
   });
 });

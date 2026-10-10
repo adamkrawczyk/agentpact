@@ -195,6 +195,11 @@ describe("payability fund guard — payments (Layer 3)", () => {
     const milestoneId = String(ms.id);
 
     // Simulate capability drift: seller's wallet is cleared AFTER deal creation.
+    // The deal must be fundable (active) for the wallet guard to be the thing
+    // that refuses — create-intent refuses every non-active deal with 409
+    // deal_not_fundable first (cancel-refund-guard §4.2). Set directly: a real
+    // accept would itself refuse the now wallet-less seller.
+    await sql`UPDATE deals SET status = 'active' WHERE id = ${dealId}`;
     await sql`UPDATE agents SET owner_wallet_address = NULL WHERE id = ${sellerId}`;
 
     const fundRes = await app.inject({

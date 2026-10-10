@@ -6,7 +6,8 @@ import type { Deps } from "./types.js";
 import { proposeDealSchema, counterDealSchema, consultationResponseSchema, decomposeDealSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, isZeroPrice, toNumber, expandPaymentRails, STRIPE_RAIL_ENABLED, isPayableWalletAddress, isIntentCreationDisabled } from "./utils.js";
 import { describeDealPricing } from "../shared/pricing.js";
-import { checkDealParties, dealHasFunding, DEAL_FUNDED_REJECTION, resolveSellerPayoutAddress } from "../shared/deal-guards.js";
+import { checkDealParties, dealHasFunding, dealHoldsFunds, type DbOrTxn, dealNotFundable, CANCEL_REJECTIONS, DEAL_FUNDED_REJECTION, resolveSellerPayoutAddress } from "../shared/deal-guards.js";
+import { cancelPaymentIntent as cancelStripePaymentIntent } from "../stripe.js";
 
 async function audit(sql: Sql<Record<string, unknown>>, actorId: string | null, action: string, objectType: string, objectId: string | null, idem: string, payload: unknown) {
   await sql`
@@ -296,6 +297,88 @@ async function maybeAutoCompleteConsultationDeal(
   return {
     completed: true,
     reason: limitReached ? "max_respondents" : "time_limit",
+  };
+}
+
+// ── deal cancel: decision (cancel-refund-guard spec §2, §3.2 steps 1-5) ──────
+
+type CancelDecision =
+  | { kind: "already_cancelled" }
+  | { kind: "reject"; status: 403 | 404 | 409 | 502; body: Record<string, unknown> }
+  | { kind: "proceed"; status: string; intentId: string | null; buyerAgentId: string; sellerAgentId: string };
+
+type CancelClosedInstruments = {
+  paymentIntentsFailed: string[];
+  intentsCancelled: string[];
+  authorizationsRevoked: number;
+};
+
+/** Carries a non-proceed decision out of the cancel transaction (rolls it back). */
+class CancelAbort extends Error {
+  constructor(readonly decision: Exclude<CancelDecision, { kind: "proceed" }>) {
+    super(`deal.cancel aborted: ${decision.kind}`);
+    this.name = "CancelAbort";
+  }
+}
+
+const REFUND_PATH_UNAVAILABLE = {
+  error: "The payment provider could not confirm the open payment was cancelled, so the deal was not cancelled",
+  code: "refund_path_unavailable",
+  hint: "Retry later.",
+} as const;
+
+const CANCELLABLE_STATUSES = new Set(["proposed", "countered", "accepted", "active"]);
+
+/**
+ * Who may cancel what (spec §2). `lock` = take the deal row FOR UPDATE; the
+ * cancel transaction calls it locked so every read that decides the outcome
+ * happens after the lock (no TOCTOU vs accept / delivery / dispute open).
+ */
+async function evaluateDealCancel(
+  db: DbOrTxn,
+  dealId: string,
+  requesterAgentId: string,
+  lock: boolean,
+): Promise<CancelDecision> {
+  const [deal] = lock
+    ? await db`SELECT id, buyer_agent_id, seller_agent_id, status, intent_id FROM deals WHERE id = ${dealId} FOR UPDATE`
+    : await db`SELECT id, buyer_agent_id, seller_agent_id, status, intent_id FROM deals WHERE id = ${dealId}`;
+  if (!deal) return { kind: "reject", status: 404, body: { error: "Deal not found" } };
+  if (requesterAgentId !== deal.buyer_agent_id && requesterAgentId !== deal.seller_agent_id) {
+    return { kind: "reject", status: 403, body: { error: "Not authorized" } };
+  }
+
+  const status = String(deal.status);
+  if (status === "cancelled") return { kind: "already_cancelled" };
+  if (status === "delivered" || status === "release_pending_chain") {
+    return { kind: "reject", status: 409, body: CANCEL_REJECTIONS.deal_delivered };
+  }
+  if (status === "disputed") return { kind: "reject", status: 409, body: CANCEL_REJECTIONS.deal_disputed };
+  if (status === "funded") return { kind: "reject", status: 409, body: CANCEL_REJECTIONS.deal_funded };
+  if (!CANCELLABLE_STATUSES.has(status)) {
+    return { kind: "reject", status: 409, body: CANCEL_REJECTIONS.deal_not_cancellable };
+  }
+
+  if (await dealHoldsFunds(db, dealId)) return { kind: "reject", status: 409, body: CANCEL_REJECTIONS.deal_funded };
+
+  const [flags] = await db`
+    SELECT
+      EXISTS (SELECT 1 FROM disputes WHERE deal_id = ${dealId} AND status = 'open') AS open_dispute,
+      EXISTS (
+        SELECT 1 FROM deliveries dl JOIN milestones m ON m.id = dl.milestone_id WHERE m.deal_id = ${dealId}
+      ) AS delivered
+  `;
+  // Belt and braces: disputes/open writes the dispute row and the deal status
+  // in separate statements, so the row can exist while the deal still says active.
+  if (flags?.open_dispute) return { kind: "reject", status: 409, body: CANCEL_REJECTIONS.deal_disputed };
+  if (flags?.delivered) return { kind: "reject", status: 409, body: CANCEL_REJECTIONS.deal_delivered };
+
+  return {
+    kind: "proceed",
+    status,
+    intentId: deal.intent_id ? String(deal.intent_id) : null,
+    buyerAgentId: String(deal.buyer_agent_id),
+    sellerAgentId: String(deal.seller_agent_id),
   };
 }
 
@@ -669,7 +752,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
     }
 
     const [deal] = await sql`
-      SELECT buyer_agent_id, intent_id FROM deals WHERE id = ${id}
+      SELECT buyer_agent_id, intent_id, status FROM deals WHERE id = ${id}
     `;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
     if (requesterAgentId !== deal.buyer_agent_id) {
@@ -694,25 +777,68 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       });
     }
 
+    // cancel-refund-guard §4.3: only an active deal with an unfunded intent takes
+    // a funding authorization — a queued row is what the relayer pulls USDC on.
+    if (deal.status !== "active") {
+      return reply.code(409).send(dealNotFundable(String(deal.status)));
+    }
+    if (intent.status !== "awaiting_funding") {
+      return reply.code(409).send({ ...dealNotFundable(String(deal.status)), error: `Intent status is ${intent.status}, expected awaiting_funding` });
+    }
+
     const nonceBuf = Buffer.from(body.nonce.slice(2), "hex");
     const rBuf = Buffer.from(body.r.slice(2), "hex");
     const sBuf = Buffer.from(body.s.slice(2), "hex");
-    await sql`
-      INSERT INTO intent_funding_authorizations (
-        intent_id, value_usdc, valid_after, valid_before, nonce, sig_v, sig_r, sig_s, status
-      ) VALUES (
-        ${deal.intent_id}, ${body.value}, ${body.validAfter}, ${body.validBefore},
-        ${nonceBuf}, ${body.v}, ${rBuf}, ${sBuf}, 'queued'
-      )
-      ON CONFLICT (intent_id) DO UPDATE SET
-        value_usdc = EXCLUDED.value_usdc, valid_after = EXCLUDED.valid_after,
-        valid_before = EXCLUDED.valid_before, nonce = EXCLUDED.nonce,
-        sig_v = EXCLUDED.sig_v, sig_r = EXCLUDED.sig_r, sig_s = EXCLUDED.sig_s,
-        status = 'queued', created_at = now()
-    `;
+    // Under the deal row lock (serialises with cancel), and the upsert is a
+    // no-op unless the deal is still active and the intent still unfunded.
+    const queued = await sql.begin(async (txn) => {
+      const [locked] = await txn`SELECT status FROM deals WHERE id = ${id} FOR UPDATE`;
+      if (locked?.status !== "active") return [];
+      return await txn`
+        INSERT INTO intent_funding_authorizations (
+          intent_id, value_usdc, valid_after, valid_before, nonce, sig_v, sig_r, sig_s, status
+        )
+        SELECT ${deal.intent_id}::uuid, ${body.value}::numeric, ${body.validAfter}::bigint, ${body.validBefore}::bigint,
+               ${nonceBuf}::bytea, ${body.v}::int, ${rBuf}::bytea, ${sBuf}::bytea, 'queued'
+        FROM intents i WHERE i.id = ${deal.intent_id} AND i.status = 'awaiting_funding'
+        ON CONFLICT (intent_id) DO UPDATE SET
+          value_usdc = EXCLUDED.value_usdc, valid_after = EXCLUDED.valid_after,
+          valid_before = EXCLUDED.valid_before, nonce = EXCLUDED.nonce,
+          sig_v = EXCLUDED.sig_v, sig_r = EXCLUDED.sig_r, sig_s = EXCLUDED.sig_s,
+          status = 'queued', created_at = now()
+        WHERE EXISTS (SELECT 1 FROM intents i2 WHERE i2.id = EXCLUDED.intent_id AND i2.status = 'awaiting_funding')
+        RETURNING id
+      `;
+    });
+    if (queued.length === 0) {
+      const [now] = await sql`
+        SELECT d.status AS deal_status, i.status AS intent_status
+        FROM deals d LEFT JOIN intents i ON i.id = d.intent_id
+        WHERE d.id = ${id}
+      `;
+      if (now?.deal_status === "active" && now.intent_status && now.intent_status !== "awaiting_funding") {
+        return reply.code(409).send({
+          ...dealNotFundable("active"),
+          error: `Intent status is ${now.intent_status}, expected awaiting_funding`,
+          hint: "The relayer may already be funding this intent; refresh the deal before retrying.",
+        });
+      }
+      return reply.code(409).send(dealNotFundable(String(now?.deal_status ?? "unknown")));
+    }
     return reply.code(201).send({ ok: true, intent_id: deal.intent_id, status: "queued" });
   });
 
+  // ── POST /api/deals/:id/cancel — refund guard (cancel-refund-guard spec §3) ──
+  //
+  // R1  refund settles first: a deal becomes 'cancelled' only in the same
+  //     transaction that proves no money is HELD for it. This handler never
+  //     initiates, awaits or assumes a refund — HELD deals get 409 and leave
+  //     through release, dispute + /api/admin/force-refund, or V3 expiry.
+  // R2  inflows close with the cancel: every PENDING-IN instrument (legacy PI
+  //     'created', V3 intent 'awaiting_funding' + queued authorization) is made
+  //     unfundable in that same transaction. A Stripe PI is cancelled at the
+  //     provider BEFORE the transaction; if Stripe says money moved → 409.
+  // R3  fail closed: any error rolls the whole transaction back.
   app.post("/api/deals/:id/cancel", async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = z.object({ actorAgentId: z.string().uuid(), reason: z.string().optional() }).parse(request.body);
@@ -722,36 +848,154 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       return reply.code(403).send({ error: "Not authorized to act as this agent" });
     }
 
-    const [deal] = await sql`SELECT buyer_agent_id, seller_agent_id, status FROM deals WHERE id = ${id}`;
-    if (!deal) return reply.code(404).send({ error: "Deal not found" });
-    if (requesterAgentId !== deal.buyer_agent_id && requesterAgentId !== deal.seller_agent_id) {
-      return reply.code(403).send({ error: "Not authorized" });
-    }
-    if (!["proposed", "countered", "accepted", "active", "funded", "delivered", "disputed"].includes(String(deal.status))) {
-      return reply.code(400).send({ error: `Deal status ${deal.status} cannot be cancelled` });
+    // 1. Unlocked pre-check: never touch Stripe for a deal that would be refused anyway.
+    const pre = await evaluateDealCancel(sql, id, requesterAgentId, false);
+    if (pre.kind === "already_cancelled") return reply.code(200).send({ ok: true, dealId: id, alreadyCancelled: true });
+    if (pre.kind === "reject") return reply.code(pre.status).send(pre.body);
+
+    // 2. External effect first: cancel open Stripe PIs at the provider.
+    const stripeCreated = await sql`
+      SELECT pi.id, pi.stripe_payment_intent_id
+      FROM payment_intents pi JOIN milestones m ON m.id = pi.milestone_id
+      WHERE m.deal_id = ${id} AND pi.status = 'created' AND pi.payment_provider = 'stripe'
+    `;
+    const stripeCancelledIds: string[] = [];
+    // A PI cancelled at Stripe is dead whatever happens to the deal: record
+    // that truth (created → failed) on every exit path that does not commit it.
+    const markStripeCancelledFailed = async () => {
+      if (stripeCancelledIds.length === 0) return;
+      await sql`
+        UPDATE payment_intents SET status = 'failed', updated_at = NOW()
+        WHERE id = ANY(${stripeCancelledIds}::uuid[]) AND status = 'created'
+      `;
+    };
+    for (const row of stripeCreated) {
+      const providerId = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
+      if (providerId) {
+        let outcome: Awaited<ReturnType<typeof cancelStripePaymentIntent>>;
+        try {
+          outcome = await cancelStripePaymentIntent(providerId);
+        } catch (err) {
+          app.log.error({ err, dealId: id, paymentIntentId: row.id }, "deal.cancel: Stripe cancel failed — deal NOT cancelled");
+          await markStripeCancelledFailed();
+          return reply.code(502).send(REFUND_PATH_UNAVAILABLE);
+        }
+        if (outcome.outcome === "already_captured") {
+          await markStripeCancelledFailed();
+          return reply.code(409).send(CANCEL_REJECTIONS.deal_funded);
+        }
+      }
+      stripeCancelledIds.push(String(row.id));
     }
 
-    await sql.begin(async (txn) => {
-      await txn.unsafe("UPDATE deals SET status = 'cancelled', updated_at = NOW() WHERE id = $1", [id]);
-      await txn.unsafe("UPDATE milestones SET status = 'cancelled' WHERE deal_id = $1", [id]);
-      await txn.unsafe(
-        `
-          INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
-          VALUES ($1, $2, 'cancel', $3::jsonb)
-        `,
-        [id, body.actorAgentId, JSON.stringify(body)]
-      );
+    // 3. The decision and every write, under the deal row lock.
+    let committed: { priorStatus: string; closed: CancelClosedInstruments };
+    try {
+      committed = await sql.begin(async (txn) => {
+        const decision = await evaluateDealCancel(txn, id, requesterAgentId, true);
+        if (decision.kind !== "proceed") throw new CancelAbort(decision);
+        const priorStatus = decision.status;
+
+        // R2: close PENDING-IN. Each statement is a CAS on the open status, so
+        // a concurrent confirm-funding / webhook / relayer claim loses deterministically.
+        const paymentIntentsFailed = (await txn.unsafe(
+          `UPDATE payment_intents SET status = 'failed', updated_at = NOW()
+           WHERE milestone_id IN (SELECT id FROM milestones WHERE deal_id = $1)
+             AND status = 'created'
+             AND payment_provider IS DISTINCT FROM 'stripe'
+           RETURNING id`,
+          [id],
+        )).map((r) => String(r.id));
+
+        const stripeFailed = stripeCancelledIds.length === 0 ? [] : (await txn.unsafe(
+          `UPDATE payment_intents SET status = 'failed', updated_at = NOW()
+           WHERE id = ANY($1::uuid[]) AND status = 'created'
+           RETURNING id`,
+          [stripeCancelledIds],
+        )).map((r) => String(r.id));
+        if (stripeFailed.length !== stripeCancelledIds.length) {
+          // The webhook won: a PI we cancelled at the provider is no longer 'created'.
+          throw new CancelAbort({ kind: "reject", status: 409, body: CANCEL_REJECTIONS.deal_funded });
+        }
+        const [lateStripe] = await txn`
+          SELECT pi.id FROM payment_intents pi JOIN milestones m ON m.id = pi.milestone_id
+          WHERE m.deal_id = ${id} AND pi.status = 'created' AND pi.payment_provider = 'stripe'
+          LIMIT 1
+        `;
+        if (lateStripe) {
+          // A Stripe PI appeared after step 2 and was never cancelled at the provider.
+          throw new CancelAbort({ kind: "reject", status: 502, body: REFUND_PATH_UNAVAILABLE });
+        }
+
+        const intentsCancelled = (await txn.unsafe(
+          `UPDATE intents SET status = 'cancelled', updated_at = NOW()
+           WHERE (id = $1 OR deal_id = $2) AND status = 'awaiting_funding' AND on_chain_id IS NULL
+           RETURNING id`,
+          [decision.intentId, id],
+        )).map((r) => String(r.id));
+        const authorizationsRevoked = intentsCancelled.length === 0 ? [] : await txn.unsafe(
+          `UPDATE intent_funding_authorizations SET status = 'revoked', updated_at = NOW()
+           WHERE intent_id = ANY($1::uuid[]) AND status = 'queued'
+           RETURNING id`,
+          [intentsCancelled],
+        );
+
+        // R1, re-proved after the closures: a CAS above that matched 0 rows may
+        // mean a concurrent writer moved money in (confirm-funding, relayer
+        // claim → funding_in_flight). READ COMMITTED: this statement sees it.
+        if (await dealHoldsFunds(txn, id)) {
+          throw new CancelAbort({ kind: "reject", status: 409, body: CANCEL_REJECTIONS.deal_funded });
+        }
+
+        const [flipped] = await txn.unsafe(
+          `UPDATE deals SET status = 'cancelled', updated_at = NOW() WHERE id = $1 AND status = $2 RETURNING id`,
+          [id, priorStatus],
+        );
+        if (!flipped) throw new Error("deal.cancel: deal status changed under FOR UPDATE");
+        await txn.unsafe(
+          `UPDATE milestones SET status = 'cancelled' WHERE deal_id = $1 AND status IN ('pending', 'in_progress')`,
+          [id],
+        );
+
+        const closed: CancelClosedInstruments = {
+          paymentIntentsFailed: [...paymentIntentsFailed, ...stripeFailed],
+          intentsCancelled,
+          authorizationsRevoked: authorizationsRevoked.length,
+        };
+        await txn.unsafe(
+          `
+            INSERT INTO negotiation_events (deal_id, actor_agent_id, event_type, payload_json)
+            VALUES ($1, $2, 'cancel', $3::jsonb)
+          `,
+          [id, body.actorAgentId, JSON.stringify({ ...body, priorStatus, closed })],
+        );
+        return { priorStatus, closed };
+      });
+    } catch (err) {
+      await markStripeCancelledFailed();
+      if (stripeCancelledIds.length > 0) {
+        // The Stripe PIs are dead at the provider but the deal was NOT
+        // cancelled (a delivery / dispute / funding landed in between).
+        // Funding for those milestones must be re-issued: surface it.
+        app.log.error({ err, dealId: id, stripeCancelledIds }, "deal.cancel aborted after Stripe PIs were cancelled at the provider — the deal survived; its Stripe funding must be re-issued");
+      }
+      if (err instanceof CancelAbort) {
+        const d = err.decision;
+        if (d.kind === "already_cancelled") return reply.code(200).send({ ok: true, dealId: id, alreadyCancelled: true });
+        if (d.kind === "reject") return reply.code(d.status).send(d.body);
+      }
+      app.log.error({ err, dealId: id }, "deal.cancel transaction failed — deal status NOT changed");
+      return reply.code(500).send({ error: "Failed to cancel deal — please retry" });
+    }
+
+    deps.notifyAgents(sql, [pre.buyerAgentId, pre.sellerAgentId], "deal.cancelled", {
+      dealId: id,
+      cancelledBy: body.actorAgentId,
+      reason: body.reason,
+      priorStatus: committed.priorStatus,
     });
 
-    if (deal) {
-      deps.notifyAgents(sql, [deal.buyer_agent_id, deal.seller_agent_id], "deal.cancelled", {
-        dealId: id,
-        cancelledBy: body.actorAgentId,
-        reason: body.reason,
-      });
-    }
-
-    return { ok: true };
+    return { ok: true, dealId: id, priorStatus: committed.priorStatus, closed: committed.closed };
   });
 
   app.get("/api/deals", async (request) => {

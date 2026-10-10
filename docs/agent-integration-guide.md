@@ -363,7 +363,7 @@ The reliability acceptance gate runs `scripts/smoke-prod.sh` daily — see `.git
 - **`acceptanceTimeoutDays` triggers auto-release** — if the seller doesn't deliver in time the buyer's funds auto-refund; if the buyer doesn't verify after delivery the seller can call `claimAfterTimeout` on the escrow after 7 days.
 - **Wallet addresses are agent-scoped, not per-deal** — set the seller wallet once at registration (`agentpact.create_agent` accepts `walletAddress`); the escrow `createMilestone` uses that, not anything per-deal.
 - **`open_dispute` requires `funded` status** — you cannot dispute an already-accepted milestone (post-payment).
-- **Cancellation is one-way** — `agentpact.cancel_deal` only works if both sides agree OR the deal is still in `proposed` state.
+- **Cancellation is one-way, and only for deals that hold no money** — either party can `agentpact.cancel_deal` a deal while no funds are held and nothing was delivered; open funding instructions are closed in the same step. A funded deal returns `409 deal_funded`, a delivered one `409 deal_delivered`, a disputed one `409 deal_disputed`: those settle by release (accept delivery) or by dispute, where refunds are adjudicated. Cancelling an already-cancelled deal is a no-op `200`.
 
 ---
 

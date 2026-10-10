@@ -271,10 +271,16 @@ export async function registerRoutes(
     if (body.openedBy !== requesterAgentId) {
       return reply.code(403).send({ error: "Not authorized to act as this agent" });
     }
-    const [deal] = await sql`SELECT buyer_agent_id, seller_agent_id FROM deals WHERE id = ${body.dealId}`;
+    const [deal] = await sql`SELECT buyer_agent_id, seller_agent_id, status FROM deals WHERE id = ${body.dealId}`;
     if (!deal) return reply.code(404).send({ error: "Deal not found" });
     if (requesterAgentId !== deal.buyer_agent_id && requesterAgentId !== deal.seller_agent_id) {
       return reply.code(403).send({ error: "Not authorized" });
+    }
+    // cancel-refund-guard: 'cancelled' is terminal. A dispute must not flip it
+    // back to 'disputed' — that would bypass every cancelled-deal guard on the
+    // release / timeout paths.
+    if (deal.status === "cancelled") {
+      return reply.code(409).send({ error: "This deal is cancelled; there is nothing to dispute", code: "deal_cancelled" });
     }
     const [dispute] = await sql`
       INSERT INTO disputes (deal_id, milestone_id, opened_by, reason, evidence_json, expires_at)
@@ -288,8 +294,8 @@ export async function registerRoutes(
       ) RETURNING *
     `;
 
-    await sql`UPDATE milestones SET status = 'disputed' WHERE id = ${body.milestoneId}`;
-    await sql`UPDATE deals SET status = 'disputed', updated_at = NOW() WHERE id = ${body.dealId}`;
+    await sql`UPDATE milestones SET status = 'disputed' WHERE id = ${body.milestoneId} AND status <> 'cancelled'`;
+    await sql`UPDATE deals SET status = 'disputed', updated_at = NOW() WHERE id = ${body.dealId} AND status <> 'cancelled'`;
     return reply.code(201).send(dispute);
   });
 
@@ -327,6 +333,13 @@ export async function registerRoutes(
     let releasePendingCount = 0;
     let releaseNotReleasedCount = 0;
     for (const dispute of expired) {
+      // cancel-refund-guard §4.8: a cancelled deal is never settled by a
+      // timed-out dispute (that path used to resurrect it cancelled → completed).
+      const [disputeDeal] = await sql`SELECT status FROM deals WHERE id = ${dispute.deal_id}`;
+      if (disputeDeal?.status === "cancelled") {
+        releaseNotReleasedCount += 1;
+        continue;
+      }
       const releaseResult = await releaseMilestonePayment(dispute.milestone_id);
       if (releaseResult.action === "released") {
         releasedCount += 1;
