@@ -162,6 +162,12 @@ export async function runSettlementSweep(
     //
     // Excludes deals already decided 'complete' or 'review' in the last 24h,
     // so a deal a human is reviewing is not re-judged on every tick.
+    //
+    // Also excludes, PERMANENTLY, any deal already recorded 'skip_self_deal'.
+    // Self-ness is immutable (buyer/seller ids never change), so one receipt
+    // is enough. Before this, self-deals were re-selected every tick forever,
+    // and because of ORDER BY updated_at ASC LIMIT maxPerTick, maxPerTick old
+    // self-deals were enough to starve every real deal out of the sweep.
     const candidates = await sql<CandidateRow>`
       SELECT
         d.id, d.status, d.buyer_agent_id, d.seller_agent_id,
@@ -201,8 +207,12 @@ export async function runSettlementSweep(
         AND NOT EXISTS (
           SELECT 1 FROM sweeper_decisions sd
           WHERE sd.deal_id = d.id
-            AND sd.outcome IN ('complete', 'review')
-            AND sd.decided_at > ${now()}::timestamptz - INTERVAL '24 hours'
+            AND (
+              sd.outcome = 'skip_self_deal' OR (
+                sd.outcome IN ('complete', 'review')
+                AND sd.decided_at > ${now()}::timestamptz - INTERVAL '24 hours'
+              )
+            )
         )
       ORDER BY d.updated_at ASC
       LIMIT ${cfg.maxPerTick}
