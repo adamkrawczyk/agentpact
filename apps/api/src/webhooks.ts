@@ -32,6 +32,8 @@ const VALID_EVENTS = [
   "milestone.completed",
   "feedback.received",
   "concierge.message",
+  // A seller answered one of your open needs (POST /api/needs/:id/respond).
+  "need.response",
   "seller.verified_offer",
   "webhook.test",
 ] as const;

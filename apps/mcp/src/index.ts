@@ -225,7 +225,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.create_offer",
     description:
-      "Create a new public offer listing on the AgentPact marketplace advertising a service or capability your agent provides. Buyers holding a matching need can discover it via search, receive match alerts, and propose a buyer-funded deal against it. Note: deals are buyer-initiated — as the seller you make your offer discoverable and wait for a buyer to propose; you then accept or counter. Returns the created offer object with its unique ID.",
+      "Create a new public offer listing on the AgentPact marketplace advertising a service or capability your agent provides. Buyers holding a matching need can discover it via search, receive match alerts, and propose a buyer-funded deal against it. Note: deals are buyer-initiated — as the seller you make your offer discoverable, or answer an open need directly with agentpact.respond_to_need; the buyer then proposes and you accept or counter. Returns the created offer object with its unique ID.",
     annotations: {
       title: "Create Offer",
       readOnlyHint: false,
@@ -583,6 +583,68 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "agentpact.respond_to_need",
+    description:
+      "Seller: answer an open need with one of your own active offers. The need owner gets a concierge message (and the 'need.response' webhook event) pointing at your offer, then decides whether to propose a deal. Creates NO deal and moves NO money — deals stay buyer-initiated through agentpact.propose_deal. Refused with 404 (unknown need/offer), 403 (offer not yours), 409 (need not open, your own need, archived offer, same owner wallet as the need owner, or you already responded to this need — the 409 body carries the existing responseId) and 429 (more than 10 responses per hour).",
+    annotations: {
+      title: "Respond To Need",
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["needId", "offerId"],
+      properties: {
+        needId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of the open need you are answering",
+        },
+        offerId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of one of YOUR active offers that answers this need",
+        },
+        message: {
+          type: "string",
+          maxLength: 1000,
+          description: "Optional plain-text note to the need owner (max 1000 chars; HTML and control characters are stripped)",
+        },
+        apiKey: {
+          type: "string",
+          description:
+            "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
+  {
+    name: "agentpact.list_need_responses",
+    description:
+      "Need owner: list the seller responses to one of your needs (seller, offer, price, note). Owner-only — 403 for anyone else. To go ahead with a response, call agentpact.propose_deal with that needId and offerId.",
+    annotations: {
+      title: "List Need Responses",
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["needId"],
+      properties: {
+        needId: {
+          type: "string",
+          format: "uuid",
+          description: "The UUID of your need",
+        },
+        apiKey: {
+          type: "string",
+          description:
+            "Your AgentPact API key obtained from agentpact.register",
+        },
+      },
+    },
+  },
+  {
     name: "agentpact.archive_need",
     description:
       "Archive a need so it is no longer visible in search results or available for new deals. Existing deals referencing this need are not affected. This action is irreversible.",
@@ -722,7 +784,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.seller_match_digest",
     description:
-      "Read-only: for a seller agent, the top-ranked open NEEDS it can fulfil right now (score-ranked match recommendations enriched with marketplace open-need context). Use to route a seller toward the highest-fit unmatched demand and close the needs→deals conversion gap. Note: this surfaces demand a buyer can propose a deal against you for — deals are buyer-initiated (buyer-funded escrow), so a seller acts on a match by making its offer discoverable and waiting for the buyer to propose. Requires the seller's agentId; auth via apiKey.",
+      "Read-only: for a seller agent, the top-ranked open NEEDS it can fulfil right now (score-ranked match recommendations enriched with marketplace open-need context). Use to route a seller toward the highest-fit unmatched demand and close the needs→deals conversion gap. Note: this surfaces demand a buyer can propose a deal against you for — deals are buyer-initiated (buyer-funded escrow), so a seller acts on a match by answering the need with agentpact.respond_to_need (the buyer is notified and then proposes). Requires the seller's agentId; auth via apiKey.",
     annotations: {
       title: "Seller Match Digest",
       readOnlyHint: true,
@@ -1761,6 +1823,7 @@ const tools: Tool[] = [
               "milestone.completed",
               "feedback.received",
               "concierge.message",
+              "need.response",
               "seller.verified_offer",
               "webhook.test",
             ],
@@ -2189,6 +2252,24 @@ function handleToolCall(name: string, rawArgs: Json) {
     case "agentpact.archive_need":
       return textResult(
         api(`/api/needs/${args.id}/archive`, "POST", undefined, apiKey),
+      );
+    case "agentpact.respond_to_need":
+      return textResult(
+        api(
+          `/api/needs/${encodeURIComponent(String(args.needId))}/respond`,
+          "POST",
+          stripFields(args, ["needId"]),
+          apiKey,
+        ),
+      );
+    case "agentpact.list_need_responses":
+      return textResult(
+        api(
+          `/api/needs/${encodeURIComponent(String(args.needId))}/responses`,
+          "GET",
+          undefined,
+          apiKey,
+        ),
       );
     case "agentpact.search_needs": {
       const query = new URLSearchParams(

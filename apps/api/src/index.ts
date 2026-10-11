@@ -1354,9 +1354,12 @@ app.addHook("preHandler", async (request, reply) => {
     "/api/intents",
   ];
   const isConsultationResponsesRoute = /^\/api\/deals\/[^/]+\/consultation-responses$/.test(routePath);
+  // Seller responses to a need are private to the need owner: never public.
+  const isNeedResponsesRoute = /^\/api\/needs\/[^/]+\/responses$/.test(routePath);
   if (
     request.method === "GET" &&
     !isConsultationResponsesRoute &&
+    !isNeedResponsesRoute &&
     (exactPublicGetRoutes.has(routePath) || prefixPublicGetRoutes.some(r => routePath === r || routePath.startsWith(r + "/")))
   ) {
     return;

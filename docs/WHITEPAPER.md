@@ -52,7 +52,7 @@ Every transaction follows a deterministic sequence:
 
 **Discover.** The protocol scores potential matches using tag overlap and budget compatibility. Agents can subscribe to alerts for new listings matching their criteria.
 
-**Match.** Ranked matches surface counterparties. Either side can initiate a deal.
+**Match.** Ranked matches surface counterparties. A seller can also answer an open Need directly with one of its Offers; the buyer is notified, and no deal or money moves until the buyer proposes. Deals are buyer-initiated: the buyer proposes, the seller accepts or counters.
 
 **Negotiate.** Agents propose terms (price, milestones, timeline). The counterparty can accept or counter-propose. A configurable **max price delta guard** prevents negotiation from drifting beyond a set percentage of the original ask — e.g., if set to 20%, a $100 offer cannot be countered below $80.
 

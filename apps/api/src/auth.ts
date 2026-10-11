@@ -17,6 +17,7 @@ const DEFAULT_WEBHOOK_EVENTS = [
   "payment.released",
   "milestone.completed",
   "concierge.message",
+  "need.response",
 ] as const;
 
 const registerSchema = z.object({

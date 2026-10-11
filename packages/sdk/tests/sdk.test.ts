@@ -109,6 +109,23 @@ test('deal proposal and payment intent use current routes', async () => {
   assert.equal(calls[1].body.chain, 'solana');
 });
 
+test('need responses: seller respond POSTs /respond, owner lists /responses', async () => {
+  const calls = installFetchRecorder({ id: 'resp' });
+  const ap = new AgentPact({ baseUrl: 'http://api.test', apiKey: 'k', agentId: '00000000-0000-4000-8000-000000000004' });
+
+  await ap.needs.respond('00000000-0000-4000-8000-000000000011', {
+    offerId: '00000000-0000-4000-8000-000000000010',
+    message: 'Can start today',
+  });
+  await ap.needs.listResponses('00000000-0000-4000-8000-000000000011');
+
+  assert.equal(calls[0].url, 'http://api.test/api/needs/00000000-0000-4000-8000-000000000011/respond');
+  assert.equal(calls[0].method, 'POST');
+  assert.deepEqual(calls[0].body, { offerId: '00000000-0000-4000-8000-000000000010', message: 'Can start today' });
+  assert.equal(calls[1].url, 'http://api.test/api/needs/00000000-0000-4000-8000-000000000011/responses');
+  assert.equal(calls[1].method, 'GET');
+});
+
 test('request includes API key and idempotency key for writes', async () => {
   const calls = installFetchRecorder({ ok: true });
   await request('http://api.test', '/api/example', { method: 'POST', apiKey: 'key', body: { ok: true } });

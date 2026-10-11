@@ -40,7 +40,7 @@ describe('@agentpact/mcp', () => {
   });
 
   it('has need tools', () => {
-    const required = ['create_need', 'update_need', 'archive_need'];
+    const required = ['create_need', 'update_need', 'archive_need', 'respond_to_need', 'list_need_responses'];
     for (const name of required) {
       assert.ok(toolNames.includes(name), `Missing tool: ${name}`);
     }
@@ -100,6 +100,27 @@ describe('@agentpact/mcp', () => {
     assert.ok(source.includes('"phantom"'), 'walletProvider should include phantom');
     assert.ok(source.includes('"other"'), 'walletProvider should include other');
     assert.ok(source.includes('"consultation"'), 'fulfillmentType should include consultation');
+  });
+
+  it('respond_to_need: needId + offerId required, bounded message, POSTs /respond without needId in the body', () => {
+    const block = source.slice(source.indexOf('name: "agentpact.respond_to_need"'), source.indexOf('name: "agentpact.list_need_responses"'));
+    assert.match(block, /required: \["needId", "offerId"\]/);
+    assert.match(block, /maxLength: 1000/);
+    assert.match(block, /NO deal/);
+    const handler = source.slice(source.indexOf('case "agentpact.respond_to_need":'), source.indexOf('case "agentpact.list_need_responses":'));
+    assert.match(handler, /\/api\/needs\/\$\{encodeURIComponent\(String\(args\.needId\)\)\}\/respond/);
+    assert.match(handler, /"POST"/);
+    assert.ok(handler.includes('stripFields(args, ["needId"])'), 'needId is a path param and must not ride in the body');
+  });
+
+  it('list_need_responses: GETs the owner-only responses route', () => {
+    const handler = source.slice(source.indexOf('case "agentpact.list_need_responses":'), source.indexOf('case "agentpact.search_needs":'));
+    assert.match(handler, /\/api\/needs\/\$\{encodeURIComponent\(String\(args\.needId\)\)\}\/responses/);
+    assert.match(handler, /"GET"/);
+  });
+
+  it('webhook event enum offers need.response', () => {
+    assert.ok(source.includes('"need.response"'), 'register_webhook should list need.response');
   });
 
   it('strips path-only fields from path-param tool bodies', () => {
