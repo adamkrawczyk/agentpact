@@ -308,8 +308,10 @@ describe("public receipt routes (anonymous)", () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it("GET /api/receipts/:id with a non-uuid or unknown id -> 404", async () => {
-    expect((await app.inject({ method: "GET", url: "/api/receipts/not-a-uuid" })).statusCode).toBe(404);
+  it("GET /api/receipts/:id: malformed id -> 400 envelope, well-formed but unknown id -> 404", async () => {
+    const bad = await app.inject({ method: "GET", url: "/api/receipts/not-a-uuid" });
+    expect(bad.statusCode).toBe(400);
+    expect(JSON.parse(bad.body)).toMatchObject({ code: "VALIDATION_FAILED" });
     expect((await app.inject({ method: "GET", url: `/api/receipts/${randomUUID()}` })).statusCode).toBe(404);
   });
 });
@@ -382,5 +384,15 @@ describe("hash anchoring", () => {
     fakeRoot.anchor.root = "0".repeat(64);
     const fr = (await app.inject({ method: "POST", url: "/api/receipts/verify", payload: fakeRoot })).json();
     expect(fr.checks.anchor).toBe(false);
+  });
+});
+
+describe("agent lookup segment", () => {
+  it("a uuid-shaped segment is only ever an agent id: a handle that looks like another agent's uuid cannot shadow it", async () => {
+    const victim = await mkAgent("rc-victim", W(7));
+    await mkAgent(victim, W(8)); // squatter registers the victim's uuid as ITS handle
+    const res = await app.inject({ method: "GET", url: `/api/agents/${victim}/receipts` });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).agent.handle).toBe("rc-victim");
   });
 });

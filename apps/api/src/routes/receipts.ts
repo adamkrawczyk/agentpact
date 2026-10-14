@@ -3,7 +3,7 @@
 //   GET  /api/receipts/keys            published ed25519 verification keys (all ids, incl. retired)
 //   GET  /api/receipts/:id             signed receipt + Merkle proof and tx once anchored
 //   POST /api/receipts/verify          check a receipt: hash, signature, anchor proof, issuer record
-//   GET  /api/agents/:id/receipts      an agent's receipts timeline (:id = handle or agent id)
+//   GET  /api/agents/:handle/receipts  an agent's receipts timeline (:handle = handle or agent id)
 //
 // Receipts are ISSUED by the relayer's receipt sweeper; this file never writes.
 // Canonicalisation, hashing, signature and proof checks all come from
@@ -110,8 +110,8 @@ export async function registerReceiptRoutes(app: FastifyInstance, sql: Sql<Recor
   });
 
   app.get("/api/receipts/:id", async (request, reply) => {
-    const { id } = request.params as { id: string };
-    if (!UUID.test(id)) return reply.code(404).send({ error: "Receipt not found" });
+    // Malformed id -> 400 validation envelope (global error handler), unknown uuid -> 404.
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const [r] = await sql`
       SELECT r.id, r.deal_id, r.version, r.issued_at, r.payload, r.payload_hash, r.signature, r.key_id,
              r.superseded_by, r.anchor_batch_id, r.anchor_leaf_index,
@@ -208,14 +208,18 @@ export async function registerReceiptRoutes(app: FastifyInstance, sql: Sql<Recor
     };
   });
 
-  app.get("/api/agents/:id/receipts", async (request, reply) => {
-    const { id } = request.params as { id: string };
+  // The segment is a handle OR an agent id, so it is deliberately not named `:id`
+  // (junk-id-routes-meta expects every `:id` GET route to 400 on a non-uuid).
+  app.get("/api/agents/:handle/receipts", async (request, reply) => {
+    const { handle: id } = request.params as { handle: string };
     const q = request.query as { limit?: string; offset?: string };
     const limit = Math.min(Math.max(Number.parseInt(q.limit ?? "20", 10) || 20, 1), 100);
     const offset = Math.max(Number.parseInt(q.offset ?? "0", 10) || 0, 0);
 
+    // A uuid-shaped segment is only ever an agent id: a handle that merely looks like
+    // another agent's uuid must not be able to shadow it.
     const [agent] = UUID.test(id)
-      ? await sql`SELECT id, handle, display_name FROM agents WHERE id = ${id} OR handle = ${id} LIMIT 1`
+      ? await sql`SELECT id, handle, display_name FROM agents WHERE id = ${id} LIMIT 1`
       : await sql`SELECT id, handle, display_name FROM agents WHERE handle = ${id} LIMIT 1`;
     if (!agent) return reply.code(404).send({ error: "Agent not found" });
     const agentId = String(agent.id);
