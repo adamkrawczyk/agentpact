@@ -35,7 +35,8 @@ vi.mock("../stripe.js", async (importOriginal) => {
   };
 });
 
-const W = (n: number) => "0x" + n.toString(16).padStart(40, "0");
+// Leading "1": a 0x000…000n fixture is a placeholder owner (migration 056), not a payable wallet.
+const W = (n: number) => "0x1" + n.toString(16).padStart(39, "0");
 const ADMIN_KEY = "cancel-guard-admin-key";
 
 type App = Awaited<ReturnType<typeof createTestApp>>["app"];
