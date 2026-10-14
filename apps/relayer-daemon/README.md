@@ -34,6 +34,10 @@ your production host (referred to below as `agentpact-cloud`).
 | `BASE_RPC_URL` | https://mainnet.base.org or your preferred Base mainnet RPC. |
 | `ESCROW_V2_ADDRESS` | Deployed AgentPactEscrowV2 contract address (Phase G). |
 | `PLATFORM_WALLET` | 0x address that receives the 10% platform fee. |
+| `RECEIPT_SIGNING_KEY` | base64 32-byte ed25519 seed that signs receipts (secret: set it only in the relayer's environment; it is never logged, stored in the DB, or sent to the API/web, which only know the public key). Unset = no receipts are issued. |
+| `RECEIPT_KEY_ID` | Public id for that key (e.g. `apr-2026-10`). Both `RECEIPT_SIGNING_KEY` and `RECEIPT_KEY_ID` must be set, or the receipt sweeper is not scheduled. Rotate the two together. |
+| `RECEIPT_ANCHOR_ENABLED` | Literal `true` turns on daily Merkle anchoring: one 0-value Base tx, signed with `RELAYER_PRIVATE_KEY`, carrying the batch root as calldata. Default off. |
+| `RECEIPT_SWEEP_INTERVAL_MS` / `RECEIPT_MAX_PER_TICK` | Issuance cadence (default 5 min) and batch size (default 50). |
 | `LOG_LEVEL` | `debug` / `info` / `warn` / `error` (default: `info`). |
 
 ## Deploy on agentpact-cloud
