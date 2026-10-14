@@ -51,6 +51,7 @@ import { registerAuditOrdersRoutes } from './routes/audit-orders.js';
 import { registerVerifiedSellerWebhookRoutes } from './routes/verified-seller-webhook.js';
 import { registerPublicStatsRoutes } from './routes/public-stats.js';
 import telemetryPlugin from './plugins/telemetry.js';
+import { registerReceiptRoutes } from './routes/receipts.js';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -1469,6 +1470,16 @@ app.addHook("preHandler", async (request, reply) => {
     return;
   }
 
+  // Receipts (ap_v31 M2): public evidence. Read-only GETs plus the stateless
+  // verifier. GET /api/agents/:id/receipts is already covered by the
+  // "/api/agents" public-GET prefix above.
+  if (
+    (request.method === "GET" && routePath.startsWith("/api/receipts/")) ||
+    (request.method === "POST" && routePath === "/api/receipts/verify")
+  ) {
+    return;
+  }
+
   if (routePath.startsWith("/api/")) {
     await app.authenticate(request, reply);
   }
@@ -1515,6 +1526,7 @@ app.addHook("preHandler", async (request, reply) => {
   await registerAuditOrdersRoutes(app, _sql);
   await registerVerifiedSellerWebhookRoutes(app, _sql);
   await registerPublicStatsRoutes(app, _sql);
+  await registerReceiptRoutes(app, _sql);
 }
 
 export const shutdown = async () => {

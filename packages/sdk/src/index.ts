@@ -774,6 +774,104 @@ class IntentsClient {
   }
 }
 
+// ── Receipts (public, no API key) ────────────────────────────────────
+
+export type ReceiptOutcome =
+  | 'settled'
+  | 'refunded'
+  | 'disputed_buyer_won'
+  | 'disputed_seller_won'
+  | 'timed_out'
+  | 'cancelled_after_funding';
+
+/** apr-1 signed envelope: ed25519 over the RFC 8785 canonical JSON of `payload`. */
+export interface SignedReceipt {
+  version: 'apr-1';
+  key_id: string;
+  payload: Record<string, unknown> & { deal_id: string; outcome: ReceiptOutcome };
+  payload_hash: string;
+  signature: string;
+}
+
+export interface ReceiptAnchor {
+  batch_id: string;
+  root: string;
+  chain: string;
+  tx_hash: string;
+  anchored_at: string;
+  leaf_count: number;
+  proof: { index: number; leaf_count: number; siblings: string[] };
+}
+
+export interface ReceiptDocument {
+  id: string;
+  deal_id: string;
+  issued_at: string;
+  superseded_by: string | null;
+  receipt: SignedReceipt;
+  /** null until the daily Merkle batch containing this receipt is anchored */
+  anchor: ReceiptAnchor | null;
+}
+
+export interface AgentReceipts {
+  agent: { id: string; handle: string; display_name?: string };
+  counts: {
+    evidence: Record<'settled' | 'refunded' | 'disputed' | 'disputed_buyer_won' | 'disputed_seller_won' | 'timed_out' | 'cancelled_after_funding' | 'total', number>;
+    not_counted: number;
+  };
+  /** e.g. "3 paid external deals settled, 1 refunded, 0 disputed" */
+  summary: string;
+  evidence_state: 'sufficient' | 'insufficient';
+  evidence_threshold: number;
+  evidence_note: string | null;
+  receipts: Array<Record<string, unknown> & { id: string; outcome: ReceiptOutcome; counts_as_evidence: boolean }>;
+  limit: number;
+  offset: number;
+  next_offset: number | null;
+}
+
+export interface ReceiptVerification {
+  valid: boolean;
+  checks: { hash: boolean; key_known: boolean; signature: boolean; anchor: boolean | null; issuer_record: boolean };
+  receipt_id: string | null;
+  superseded_by: string | null;
+  anchor_onchain_checked: boolean;
+  errors: string[];
+}
+
+class ReceiptsClient {
+  constructor(
+    private baseUrl: string,
+    private timeout: number,
+  ) {}
+
+  /** An agent's receipts timeline, newest first. `agent` = handle or agent id. */
+  async list(agent: string, params?: { limit?: number; offset?: number }): Promise<AgentReceipts> {
+    const qs = new URLSearchParams();
+    if (params?.limit !== undefined) qs.set('limit', String(params.limit));
+    if (params?.offset !== undefined) qs.set('offset', String(params.offset));
+    const q = qs.toString();
+    return request<AgentReceipts>(this.baseUrl, `/api/agents/${encodeURIComponent(agent)}/receipts${q ? `?${q}` : ''}`, {
+      timeout: this.timeout,
+    });
+  }
+
+  async get(id: string): Promise<ReceiptDocument> {
+    return request<ReceiptDocument>(this.baseUrl, `/api/receipts/${encodeURIComponent(id)}`, { timeout: this.timeout });
+  }
+
+  /** Verify a receipt (as returned by get(), or a bare signed envelope). */
+  async verify(receipt: ReceiptDocument | { receipt: SignedReceipt; anchor?: ReceiptAnchor | null } | SignedReceipt): Promise<ReceiptVerification> {
+    const body = 'receipt' in receipt ? receipt : { receipt };
+    return request<ReceiptVerification>(this.baseUrl, '/api/receipts/verify', { method: 'POST', body, timeout: this.timeout });
+  }
+
+  /** Published verification keys (every key id ever used, so old receipts stay verifiable). */
+  async keys(): Promise<{ version: string; keys: Array<{ key_id: string; alg: 'ed25519'; public_key: string; retired_at: string | null }> }> {
+    return request(this.baseUrl, '/api/receipts/keys', { timeout: this.timeout });
+  }
+}
+
 // ── Main Client ──────────────────────────────────────────────────────
 
 export class AgentPact {
@@ -784,6 +882,8 @@ export class AgentPact {
   public readonly feedback: FeedbackClient;
   /** settlement protocol v2 intents surface (Class A / B / C). */
   public readonly intents: IntentsClient;
+  /** Signed deal receipts (public, no API key needed). */
+  public readonly receipts: ReceiptsClient;
 
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -801,6 +901,7 @@ export class AgentPact {
     this.deals = new DealsClient(this.baseUrl, this.apiKey, this.agentId, this.timeout);
     this.agents = new AgentsClient(this.baseUrl, this.apiKey, this.timeout);
     this.feedback = new FeedbackClient(this.baseUrl, this.apiKey, this.agentId, this.timeout);
+    this.receipts = new ReceiptsClient(this.baseUrl, this.timeout);
     this.intents = new IntentsClient(
       this.baseUrl,
       this.apiKey,
