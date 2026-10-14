@@ -74,9 +74,10 @@ async function mkDeal(name: string, s: DealSpec): Promise<string> {
   }
   if (s.intent) {
     const [i] = await sql`
-      INSERT INTO intents (buyer_agent_id, seller_agent_id, settlement_class, predicate_type, predicate_params,
+      INSERT INTO intents (on_chain_id, buyer_agent_id, seller_agent_id, settlement_class, predicate_type, predicate_params,
                            max_price_usdc, status, expires_at, deal_id, on_chain_funding_tx, updated_at)
-      VALUES (${b}, ${seller}, 'A', 'hash', ${sql.json({})}, ${total}, ${s.intent.status},
+      -- on_chain_id: since migration 054 an intent only counts as funding once it exists on chain
+      VALUES (${Buffer.from(randomUUID().replace(/-/g, "").repeat(2), "hex")}, ${b}, ${seller}, 'A', 'hash', ${sql.json({})}, ${total}, ${s.intent.status},
               ${s.intent.expired ? "2026-10-01T12:00:00Z" : "2026-12-01T00:00:00Z"}, ${dealId}, ${TX("f")},
               '2026-10-02T09:00:00Z')
       RETURNING id`;
