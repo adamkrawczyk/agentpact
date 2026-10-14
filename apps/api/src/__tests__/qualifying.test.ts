@@ -13,6 +13,13 @@ const W1 = "0x1111111111111111111111111111111111111111";
 const W2 = "0x2222222222222222222222222222222222222222";
 const SOL1 = "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV";
 const ZERO = "0x0000000000000000000000000000000000000000";
+// Placeholder owners (migration 056): 36+ leading zero hex digits = unknown.
+const PRECOMPILE = "0x0000000000000000000000000000000000000001";
+const PRECOMPILE_6 = "0x0000000000000000000000000000000000000006";
+const BURN = "0x000000000000000000000000000000000000dEaD";
+const LOW_FFFF = "0x000000000000000000000000000000000000ffff";
+// 35 leading zeros: the boundary, still a real (if unusual) owner.
+const NEAR_MISS = "0x0000000000000000000000000000000000010000";
 
 describe("walletKey", () => {
   it("normalises EVM case and rejects zero/placeholder", () => {
@@ -21,6 +28,12 @@ describe("walletKey", () => {
     expect(walletKey("0xAgentPactPlatformUSDC")).toBeNull();
     expect(walletKey("")).toBeNull();
     expect(walletKey(null)).toBeNull();
+  });
+  it("treats precompile-style and burn placeholders as unknown, keeps the 35-zero boundary", () => {
+    for (const w of [PRECOMPILE, PRECOMPILE_6, BURN, BURN.toLowerCase(), BURN.replace("0x", "0X"), LOW_FFFF, `  ${PRECOMPILE}  `]) {
+      expect({ w, k: walletKey(w) }).toEqual({ w, k: null });
+    }
+    expect(walletKey(NEAR_MISS)).toBe(NEAR_MISS);
   });
   it("keeps Solana base58 case-sensitive and rejects the system program", () => {
     expect(walletKey(SOL1)).toBe(SOL1);
@@ -48,6 +61,11 @@ const CASES: Case[] = [
   { name: "same owner, different case", input: { ...base, sellerOwnerWallet: W1.toUpperCase().replace("0X", "0x") }, funded: true, qualifying: false },
   { name: "zero-address owner", input: { ...base, sellerOwnerWallet: ZERO }, funded: true, qualifying: false },
   { name: "placeholder owner", input: { ...base, buyerOwnerWallet: "0xAgentPactPlatformUSDC" }, funded: true, qualifying: false },
+  { name: "precompile-style owner (0x…0001)", input: { ...base, buyerOwnerWallet: PRECOMPILE }, funded: true, qualifying: false },
+  { name: "precompile-style seller owner (0x…0006)", input: { ...base, sellerOwnerWallet: PRECOMPILE_6 }, funded: true, qualifying: false },
+  { name: "burn-address owner (0x…dEaD)", input: { ...base, sellerOwnerWallet: BURN }, funded: true, qualifying: false },
+  { name: "two different placeholders are not two owners", input: { ...base, buyerOwnerWallet: PRECOMPILE, sellerOwnerWallet: BURN }, funded: true, qualifying: false },
+  { name: "35 leading zeros is still a real owner", input: { ...base, sellerOwnerWallet: NEAR_MISS }, funded: true, qualifying: true },
   { name: "internal buyer", input: { ...base, buyerIsInternal: true }, funded: true, qualifying: false },
   { name: "internal seller", input: { ...base, sellerIsInternal: true }, funded: true, qualifying: false },
   { name: "quarantined", input: { ...base, integrityClass: "quarantined_farm" }, funded: true, qualifying: false },

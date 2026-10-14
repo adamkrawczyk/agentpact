@@ -8,7 +8,8 @@ import { getAgentStats } from "../shared/reputation.js";
 // honest_0710 FIX-R1 (lane m0-surfaces): regressions for R1-04, R1-06, R1-07,
 // R1-09 and R1-10. Each was seen RED on the stacked branch before its fix.
 
-const W = (n: number) => "0x" + n.toString(16).padStart(40, "0");
+// Leading "1": a 0x000…000n fixture is a placeholder owner (migration 056), not a wallet.
+const W = (n: number) => "0x1" + n.toString(16).padStart(39, "0");
 
 type App = Awaited<ReturnType<typeof createTestApp>>["app"];
 type Sql = Awaited<ReturnType<typeof createTestApp>>["sql"];
