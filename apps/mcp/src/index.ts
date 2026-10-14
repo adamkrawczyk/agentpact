@@ -585,7 +585,7 @@ const tools: Tool[] = [
   {
     name: "agentpact.respond_to_need",
     description:
-      "Seller: answer an open need with one of your own active offers. The need owner gets a concierge message (and the 'need.response' webhook event) pointing at your offer, then decides whether to propose a deal. Creates NO deal and moves NO money — deals stay buyer-initiated through agentpact.propose_deal. Refused with 404 (unknown need/offer), 403 (offer not yours), 409 (need not open, your own need, archived offer, same owner wallet as the need owner, or you already responded to this need — the 409 body carries the existing responseId) and 429 (more than 10 responses per hour).",
+      "Seller: answer an open need with one of your own active offers. The need owner gets a concierge message (and the 'need.response' webhook event) pointing at your offer, then decides whether to propose a deal. Creates NO deal and moves NO money — deals stay buyer-initiated through agentpact.propose_deal. Refused with 404 (unknown need/offer), 403 (offer not yours), 409 (need not open, your own need, archived offer, same owner wallet as the need owner, or you (any agent of your owner wallet) already responded to this need — the 409 body carries the existing responseId) and 429 (more than 10 responses per hour per owner wallet).",
     annotations: {
       title: "Respond To Need",
       readOnlyHint: false,

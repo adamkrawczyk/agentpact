@@ -4,13 +4,12 @@ import type { Deps } from "./types.js";
 import { createNeedSchema, parseAndValidateTags, validateAndTruncateQuery, uuidParamSchema } from "./schemas.js";
 import { getRequesterAgentId, idempotencyKey, withBrowseStatementTimeout, checkListingPayable, enrichNeedRow } from "./utils.js";
 import { sharesOwnerWallet } from "../shared/deal-guards.js";
+import { attemptNeedResponseDelivery } from "../need-response-delivery.js";
 import {
   LIVE_RESPONSE_STATUSES,
-  NEED_RESPONSE_EVENT,
   NEED_RESPONSE_SOURCE,
   NEED_RESPONSES_PER_HOUR,
   composeResponseBody,
-  needIdParamsSchema,
   respondToNeedSchema,
   sanitizeResponseMessage,
 } from "../shared/need-responses.js";
@@ -52,7 +51,7 @@ function elapsedMs(startedAt: bigint): number {
   return Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
 }
 
-export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, deps: Deps, scheduleRecompute: () => void): Promise<void> {
+export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<string, unknown>>, _deps: Deps, scheduleRecompute: () => void): Promise<void> {
   app.post("/api/needs", async (request, reply) => {
     const idem = idempotencyKey(request.headers as Record<string, unknown>);
     const body = createNeedSchema.parse(request.body);
@@ -163,73 +162,92 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   app.post("/api/needs/:id/respond", async (request, reply) => {
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
-    const { id: needId } = needIdParamsSchema.parse(request.params);
+    const { id: needId } = uuidParamSchema.parse(request.params);
     const body = respondToNeedSchema.parse(request.body ?? {});
     const message = sanitizeResponseMessage(body.message);
+    const idem = idempotencyKey(request.headers as Record<string, unknown>);
 
-    const [need] = await sql`
-      SELECT n.id, n.agent_id, n.status, n.title, a.owner_wallet_address
-      FROM needs n JOIN agents a ON a.id = n.agent_id
-      WHERE n.id = ${needId}
-    `;
-    if (!need) return reply.code(404).send({ error: "Need not found", code: "need_not_found" });
-    if (need.status !== "open") {
-      return reply.code(409).send({
-        error: `This need is ${String(need.status)}, so it no longer takes responses`,
-        code: "need_not_open",
-        hint: "Only open needs take responses. Browse open needs with GET /api/needs.",
-      });
-    }
-    if (need.agent_id === requesterAgentId) {
-      return reply.code(409).send({
-        error: "You cannot respond to your own need",
-        code: "own_need",
-        hint: "Respond to a need posted by a different agent.",
-      });
-    }
+    type Rejection = { kind: "reject"; status: number; body: Record<string, unknown> };
+    const reject = (status: number, payload: Record<string, unknown>): Rejection => ({ kind: "reject", status, body: payload });
 
-    const [offer] = await sql`
-      SELECT o.id, o.agent_id, o.status, o.title, o.base_price, o.currency, a.owner_wallet_address, a.handle
-      FROM offers o JOIN agents a ON a.id = o.agent_id
-      WHERE o.id = ${body.offerId}
-    `;
-    if (!offer) return reply.code(404).send({ error: "Offer not found", code: "offer_not_found" });
-    if (offer.agent_id !== requesterAgentId) {
-      return reply.code(403).send({
-        error: "You can only respond with an offer you own",
-        code: "not_offer_owner",
-        hint: "Create your own offer first (POST /api/offers), then respond with its id.",
-      });
-    }
-    if (offer.status !== "active") {
-      return reply.code(409).send({
-        error: "This offer is archived, so it cannot answer a need",
-        code: "offer_not_active",
-        hint: "Respond with one of your active offers.",
-      });
-    }
-    // Same-owner guard (honest_0710 class): agents of one owner wallet must not
-    // court each other's needs. Unlike deal creation this applies at any price —
-    // a response exists only to start a deal, and same-owner deals never count.
-    if (sharesOwnerWallet(need.owner_wallet_address as string | null, offer.owner_wallet_address as string | null)) {
-      return reply.code(409).send({
-        error: "You and the need owner belong to the same owner wallet",
-        code: "same_owner",
-        hint: "Responses are for agents of different owners. Same-owner deals never count toward reputation or trust tiers.",
-      });
-    }
-
+    // Everything that decides eligibility runs INSIDE the insert transaction
+    // under row locks (FOR SHARE on the need, the offer and both agents), so a
+    // need archived, an offer archived or an owner wallet changed while this
+    // request is in flight cannot slip a stale response through: the writer
+    // waits for us, or we wait for the writer and then see its result.
     const result = await sql.begin(async (tx) => {
-      // Serialise one seller's responses so the duplicate and rate checks
-      // below cannot race a concurrent request from the same seller.
-      await tx`SELECT pg_advisory_xact_lock(hashtext(${"need-response:" + requesterAgentId}))`;
+      const [need] = await tx`
+        SELECT n.id, n.agent_id, n.status, n.title, a.owner_wallet_address
+        FROM needs n JOIN agents a ON a.id = n.agent_id
+        WHERE n.id = ${needId}
+        FOR SHARE OF n, a
+      `;
+      if (!need) return reject(404, { error: "Need not found", code: "need_not_found" });
+      if (need.status !== "open") {
+        return reject(409, {
+          error: `This need is ${String(need.status)}, so it no longer takes responses`,
+          code: "need_not_open",
+          hint: "Only open needs take responses. Browse open needs with GET /api/needs.",
+        });
+      }
+      if (need.agent_id === requesterAgentId) {
+        return reject(409, {
+          error: "You cannot respond to your own need",
+          code: "own_need",
+          hint: "Respond to a need posted by a different agent.",
+        });
+      }
+
+      const [offer] = await tx`
+        SELECT o.id, o.agent_id, o.status, o.title, o.base_price, o.currency,
+               a.owner_wallet_address, a.handle, ap_wallet_key(a.owner_wallet_address) AS owner_key
+        FROM offers o JOIN agents a ON a.id = o.agent_id
+        WHERE o.id = ${body.offerId}
+        FOR SHARE OF o, a
+      `;
+      if (!offer) return reject(404, { error: "Offer not found", code: "offer_not_found" });
+      if (offer.agent_id !== requesterAgentId) {
+        return reject(403, {
+          error: "You can only respond with an offer you own",
+          code: "not_offer_owner",
+          hint: "Create your own offer first (POST /api/offers), then respond with its id.",
+        });
+      }
+      if (offer.status !== "active") {
+        return reject(409, {
+          error: "This offer is archived, so it cannot answer a need",
+          code: "offer_not_active",
+          hint: "Respond with one of your active offers.",
+        });
+      }
+      // Same-owner guard (honest_0710 class): agents of one owner wallet must not
+      // court each other's needs. Unlike deal creation this applies at any price —
+      // a response exists only to start a deal, and same-owner deals never count.
+      if (sharesOwnerWallet(need.owner_wallet_address as string | null, offer.owner_wallet_address as string | null)) {
+        return reject(409, {
+          error: "You and the need owner belong to the same owner wallet",
+          code: "same_owner",
+          hint: "Responses are for agents of different owners. Same-owner deals never count toward reputation or trust tiers.",
+        });
+      }
+
+      // Limits belong to the stable OWNER identity (ap_wallet_key of the seller's
+      // owner wallet), not the agent id: several agents of one wallet share one
+      // duplicate window and one hourly budget. An agent with an unknown wallet
+      // has no owner identity to share, so it is keyed by its own id.
+      const ownerKey = (offer.owner_key as string | null) ?? null;
+      const lockKey = ownerKey ? `owner:${ownerKey}` : `agent:${requesterAgentId}`;
+      // Serialise this owner's responses so the duplicate and rate checks below
+      // cannot race a concurrent request from the same owner.
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${"need-response:" + lockKey}))`;
 
       const [existing] = await tx`
         SELECT id, created_at FROM concierge_messages
         WHERE related_need_id = ${needId}
           AND message_type = 'match-suggestion'
           AND metadata->>'source' = ${NEED_RESPONSE_SOURCE}
-          AND metadata->>'seller_agent_id' = ${requesterAgentId}
+          AND (metadata->>'seller_agent_id' = ${requesterAgentId}
+               OR (${ownerKey}::text IS NOT NULL AND metadata->>'seller_owner_key' = ${ownerKey}::text))
           AND status IN ${tx(LIVE_RESPONSE_STATUSES as unknown as string[])}
         ORDER BY created_at ASC
         LIMIT 1
@@ -240,7 +258,8 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         SELECT COUNT(*)::int AS n, MIN(created_at) AS oldest FROM concierge_messages
         WHERE message_type = 'match-suggestion'
           AND metadata->>'source' = ${NEED_RESPONSE_SOURCE}
-          AND metadata->>'seller_agent_id' = ${requesterAgentId}
+          AND (metadata->>'seller_agent_id' = ${requesterAgentId}
+               OR (${ownerKey}::text IS NOT NULL AND metadata->>'seller_owner_key' = ${ownerKey}::text))
           AND created_at > NOW() - INTERVAL '1 hour'
       `;
       if (Number(window.n) >= NEED_RESPONSES_PER_HOUR) {
@@ -248,21 +267,16 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         return { kind: "rate_limited" as const, retryAt };
       }
 
-      // Owners whose webhook subscribes to need.response get it right now;
-      // everyone else is queued for the concierge relay (concierge.message),
-      // so the response is never delivered twice and never silently dropped.
-      const [sub] = await tx`
-        SELECT EXISTS (
-          SELECT 1 FROM agent_webhooks
-          WHERE agent_id = ${need.agent_id as string} AND active = TRUE AND ${NEED_RESPONSE_EVENT} = ANY(events)
-        ) AS subscribed
-      `;
-      const subscribed = Boolean(sub?.subscribed);
       const metadata = {
         source: NEED_RESPONSE_SOURCE,
         seller_agent_id: requesterAgentId,
+        seller_owner_key: ownerKey,
         need_id: needId,
+        need_title: String(need.title),
         offer_id: body.offerId,
+        offer_title: String(offer.title),
+        offer_price: offer.base_price as string | number | null,
+        currency: offer.currency as string | null,
         message,
       };
       const subject = `Response to your need: ${String(need.title)}`.slice(0, 200);
@@ -277,54 +291,54 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
         sellerHandle: (offer.handle as string | null) ?? null,
         message,
       });
+      // Outbox: the row is committed `queued` (pending). It turns `sent` only
+      // after a webhook accepted it (see need-response-delivery.ts); a response
+      // is never marked sent ahead of delivery.
       const [row] = await tx`
         INSERT INTO concierge_messages (
           agent_id, message_type, priority, subject, body_md,
-          related_offer_id, related_need_id, status, sent_at, metadata
+          related_offer_id, related_need_id, status, metadata
         ) VALUES (
           ${need.agent_id as string}, 'match-suggestion', 5, ${subject}, ${bodyMd},
-          ${body.offerId}, ${needId}, ${subscribed ? "sent" : "queued"}, ${subscribed ? new Date() : null},
-          ${tx.json(metadata)}
+          ${body.offerId}, ${needId}, 'queued', ${tx.json(metadata)}
         )
         RETURNING id, status, created_at
       `;
-      return { kind: "created" as const, row, subscribed };
+      // The audit entry commits with the response or not at all: an audit
+      // failure rolls the whole response back so the seller can simply retry.
+      await audit(tx as unknown as Sql<Record<string, unknown>>, requesterAgentId, "need.respond", "need", needId, idem, {
+        responseId: String(row.id),
+        offerId: body.offerId,
+        hasMessage: message !== null,
+      });
+      return { kind: "created" as const, row, needAgentId: need.agent_id as string };
     });
 
+    if (result.kind === "reject") return reply.code(result.status).send(result.body);
     if (result.kind === "duplicate") {
       return reply.code(409).send({
         error: "You already responded to this need",
         code: "duplicate_response",
         responseId: result.existing.id,
-        hint: "One live response per seller per need. The need owner already has your earlier response.",
+        hint: "One live response per seller owner per need. The need owner already has the earlier response.",
       });
     }
     if (result.kind === "rate_limited") {
       const retryAfterSec = Math.max(1, Math.ceil((result.retryAt.getTime() - Date.now()) / 1000));
       reply.header("retry-after", String(retryAfterSec));
       return reply.code(429).send({
-        error: `Need response limit reached (${NEED_RESPONSES_PER_HOUR} per hour)`,
+        error: `Need response limit reached (${NEED_RESPONSES_PER_HOUR} per hour per owner wallet)`,
         code: "need_response_rate_limited",
         retryAfter: result.retryAt.toISOString(),
       });
     }
 
     const responseId = String(result.row.id);
-    await audit(sql, requesterAgentId, "need.respond", "need", needId, idempotencyKey(request.headers as Record<string, unknown>), {
-      responseId,
-      offerId: body.offerId,
-      hasMessage: message !== null,
-    });
-    deps.notifyAgents(sql, [need.agent_id as string], NEED_RESPONSE_EVENT, {
-      responseId,
-      needId,
-      needTitle: need.title,
-      offerId: body.offerId,
-      offerTitle: offer.title,
-      offerPrice: offer.base_price,
-      currency: offer.currency,
-      sellerAgentId: requesterAgentId,
-      message,
+    // Deliver after the commit without holding up the response. The committed
+    // `queued` row is the durable record: if this attempt fails or the process
+    // dies, the concierge relay retries it.
+    setImmediate(() => {
+      void attemptNeedResponseDelivery(sql, responseId, (obj, msg) => request.log.warn(obj, msg));
     });
     return reply.code(201).send({
       id: responseId,
@@ -333,7 +347,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
       sellerAgentId: requesterAgentId,
       message,
       createdAt: result.row.created_at,
-      next: "The need owner was notified. No deal exists yet; the owner proposes one via POST /api/deals/propose.",
+      next: "The response is recorded and is being delivered to the need owner. No deal exists yet; the owner proposes one via POST /api/deals/propose.",
     });
   });
 
@@ -342,7 +356,7 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
   app.get("/api/needs/:id/responses", async (request, reply) => {
     const requesterAgentId = getRequesterAgentId(request, reply);
     if (!requesterAgentId) return;
-    const { id: needId } = needIdParamsSchema.parse(request.params);
+    const { id: needId } = uuidParamSchema.parse(request.params);
     const [need] = await sql`SELECT agent_id FROM needs WHERE id = ${needId}`;
     if (!need) return reply.code(404).send({ error: "Need not found", code: "need_not_found" });
     if (need.agent_id !== requesterAgentId) {

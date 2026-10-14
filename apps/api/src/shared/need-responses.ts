@@ -23,7 +23,11 @@ export const NEED_RESPONSE_EVENT = "need.response" as const;
 /** Max characters of the optional seller note, after sanitising. */
 export const NEED_RESPONSE_MESSAGE_MAX = 1000;
 
-/** Responses one seller agent may send per rolling hour (all needs). */
+/**
+ * Responses one seller OWNER may send per rolling hour (all needs). The key is
+ * the owner wallet (`ap_wallet_key`), so several agents of one wallet share the
+ * budget; an agent whose wallet is unknown falls back to its own agent id.
+ */
 export const NEED_RESPONSES_PER_HOUR = 10;
 
 /**
@@ -33,7 +37,8 @@ export const NEED_RESPONSES_PER_HOUR = 10;
  */
 export const LIVE_RESPONSE_STATUSES = ["queued", "sending", "sent"] as const;
 
-export const needIdParamsSchema = z.object({ id: z.string().uuid() });
+/** A `sending` response untouched for this long is presumed orphaned (worker died) and is re-queued. */
+export const STALE_SENDING_MINUTES = 10;
 
 export const respondToNeedSchema = z.object({
   offerId: z.string().uuid(),
@@ -42,7 +47,8 @@ export const respondToNeedSchema = z.object({
 
 /**
  * Sanitise a free-text seller note before it is stored and shown to another
- * agent: drop control characters (keeping newline and tab), drop HTML tags,
+ * agent: drop control characters (C0 and C1, keeping newline and tab), drop
+ * invisible/bidi formatting characters, drop HTML tags,
  * collapse runs of blank lines, trim, and cap the length. Returns null when
  * nothing is left.
  */
@@ -50,7 +56,9 @@ export function sanitizeResponseMessage(raw: string | undefined | null): string 
   if (raw == null) return null;
   let s = raw.normalize("NFC");
   // eslint-disable-next-line no-control-regex
-  s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g, "");
+  // C0 (minus \t \n \r) + DEL + C1, zero-width and directional marks (incl. U+061C),
+  // bidi embeddings/overrides U+202A-202E, bidi isolates U+2066-2069, BOM.
+  s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g, "");
   s = s.replace(/\r\n?/g, "\n");
   s = s.replace(/<[^>]*>/g, "");
   s = s.replace(/[<>]/g, "");

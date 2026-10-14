@@ -10,6 +10,8 @@ import type { Sql } from "postgres";
 import { z } from "zod";
 import type { Deps } from "./routes/types.js";
 import { notifyAgents } from "./webhooks.js";
+import { STALE_SENDING_MINUTES } from "./shared/need-responses.js";
+import { deliverNeedResponse, isNeedResponse, type NeedResponseRow } from "./need-response-delivery.js";
 
 // ── Message queueing ──────────────────────────────────────────────────
 
@@ -226,6 +228,19 @@ export async function runConciergeRelay(
   `;
   const relayId = relayLog.id as string;
 
+  // A worker that died between claiming ('sending') and settling leaves the
+  // row stranded; hand such rows back to the queue (or fail them when out of attempts).
+  if (!options?.dryRun) {
+    await db`
+      UPDATE concierge_messages
+      SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
+          last_error = COALESCE(last_error, 'recovered stale sending'),
+          updated_at = NOW()
+      WHERE status = 'sending'
+        AND updated_at < NOW() - make_interval(mins => ${STALE_SENDING_MINUTES})
+    `;
+  }
+
   // Fetch queued messages ordered by priority (desc) then created_at (asc)
   const messages = await db`
     SELECT cm.*, a.handle AS agent_handle
@@ -246,14 +261,36 @@ export async function runConciergeRelay(
       continue;
     }
 
-    // Mark as sending
-    await db`
+    // Claim atomically: another worker (or the need-response request path) may
+    // have taken the row since the SELECT above; never deliver it twice.
+    const claimed = await db`
       UPDATE concierge_messages
       SET status = 'sending', attempts = attempts + 1, updated_at = NOW()
-      WHERE id = ${msg.id}
+      WHERE id = ${msg.id} AND status = 'queued'
+      RETURNING id
     `;
+    if (claimed.length === 0) {
+      skipped++;
+      continue;
+    }
 
     try {
+      if (isNeedResponse(msg)) {
+        // Seller need responses carry their own delivery contract (one event
+        // per webhook, need.response preferred, no re-delivery to a webhook
+        // that already accepted it). A failed delivery must requeue.
+        const outcome = await deliverNeedResponse(db, msg as unknown as NeedResponseRow);
+        if (outcome.kind === "failed") throw new Error(outcome.error);
+        // 'no_webhook' = inbox-only owner: the message is readable via the API, same as any concierge message.
+        await db`
+          UPDATE concierge_messages
+          SET status = 'sent', sent_at = NOW(), last_error = NULL, updated_at = NOW()
+          WHERE id = ${msg.id}
+        `;
+        sent++;
+        continue;
+      }
+
       // Check if agent has any active webhooks
       const [webhook] = await db`
         SELECT id FROM agent_webhooks
