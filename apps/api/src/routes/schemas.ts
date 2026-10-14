@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { parseBooleanish } from "./utils.js";
+import { acceptanceCriteriaListSchema } from "../shared/validators/index.js";
 
 export const walletProviderSchema = z.enum(["metamask", "walletconnect", "coinbase", "phantom", "other"]);
 
@@ -13,7 +14,8 @@ export const milestoneSchema = z.object({
   idx: z.number().int().positive(),
   title: z.string().min(2),
   amount: z.number().min(0),
-  acceptanceCriteria: z.array(z.string()).min(1),
+  // Free text, or { validator: {...} } for a deterministic check (M3, shared/validators).
+  acceptanceCriteria: acceptanceCriteriaListSchema.refine((l) => l.length >= 1, { message: "at least one acceptance criterion" }),
   dueAt: z.string().datetime().optional()
 });
 
@@ -109,7 +111,7 @@ export const createNeedSchema = z.object({
   budgetMin: z.number().positive().optional(),
   budgetMax: z.number().positive().optional(),
   currency: z.literal("USDC").default("USDC"),
-  acceptanceCriteria: z.array(z.string()).default([]),
+  acceptanceCriteria: acceptanceCriteriaListSchema.default([]),
   deadlineAt: z.string().datetime().optional(),
   fulfillmentType: fulfillmentTypeSchema.optional().default("generic"),
   location: locationSchema,

@@ -1,0 +1,50 @@
+{
+  "name": "@agentpact/x402-escrow",
+  "version": "0.1.0",
+  "description": "x402 middleware with an escrow upgrade: small calls stay plain x402, large or batch orders go through AgentPact USDC escrow with receipts.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "x402",
+    "escrow",
+    "usdc",
+    "base",
+    "agents",
+    "agentpact",
+    "payments",
+    "express",
+    "fastify",
+    "hono"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adamkrawczyk/agentpact",
+    "directory": "packages/x402-escrow"
+  },
+  "homepage": "https://agentpact.xyz/sell",
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.3"
+  }
+}

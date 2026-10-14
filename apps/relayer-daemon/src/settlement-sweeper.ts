@@ -86,6 +86,15 @@ interface CandidateRow {
   fulfillment_data: unknown;
   delivery_manifest: unknown;
   delivery_notes: string | null;
+  /** Latest delivery's status and its deterministic validator verdict (M3), if any. */
+  delivery_status?: string | null;
+  delivery_validation?: unknown;
+  /** Some milestone's latest delivery failed its validators. */
+  validator_failed_any?: boolean;
+  /** The buyer rejected some delivery of this deal (not a validator rejection). */
+  buyer_rejected_any?: boolean;
+  /** EVERY milestone's latest delivery is auto-verified by buyer-authored validators. */
+  validator_release_all?: boolean;
   seller_completed_count: string | number | null;
   is_self_deal: boolean;
 }
@@ -174,6 +183,36 @@ export async function runSettlementSweep(
         f.fulfillment_type, f.fulfillment_data,
         dl.artifact_manifest                                AS delivery_manifest,
         dl.verification_notes                               AS delivery_notes,
+        dl.status                                           AS delivery_status,
+        dl.auto_verify_result -> 'validators'               AS delivery_validation,
+        -- M3 deal-level validator facts. Auto-complete releases EVERY
+        -- milestone, so the latest delivery of one milestone is not enough.
+        EXISTS (
+          SELECT 1 FROM milestones m
+          JOIN LATERAL (
+            SELECT x.auto_verify_result FROM deliveries x
+            WHERE x.milestone_id = m.id ORDER BY x.created_at DESC LIMIT 1
+          ) lm ON TRUE
+          WHERE m.deal_id = d.id AND lm.auto_verify_result -> 'validators' ->> 'passed' = 'false'
+        )                                                   AS validator_failed_any,
+        EXISTS (
+          SELECT 1 FROM deliveries x JOIN milestones m ON m.id = x.milestone_id
+          WHERE m.deal_id = d.id AND x.status = 'rejected'
+            AND COALESCE(x.auto_verify_result -> 'validators' ->> 'passed', 'true') <> 'false'
+        )                                                   AS buyer_rejected_any,
+        (
+          EXISTS (SELECT 1 FROM milestones m WHERE m.deal_id = d.id AND m.status <> 'cancelled')
+          AND NOT EXISTS (
+            SELECT 1 FROM milestones m
+            LEFT JOIN LATERAL (
+              SELECT x.status, x.auto_verify_result FROM deliveries x
+              WHERE x.milestone_id = m.id ORDER BY x.created_at DESC LIMIT 1
+            ) lm ON TRUE
+            WHERE m.deal_id = d.id AND m.status <> 'cancelled'
+              AND NOT (lm.status IS NOT DISTINCT FROM 'auto-verified'
+                       AND lm.auto_verify_result -> 'validators' ->> 'releaseEligible' = 'true')
+          )
+        )                                                   AS validator_release_all,
         (d.buyer_agent_id = d.seller_agent_id) AS is_self_deal,
         (SELECT COUNT(*) FROM deals x
           WHERE x.seller_agent_id = d.seller_agent_id AND x.status = 'completed'
@@ -189,7 +228,7 @@ export async function runSettlementSweep(
       ) f ON TRUE
       LEFT JOIN LATERAL (
         -- The latest submit_delivery artifact for this deal (any milestone).
-        SELECT x.artifact_manifest, x.verification_notes
+        SELECT x.artifact_manifest, x.verification_notes, x.status, x.auto_verify_result
         FROM deliveries x
         JOIN milestones m ON m.id = x.milestone_id
         WHERE m.deal_id = d.id
@@ -221,6 +260,31 @@ export async function runSettlementSweep(
         if (deal.is_self_deal) {
           outcome = "skip_self_deal";
           reason = "buyer_agent_id = seller_agent_id — never auto-released, never counted as revenue";
+        } else if (deal.validator_failed_any === true || readValidation(deal.delivery_validation)?.passed === false) {
+          // M3: a deterministic failure on ANY milestone blocks release; the
+          // judge is not asked to overrule it.
+          judge = "validator";
+          p = 0;
+          outcome = "review";
+          const v = readValidation(deal.delivery_validation);
+          const why = v && !v.passed ? v.reasons.join("; ") : "a milestone's latest delivery failed its validators";
+          reason = `validator failed — not auto-released: ${why.slice(0, 400)}`;
+        } else if (deal.validator_release_all === true && deal.buyer_rejected_any === true) {
+          // The buyer rejected a delivery; a later validator pass (e.g. the
+          // same artifact resubmitted) must not override that.
+          judge = "validator";
+          outcome = "review";
+          reason = "validators passed but the buyer rejected a delivery of this deal — needs review";
+        } else if (
+          deal.validator_release_all === true
+          && deal.delivery_status === "auto-verified"
+          && readValidation(deal.delivery_validation)?.releaseEligible === true
+        ) {
+          // Every milestone passed buyer-authored validators: the
+          // deterministic verdict decides and the judge is not consulted.
+          judge = "validator";
+          p = 1;
+          ({ outcome, reason } = await releaseDecision(deal.id, cfg, doFetch, "validators passed on every milestone"));
         } else {
           const evidence = buildEvidence({
             dealTitle: deal.title,
@@ -240,25 +304,7 @@ export async function runSettlementSweep(
           } else {
             p = verdict.p;
             if (verdict.p >= cfg.completeThreshold) {
-              if (!cfg.autoReleaseEnabled) {
-                outcome = "review";
-                reason = `p=${verdict.p.toFixed(3)} >= threshold but auto-release is disabled (shadow mode)`;
-              } else {
-                const rel = await releaseViaApi(deal.id, cfg, doFetch);
-                if (rel.ok && rel.completed) {
-                  outcome = "complete";
-                  reason = "released via /api/deals/:id/fulfillment/auto-complete";
-                } else if (rel.settlementPending) {
-                  // Not a failure: the API correctly refused to complete an
-                  // unfunded fee-bearing deal. Recording it as 'hold' keeps it
-                  // eligible for a later tick once funding arrives.
-                  outcome = "hold";
-                  reason = "api: settlement_pending (deal not funded)";
-                } else {
-                  outcome = "error";
-                  reason = `api refused: ${rel.reason}`;
-                }
-              }
+              ({ outcome, reason } = await releaseDecision(deal.id, cfg, doFetch, `p=${verdict.p.toFixed(3)} >= threshold`));
             } else {
               outcome = "review";
               reason = `p=${verdict.p.toFixed(3)} < ${cfg.completeThreshold} — evidence insufficient for automatic release`;
@@ -307,6 +353,55 @@ export async function runSettlementSweep(
   }
 }
 
+interface ValidationVerdict { passed: boolean; releaseEligible: boolean; reasons: string[] }
+
+/**
+ * deliveries.auto_verify_result.validators as written by the API
+ * (shared/validators): { passed, releaseEligible, verdicts: [{ type, passed, reasons }] }.
+ * releaseEligible = passed AND at least one validator came from the buyer's
+ * own need (milestone criteria can be seller-written).
+ * Anything malformed reads as "no verdict" and falls back to the judge —
+ * never as a pass.
+ */
+function readValidation(raw: unknown): ValidationVerdict | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { passed?: unknown; releaseEligible?: unknown; verdicts?: unknown };
+  if (typeof r.passed !== "boolean") return null;
+  const verdicts = Array.isArray(r.verdicts) ? r.verdicts as Array<{ type?: unknown; passed?: unknown; reasons?: unknown }> : [];
+  // A verdict list that disagrees with the summary is not trusted as a pass.
+  const passed = r.passed && verdicts.length > 0 && verdicts.every((v) => v.passed === true);
+  const reasons = verdicts
+    .filter((v) => v.passed !== true)
+    .flatMap((v) => (Array.isArray(v.reasons) ? v.reasons : []).map((x) => `${String(v.type)}: ${String(x)}`));
+  return {
+    passed,
+    releaseEligible: passed && r.releaseEligible === true,
+    reasons: passed ? [] : (reasons.length ? reasons : ["validator verdict malformed"]),
+  };
+}
+
+/** The ONE place a release decision becomes an API call (judge or validator path). */
+async function releaseDecision(
+  dealId: string,
+  cfg: SettlementSweeperConfig,
+  doFetch: typeof fetch,
+  basis: string,
+): Promise<{ outcome: Outcome; reason: string }> {
+  if (!cfg.autoReleaseEnabled) {
+    return { outcome: "review", reason: `${basis} but auto-release is disabled (shadow mode)` };
+  }
+  const rel = await releaseViaApi(dealId, cfg, doFetch);
+  if (rel.ok && rel.completed) {
+    return { outcome: "complete", reason: `${basis}; released via /api/deals/:id/fulfillment/auto-complete` };
+  }
+  if (rel.settlementPending) {
+    // Not a failure: the API correctly refused to complete an unfunded
+    // fee-bearing deal. 'hold' keeps it eligible once funding arrives.
+    return { outcome: "hold", reason: "api: settlement_pending (deal not funded)" };
+  }
+  return { outcome: "error", reason: `api refused: ${rel.reason}` };
+}
+
 interface ReleaseOutcome {
   ok: boolean;
   completed: boolean;
@@ -346,6 +441,10 @@ async function releaseViaApi(
     res = await doFetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", "x-admin-key": cfg.adminApiKey },
+      // Fastify rejects `content-type: application/json` with an EMPTY body
+      // (400 FST_ERR_CTP_EMPTY_JSON_BODY) before the route runs, so without a
+      // body every release attempt was refused. Found by the M3 real-API test.
+      body: "{}",
       signal: ctrl.signal,
     });
   } catch (err) {

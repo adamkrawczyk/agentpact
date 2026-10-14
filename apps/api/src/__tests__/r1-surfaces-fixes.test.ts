@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { beforeEach, describe, expect, it } from "vitest";
 import { cleanDatabase, createTestApp, getAuthHeadersForAgent } from "./helpers/testApp.js";
 import { resetPublicStatsCache } from "../routes/public-stats.js";
@@ -156,7 +156,11 @@ describe("R1-09 — every advertised call exists", () => {
   const web = read("../../../web/src/index.ts");
   const skill = read("../../../../docs/agentpact-skill/SKILL.md");
   const mcpReadme = read("../../../mcp/README.md");
-  const mcpSource = read("../../../mcp/src/index.ts");
+  // Tools live in src/index.ts and in the per-domain modules under src/tools/.
+  const toolsDir = new URL("../../../mcp/src/tools/", import.meta.url);
+  const mcpSource =
+    read("../../../mcp/src/index.ts") +
+    readdirSync(toolsDir).filter((f) => f.endsWith(".ts")).map((f) => readFileSync(new URL(f, toolsDir), "utf8")).join("\n");
   const tools = new Set([...mcpSource.matchAll(/name: "(agentpact\.[a-z_]+)"/g)].map((m) => m[1]));
 
   it("every agentpact.* MCP tool named on the homepage, llms.txt, SKILL.md and the MCP README is registered", () => {

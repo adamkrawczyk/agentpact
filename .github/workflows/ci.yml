@@ -30,3 +30,10 @@ jobs:
 
       - name: Test MCP (if present)
         run: npm run -w @agentpact/mcp test --if-present
+
+      - name: Build + test x402-escrow and the demo seller (node --test)
+        run: |
+          npm run -w @agentpact/x402-escrow build
+          npm run -w @agentpact/x402-escrow test
+          npm run -w @agentpact/demo-x402-seller build
+          npm run -w @agentpact/demo-x402-seller test

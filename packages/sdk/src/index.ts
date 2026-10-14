@@ -88,11 +88,49 @@ export interface Need {
   created_at: string;
 }
 
+/**
+ * A deterministic acceptance check run on the delivered artifact before any
+ * judge (API: apps/api/src/shared/validators). Fetched over https from
+ * artifacts[artifactIndex ?? 0].url.
+ */
+export type ValidatorSpec =
+  | {
+      type: 'csv-schema';
+      columns: Array<{ name: string; type?: 'string' | 'integer' | 'number' | 'boolean' | 'date'; required?: boolean }>;
+      minRows?: number;
+      maxRows?: number;
+      maxBytes?: number;
+      delimiter?: ',' | ';' | '\t' | '|';
+      allowExtraColumns?: boolean;
+      artifactIndex?: number;
+    }
+  | { type: 'json-schema'; schema: Record<string, unknown>; maxBytes?: number; artifactIndex?: number }
+  | { type: 'sha256'; sha256: string; maxBytes?: number; artifactIndex?: number };
+
+/** Free text, or a machine-checkable validator. */
+export type AcceptanceCriterion = string | { validator: ValidatorSpec };
+
+export interface SellerReadinessItem {
+  id: 'profile' | 'payout_destination' | 'priced_offer' | 'notifications' | 'x402_endpoint';
+  required: boolean;
+  done: boolean;
+  detail: string;
+  next: { http: string; mcp?: string; body?: unknown; docs?: string } | null;
+}
+
+export interface SellerReadiness {
+  agentId: string;
+  ready: boolean;
+  progress: { done: number; required: number };
+  nextStep: SellerReadinessItem['id'] | null;
+  items: SellerReadinessItem[];
+}
+
 export interface Milestone {
   idx: number;
   title: string;
   amount: number;
-  acceptanceCriteria: string[];
+  acceptanceCriteria: AcceptanceCriterion[];
   dueAt?: string;
 }
 
@@ -142,7 +180,7 @@ export interface CreateNeedInput {
   currency?: 'USDC';
   category: string;
   tags?: string[];
-  acceptanceCriteria?: string[];
+  acceptanceCriteria?: AcceptanceCriterion[];
   deadlineAt?: string;
   fulfillmentType?: FulfillmentType;
   location?: Record<string, unknown>;
@@ -557,6 +595,40 @@ class AgentsClient {
   }
 }
 
+/** M3 self-serve seller onboarding. */
+class SellersClient {
+  constructor(
+    private baseUrl: string,
+    private apiKey: string,
+    private timeout: number,
+  ) {}
+
+  /** Checklist with the exact next call for every todo item. */
+  async readiness(): Promise<SellerReadiness> {
+    return request<SellerReadiness>(this.baseUrl, '/api/sellers/me/readiness', {
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  /** Register your public x402 endpoint (https). Optional readiness item. */
+  async registerX402Endpoint(input: { url: string; offerId?: string }): Promise<{ id: string; url: string; offer_id: string | null }> {
+    return request(this.baseUrl, '/api/sellers/me/x402-endpoints', {
+      method: 'POST',
+      body: input,
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  async listX402Endpoints(): Promise<{ endpoints: Array<{ id: string; url: string; offer_id: string | null }> }> {
+    return request(this.baseUrl, '/api/sellers/me/x402-endpoints', {
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+}
+
 class FeedbackClient {
   constructor(
     private baseUrl: string,
@@ -782,6 +854,8 @@ export class AgentPact {
   public readonly deals: DealsClient;
   public readonly agents: AgentsClient;
   public readonly feedback: FeedbackClient;
+  /** Seller onboarding (readiness checklist, x402 endpoints). */
+  public readonly sellers: SellersClient;
   /** settlement protocol v2 intents surface (Class A / B / C). */
   public readonly intents: IntentsClient;
 
@@ -801,6 +875,7 @@ export class AgentPact {
     this.deals = new DealsClient(this.baseUrl, this.apiKey, this.agentId, this.timeout);
     this.agents = new AgentsClient(this.baseUrl, this.apiKey, this.timeout);
     this.feedback = new FeedbackClient(this.baseUrl, this.apiKey, this.agentId, this.timeout);
+    this.sellers = new SellersClient(this.baseUrl, this.apiKey, this.timeout);
     this.intents = new IntentsClient(
       this.baseUrl,
       this.apiKey,

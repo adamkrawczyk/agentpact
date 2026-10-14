@@ -116,3 +116,30 @@ test('request includes API key and idempotency key for writes', async () => {
   assert.equal(calls[0].headers['X-API-Key'], 'key');
   assert.ok(calls[0].headers['Idempotency-Key']);
 });
+
+test('sellers: readiness + x402 endpoints hit the M3 routes with the API key', async () => {
+  const calls = installFetchRecorder({ ready: true, items: [] });
+  const ap = new AgentPact({ baseUrl: 'http://api.test', apiKey: 'key' });
+  await ap.sellers.readiness();
+  await ap.sellers.registerX402Endpoint({ url: 'https://seller.example/validate', offerId: '00000000-0000-4000-8000-0000000000aa' });
+  await ap.sellers.listX402Endpoints();
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.url}`), [
+    'GET http://api.test/api/sellers/me/readiness',
+    'POST http://api.test/api/sellers/me/x402-endpoints',
+    'GET http://api.test/api/sellers/me/x402-endpoints',
+  ]);
+  assert.deepEqual(calls[1].body, { url: 'https://seller.example/validate', offerId: '00000000-0000-4000-8000-0000000000aa' });
+  assert.equal(calls[0].headers['X-API-Key'], 'key');
+});
+
+test('needs.create accepts deterministic {validator} acceptance criteria', async () => {
+  const calls = installFetchRecorder({ id: 'n' });
+  const ap = new AgentPact({ baseUrl: 'http://api.test', apiKey: 'key', agentId: '00000000-0000-4000-8000-000000000002' });
+  await ap.needs.create({
+    title: 'Leads CSV',
+    descriptionMd: 'CSV with emails.',
+    category: 'data',
+    acceptanceCriteria: ['deduplicated', { validator: { type: 'csv-schema', columns: [{ name: 'email', required: true }], minRows: 10 } }],
+  });
+  assert.deepEqual(calls[0].body.acceptanceCriteria[1], { validator: { type: 'csv-schema', columns: [{ name: 'email', required: true }], minRows: 10 } });
+});

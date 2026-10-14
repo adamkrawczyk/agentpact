@@ -51,6 +51,7 @@ import { registerAuditOrdersRoutes } from './routes/audit-orders.js';
 import { registerVerifiedSellerWebhookRoutes } from './routes/verified-seller-webhook.js';
 import { registerPublicStatsRoutes } from './routes/public-stats.js';
 import telemetryPlugin from './plugins/telemetry.js';
+import { registerRoutes as registerSellersRoutes } from './routes/sellers.js';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -1515,6 +1516,7 @@ app.addHook("preHandler", async (request, reply) => {
   await registerAuditOrdersRoutes(app, _sql);
   await registerVerifiedSellerWebhookRoutes(app, _sql);
   await registerPublicStatsRoutes(app, _sql);
+  await registerSellersRoutes(app, _sql);
 }
 
 export const shutdown = async () => {
