@@ -30,3 +30,6 @@ jobs:
 
       - name: Test MCP (if present)
         run: npm run -w @agentpact/mcp test --if-present
+
+      - name: Test receipts package (apr-1 canonical JSON, signing, Merkle; node --test)
+        run: npm run -w @agentpact/receipts test
