@@ -24,6 +24,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Sql } from "postgres";
 import { z } from "zod";
+import { uuidParamSchema } from "./schemas.js";
 import type { Deps } from "./types.js";
 import {
   getRequesterAgentId,
@@ -224,7 +225,7 @@ export async function registerRoutes(
   // sensitive fields are inside the on-chain contract anyway. Returns the
   // open-decimal NUMERIC columns as strings to preserve precision.
   app.get("/api/intents/:id", async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const { id } = uuidParamSchema.parse(request.params);
     const [row] = await sql`SELECT * FROM intents WHERE id = ${id}`;
     if (!row) return reply.code(404).send({ error: "Intent not found", code: "NOT_FOUND" });
     return reply.code(200).send(row);
@@ -261,7 +262,7 @@ export async function registerRoutes(
     "/api/intents/:id/accept",
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const { id } = request.params as { id: string };
+      const { id } = uuidParamSchema.parse(request.params);
       const body = acceptIntentSchema.parse(request.body);
       const requester = getRequesterAgentId(request, reply);
       if (!requester) return;
@@ -312,7 +313,7 @@ export async function registerRoutes(
     "/api/intents/:id/reveal-preimage",
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const { id } = request.params as { id: string };
+      const { id } = uuidParamSchema.parse(request.params);
       const body = z
         .object({
           agentId: z.string().uuid(),
@@ -401,7 +402,7 @@ export async function registerRoutes(
     "/api/intents/:id/deliver",
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const { id } = request.params as { id: string };
+      const { id } = uuidParamSchema.parse(request.params);
       const body = z.object({ agentId: z.string().uuid() }).parse(request.body);
       const requester = getRequesterAgentId(request, reply);
       if (!requester || requester !== body.agentId) {
@@ -445,7 +446,7 @@ export async function registerRoutes(
     "/api/intents/:id/acknowledge",
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const { id } = request.params as { id: string };
+      const { id } = uuidParamSchema.parse(request.params);
       const body = acknowledgeSchema.parse(request.body);
       const requester = getRequesterAgentId(request, reply);
       if (!requester || requester !== body.agentId) {
@@ -475,7 +476,7 @@ export async function registerRoutes(
     "/api/intents/:id/reject",
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const { id } = request.params as { id: string };
+      const { id } = uuidParamSchema.parse(request.params);
       const body = rejectSchema.parse(request.body);
       const requester = getRequesterAgentId(request, reply);
       if (!requester || requester !== body.agentId) {
@@ -509,7 +510,7 @@ export async function registerRoutes(
     "/api/intents/:id/reveal",
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const { id } = request.params as { id: string };
+      const { id } = uuidParamSchema.parse(request.params);
       const body = revealSchema.parse(request.body);
       const requester = getRequesterAgentId(request, reply);
       if (!requester || requester !== body.agentId) {
@@ -536,7 +537,7 @@ export async function registerRoutes(
     "/api/intents/:id/claim",
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const { id } = request.params as { id: string };
+      const { id } = uuidParamSchema.parse(request.params);
       const body = claimIntentSchema.parse(request.body);
       const requester = getRequesterAgentId(request, reply);
       if (!requester || requester !== body.agentId) {
@@ -577,7 +578,7 @@ export async function registerRoutes(
     "/api/intents/:id/claim-unit",
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const { id } = request.params as { id: string };
+      const { id } = uuidParamSchema.parse(request.params);
       const body = claimUnitSchema.parse(request.body);
       const requester = getRequesterAgentId(request, reply);
       if (!requester || requester !== body.agentId) {
@@ -623,7 +624,7 @@ export async function registerRoutes(
     "/api/intents/:id/cancel",
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const { id } = request.params as { id: string };
+      const { id } = uuidParamSchema.parse(request.params);
       const body = z.object({ agentId: z.string().uuid() }).parse(request.body);
       const requester = getRequesterAgentId(request, reply);
       if (!requester || requester !== body.agentId) {
