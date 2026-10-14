@@ -92,9 +92,23 @@ export function generateTestNeed(agentId: string) {
   };
 }
 
+/**
+ * Empties every table the API suites write to.
+ *
+ * Lock order matters. The in-process telemetry flusher (plugins/telemetry.ts)
+ * INSERTs into api_usage and then reads agents / agent_credentials, i.e. it
+ * takes api_usage FIRST. A bare TRUNCATE listing agents … api_usage takes them
+ * the other way round, so a flush landing mid-statement made Postgres abort one
+ * side with `deadlock detected`; when the TRUNCATE lost, the calling test's
+ * hook failed. Taking api_usage first inside the same transaction gives both
+ * sides one lock order, so there is no cycle
+ * (clean-database-telemetry-race.test.ts pins it).
+ */
 export async function cleanDatabase() {
   authHeadersCache.clear();
-  await sql`TRUNCATE TABLE
+  await sql.begin(async (tx) => {
+    await tx`LOCK TABLE api_usage IN ACCESS EXCLUSIVE MODE`;
+    await tx`TRUNCATE TABLE
     notification_log, agent_webhooks,
     deal_fulfillment, consultation_responses,
     disputes, feedback, deliveries, payment_intents,
@@ -105,4 +119,5 @@ export async function cleanDatabase() {
     concierge_messages, concierge_relay_log,
     platform_fee_ledger, audit_orders, seller_notices, funnel_events
     RESTART IDENTITY CASCADE`;
+  });
 }
