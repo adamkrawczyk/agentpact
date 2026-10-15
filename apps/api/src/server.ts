@@ -1,4 +1,5 @@
 import { app, shutdown, sql } from "./index.js";
+import { drainMsFromEnv, installGracefulShutdown, notifyPm2Ready } from "./process-lifecycle.js";
 import { readdir, readFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { existsSync } from "node:fs";
@@ -99,11 +100,30 @@ async function start() {
     await runMigrations();
   }
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  // Drain, then exit. shutdown() alone closes the server and the pool but
+  // leaves the process alive under pm2 cluster mode (IPC keeps the loop
+  // busy), which would stall every reload until pm2's kill_timeout.
+  // On SIGINT the worker first drains (keeps serving, answers every request
+  // with Connection: close so the proxy retires its pooled sockets), then
+  // closes. See process-lifecycle.ts for why.
+  let draining = false;
+  app.addHook("onRequest", async (_request, reply) => {
+    if (draining) reply.header("connection", "close");
+  });
+  installGracefulShutdown(shutdown, {
+    drainMs: drainMsFromEnv(),
+    onDrainStart: () => {
+      draining = true;
+    },
+  });
 
   app.listen({ port: PORT, host: HOST }).then(() => {
     console.log(`API server listening on ${HOST}:${PORT}`);
+    // pm2 cluster mode (deploy/ecosystem.config.cjs, wait_ready) keeps the old
+    // worker serving until the new one says it is ready. Send it only after
+    // listen() resolves so a reload never hands traffic to a worker that is
+    // still booting. No-op outside pm2 (no IPC channel).
+    notifyPm2Ready();
   }).catch(async (error) => {
     app.log.error(error);
     await shutdown();

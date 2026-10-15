@@ -29,7 +29,8 @@ name: Deploy
 # The remote step below was rewritten to match this shape: pull, npm ci,
 # npm run build (with BUILD_SHA exported so the web tier's /health can prove
 # which commit is live — see WEB_FRESHNESS_PROBES in smoke-prod.sh), migrate,
-# then `pm2 reload ecosystem.config.cjs` (zero-downtime) followed by a
+# then `scripts/pm2-apply.sh` (zero-downtime reload of the tracked
+# deploy/ecosystem.config.cjs; see the Reload step) followed by a
 # `pm2 jlist` check that all four apps report `status":"online"`.
 #
 # The prod checkout was also found to be a DIVERGENT FORK at the time of this
@@ -265,8 +266,15 @@ jobs:
                fi
 
                # ── Reload (zero-downtime) ──────────────────────────────────
+               # scripts/pm2-apply.sh applies the TRACKED pm2 config
+               # (deploy/ecosystem.config.cjs). ap-api and ap-web run in pm2
+               # cluster mode there, so a reload starts the new worker, waits
+               # for its process.send('ready') (sent after listen), and only
+               # then drains the old one: the port never closes. In fork mode
+               # the same reload was a restart and the proxy answered 502 for
+               # ~4 s per deploy. Fork-mode apps (mcp, relayer) still restart.
                set -a; source /etc/agentpact/.env; set +a
-               pm2 reload ecosystem.config.cjs --update-env
+               bash scripts/pm2-apply.sh
 
                # ── Verify all 4 processes came back online ────────────────
                sleep 3
