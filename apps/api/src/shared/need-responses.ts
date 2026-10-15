@@ -26,7 +26,8 @@ export const NEED_RESPONSE_MESSAGE_MAX = 1000;
 /**
  * Responses one seller OWNER may send per rolling hour (all needs). The key is
  * the owner wallet (`ap_wallet_key`), so several agents of one wallet share the
- * budget; an agent whose wallet is unknown falls back to its own agent id.
+ * budget. An agent whose wallet is unknown or a placeholder cannot respond at
+ * all (403 owner_wallet_required) — there is no per-agent fallback quota.
  */
 export const NEED_RESPONSES_PER_HOUR = 10;
 
