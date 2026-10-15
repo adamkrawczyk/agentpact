@@ -7,6 +7,7 @@ import { sharesOwnerWallet } from "../shared/deal-guards.js";
 import { attemptNeedResponseDelivery } from "../need-response-delivery.js";
 import {
   LIVE_RESPONSE_STATUSES,
+  NEED_RESPONSE_EVENT,
   NEED_RESPONSE_SOURCE,
   NEED_RESPONSES_PER_HOUR,
   composeResponseBody,
@@ -258,7 +259,22 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
           AND metadata->>'source' = ${NEED_RESPONSE_SOURCE}
           AND (metadata->>'seller_agent_id' = ${requesterAgentId}
                OR (${ownerKey}::text IS NOT NULL AND metadata->>'seller_owner_key' = ${ownerKey}::text))
-          AND status IN ${tx(LIVE_RESPONSE_STATUSES as unknown as string[])}
+          AND (
+            status IN ${tx(LIVE_RESPONSE_STATUSES as unknown as string[])}
+            -- A 'failed' row can still have reached the owner: with 2+ webhooks, one may have
+            -- accepted it while another exhausted its retries: delivered, so still a duplicate.
+            -- The outer CASE guarantees the JSON cast only runs on this response's own sent events.
+            OR EXISTS (
+              SELECT 1 FROM notification_log nl
+              WHERE nl.agent_id = concierge_messages.agent_id
+                AND CASE
+                  WHEN nl.status = 'sent' AND nl.event_type IN (${NEED_RESPONSE_EVENT}, 'concierge.message')
+                  THEN (CASE WHEN jsonb_typeof(nl.payload_json) = 'string' THEN (nl.payload_json #>> '{}')::jsonb ELSE nl.payload_json END)
+                         -> 'payload' ->> 'responseId' = concierge_messages.id::text
+                  ELSE FALSE
+                END
+            )
+          )
         ORDER BY created_at ASC
         LIMIT 1
       `;

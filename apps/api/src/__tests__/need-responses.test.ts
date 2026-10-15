@@ -558,6 +558,81 @@ describe("review fix (c): sent only after durable delivery; failures stay retrya
     expect(deliveries.filter((d) => d.status === "sent").map((d) => d.event_type)).toEqual(["need.response"]);
   }, 30000);
 
+  it("issue #178: a response one webhook accepted stays a duplicate even after another webhook's retries are exhausted", async () => {
+    const buyer = await agent(W_BUYER);
+    const seller = await agent(W_SELLER);
+    for (const url of ["https://webhook.test/good", "https://webhook.test/bad"]) {
+      const hook = await app.inject({
+        method: "POST", url: "/api/webhooks", headers: buyer.headers,
+        payload: { url, events: ["need.response"] },
+      });
+      expect(hook.statusCode).toBe(201);
+    }
+    globalThis.fetch = async (input: Parameters<typeof fetch>[0]) =>
+      String(input).includes("/bad")
+        ? new Response("boom", { status: 500, statusText: "Server Error" })
+        : new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    const needId = await needOf(buyer.id);
+    const res = await respond(needId, seller.headers, { offerId: await offerOf(seller.id) });
+    expect(res.statusCode, res.body).toBe(201);
+    const id = JSON.parse(res.body).id;
+    // request-path attempt: good hook accepted, bad hook failed (3 tries with backoff) -> back to queued
+    const start = Date.now();
+    for (;;) {
+      const [row] = await sql`SELECT status, attempts FROM concierge_messages WHERE id = ${id}`;
+      if (row.status === "queued" && Number(row.attempts) >= 1) break;
+      if (Date.now() - start > 15000) throw new Error(`never settled: ${JSON.stringify(row)}`);
+      await sleep(100);
+    }
+    // One more attempt allowed, then the relay exhausts it.
+    await sql`UPDATE concierge_messages SET max_attempts = 2 WHERE id = ${id}`;
+    await runConciergeRelay(sql, { runType: "manual" });
+    const [exhausted] = await sql`SELECT status FROM concierge_messages WHERE id = ${id}`;
+    expect(exhausted.status).toBe("failed");
+    expect((await deliveriesFor(id, buyer.id)).filter((d) => d.status === "sent")).toHaveLength(1);
+
+    // The owner already has the response, so the seller may not send it again.
+    const again = await respond(needId, seller.headers, { offerId: await offerOf(seller.id) });
+    expect(again.statusCode, again.body).toBe(409);
+    expect(JSON.parse(again.body).code).toBe("duplicate_response");
+    expect(JSON.parse(again.body).responseId).toBe(id);
+    expect((await counts()).messages).toBe(1);
+  }, 40000);
+
+  it("issue #178: a response NO webhook accepted stays resubmittable after retry exhaustion", async () => {
+    const buyer = await agent(W_BUYER);
+    const seller = await agent(W_SELLER);
+    const hook = await app.inject({
+      method: "POST", url: "/api/webhooks", headers: buyer.headers,
+      payload: { url: "https://webhook.test/bad", events: ["need.response"] },
+    });
+    expect(hook.statusCode).toBe(201);
+    globalThis.fetch = async () => new Response("boom", { status: 500, statusText: "Server Error" });
+    const needId = await needOf(buyer.id);
+    const res = await respond(needId, seller.headers, { offerId: await offerOf(seller.id) });
+    const id = JSON.parse(res.body).id;
+    await sleep(4500);
+    await sql`UPDATE concierge_messages SET status = 'failed' WHERE id = ${id}`;
+    const again = await respond(needId, seller.headers, { offerId: await offerOf(seller.id) });
+    expect(again.statusCode, again.body).toBe(201);
+  }, 30000);
+
+  it("issue #178 breaker: junk notification_log rows of the owner (non-JSON string, null payload, other events, unsent) neither 500 nor block a failed, undelivered response", async () => {
+    const buyer = await agent(W_BUYER);
+    const seller = await agent(W_SELLER);
+    const needId = await needOf(buyer.id);
+    const first = await respond(needId, seller.headers, { offerId: await offerOf(seller.id) });
+    const id = JSON.parse(first.body).id;
+    await sql`UPDATE concierge_messages SET status = 'failed' WHERE id = ${id}`;
+    await sql`INSERT INTO notification_log (agent_id, event_type, payload_json, status, attempts) VALUES
+      (${buyer.id}, 'deal.updated', to_jsonb('not json at all'::text), 'sent', 1),
+      (${buyer.id}, 'need.response', 'null'::jsonb, 'sent', 1),
+      (${buyer.id}, 'need.response', ${JSON.stringify({ event: "need.response", payload: { responseId: id } })}::jsonb, 'failed', 3),
+      (${buyer.id}, 'deal.updated', ${JSON.stringify({ event: "deal.updated", payload: { responseId: id } })}::jsonb, 'sent', 1)`;
+    const again = await respond(needId, seller.headers, { offerId: await offerOf(seller.id) });
+    expect(again.statusCode, again.body).toBe(201);
+  }, 30000);
+
   it("an audit failure rolls the response back: nothing is lost and the seller can retry", async () => {
     const buyer = await agent(W_BUYER);
     const seller = await agent(W_SELLER);
