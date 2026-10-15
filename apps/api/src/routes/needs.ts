@@ -233,10 +233,20 @@ export async function registerRoutes(app: FastifyInstance, sql: Sql<Record<strin
 
       // Limits belong to the stable OWNER identity (ap_wallet_key of the seller's
       // owner wallet), not the agent id: several agents of one wallet share one
-      // duplicate window and one hourly budget. An agent with an unknown wallet
-      // has no owner identity to share, so it is keyed by its own id.
+      // duplicate window and one hourly budget. An agent with an unknown or
+      // placeholder wallet has NO owner identity, and falling back to its agent
+      // id would hand every freshly registered zero-wallet agent its own quota
+      // (50 agents = 50 responses to one buyer). So responding requires a real
+      // owner wallet: no identity, no response.
       const ownerKey = (offer.owner_key as string | null) ?? null;
-      const lockKey = ownerKey ? `owner:${ownerKey}` : `agent:${requesterAgentId}`;
+      if (!ownerKey) {
+        return reject(403, {
+          error: "Link a real owner wallet to your agent before responding to needs",
+          code: "owner_wallet_required",
+          hint: "Need responses are limited per owner wallet, so agents without one cannot respond. Set it with PATCH /api/agents/:id/wallet, then retry.",
+        });
+      }
+      const lockKey = `owner:${ownerKey}`;
       // Serialise this owner's responses so the duplicate and rate checks below
       // cannot race a concurrent request from the same owner.
       await tx`SELECT pg_advisory_xact_lock(hashtext(${"need-response:" + lockKey}))`;

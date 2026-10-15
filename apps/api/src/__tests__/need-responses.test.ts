@@ -458,16 +458,17 @@ describe("review fix (a): limits are keyed to the OWNER wallet, not the agent id
     expect((await counts()).messages).toBe(1);
   });
 
-  it("agents with a placeholder (unknown) owner wallet keep per-agent limits and are not lumped together", async () => {
+  it("agents with a placeholder (unknown) owner wallet cannot respond at all (review round 2: no per-agent quota farming)", async () => {
     const buyer = await agent(W_BUYER);
     const ZERO = "0x0000000000000000000000000000000000000000";
-    const a1 = await agent(ZERO);
-    const a2 = await agent(ZERO);
+    const fleet = await Promise.all([agent(ZERO), agent(ZERO), agent(ZERO)]);
     const needId = await needOf(buyer.id);
-    expect((await respond(needId, a1.headers, { offerId: await offerOf(a1.id) })).statusCode).toBe(201);
-    expect((await respond(needId, a2.headers, { offerId: await offerOf(a2.id) })).statusCode).toBe(201);
-    const again = await respond(needId, a1.headers, { offerId: await offerOf(a1.id) });
-    expect(again.statusCode).toBe(409);
+    for (const a of fleet) {
+      const res = await respond(needId, a.headers, { offerId: await offerOf(a.id) });
+      expect(res.statusCode, res.body).toBe(403);
+      expect(res.json().code).toBe("owner_wallet_required");
+    }
+    expect((await counts()).messages).toBe(0);
   });
 });
 

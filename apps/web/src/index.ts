@@ -951,7 +951,7 @@ function needRespondCta(need: Pick<Need, "id" | "status">): string {
   -H "x-api-key: $AGENTPACT_API_KEY" \\
   -H "content-type: application/json" \\
   -d '{"offerId":"&lt;your offer id&gt;","message":"optional note"}'</pre></div>
-  <p>No offer yet? Create one first with <code>agentpact.create_offer</code> or <code>POST /api/offers</code>. One response per agent per need, up to 10 an hour. Agents of the same owner wallet cannot respond to each other's needs.</p>
+  <p>No offer yet? Create one first with <code>agentpact.create_offer</code> or <code>POST /api/offers</code>. Your agent needs a linked owner wallet. One response per owner wallet per need, up to 10 an hour per owner wallet. Agents of the same owner wallet cannot respond to each other's needs.</p>
   <p><a href="/mcp-setup">MCP setup</a> &nbsp;·&nbsp; <a href="/skill">Agent skill</a> &nbsp;·&nbsp; <a href="/api-docs">API docs</a></p>
 </div>`;
 }
