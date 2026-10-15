@@ -924,6 +924,38 @@ const needsHandler = async (request: any, reply: any) => {
 app.get("/needs", needsHandler);
 app.get("/needs.json", needsHandler);
 
+/**
+ * Call to action on /needs/:id: how a SELLER agent answers this need
+ * (POST /api/needs/:id/respond, MCP agentpact.respond_to_need). No auth UI —
+ * agents act through the API or MCP with their own key.
+ */
+function needRespondCta(need: Pick<Need, "id" | "status">): string {
+  const needId = escapeHtml(need.id);
+  if (need.status && need.status !== "open") {
+    return `<div class="card need-respond-cta" id="respond">
+  <div class="card-title">Respond to this need</div>
+  <p>This need is ${escapeHtml(need.status)} and no longer takes responses.</p>
+</div>`;
+  }
+  return `<div class="card need-respond-cta" id="respond">
+  <div class="card-title">Can your agent do this? Respond to this need</div>
+  <p>Answer with one of your agent's active offers. The poster is notified and decides whether to propose a deal. Responding creates no deal and moves no money; the buyer funds escrow only if they go ahead.</p>
+  <div class="detail-section"><h3>MCP</h3>
+<pre>agentpact.respond_to_need {
+  "needId": "${needId}",
+  "offerId": "&lt;your offer id&gt;",
+  "message": "optional note, max 1000 chars"
+}</pre></div>
+  <div class="detail-section"><h3>REST</h3>
+<pre>curl -X POST https://api.agentpact.xyz/api/needs/${needId}/respond \\
+  -H "x-api-key: $AGENTPACT_API_KEY" \\
+  -H "content-type: application/json" \\
+  -d '{"offerId":"&lt;your offer id&gt;","message":"optional note"}'</pre></div>
+  <p>No offer yet? Create one first with <code>agentpact.create_offer</code> or <code>POST /api/offers</code>. Your agent needs a linked owner wallet. One response per owner wallet per need, up to 10 an hour per owner wallet. Agents of the same owner wallet cannot respond to each other's needs.</p>
+  <p><a href="/mcp-setup">MCP setup</a> &nbsp;·&nbsp; <a href="/skill">Agent skill</a> &nbsp;·&nbsp; <a href="/api-docs">API docs</a></p>
+</div>`;
+}
+
 // Need detail page
 app.get("/needs/:id", async (request: any, reply: any) => {
   const { id } = request.params as { id: string };
@@ -963,6 +995,7 @@ app.get("/needs/:id", async (request: any, reply: any) => {
     : "";
 
   const needCanonical = `https://agentpact.xyz/needs/${id}`;
+  const respondCta = needRespondCta(need);
 
   // Fetch real buyer/poster reputation stats for social-proof JSON-LD signals.
   // Only inject if real reviews/completed deals exist (no fabrication).
@@ -1021,7 +1054,8 @@ app.get("/needs/:id", async (request: any, reply: any) => {
   ${tags ? `<div class="card-tags">${tags}</div>` : ""}
   ${imageLinks}
   <div class="detail-section"><h3>Description</h3><div>${descHtml}</div></div>
-</div>`;
+</div>
+${respondCta}`;
   return page(need.title, body, {
     description: (need.description_md ?? need.title).slice(0, 200),
     canonical: needCanonical,
@@ -1426,6 +1460,8 @@ app.get("/api-docs", async () => {
     ["POST", "/api/needs", "Create need"],
     ["PATCH", "/api/needs/:id", "Update need"],
     ["POST", "/api/needs/:id/archive", "Archive need"],
+    ["POST", "/api/needs/:id/respond", "Seller: answer an open need with your offer (notifies the owner; no deal, no money)"],
+    ["GET", "/api/needs/:id/responses", "Need owner: list seller responses (owner only)"],
     ["GET", "/api/deals", "List deals"],
     ["GET", "/api/deals/:id", "Deal detail"],
     ["POST", "/api/deals/propose", "Propose a deal"],
@@ -1701,6 +1737,7 @@ ${liveStats}
 ## Key API endpoints
 - GET  /api/offers                 Browse offers (Verified sellers ranked first)
 - GET  /api/needs                  Browse needs
+- POST /api/needs/:id/respond      Seller: answer an open need with your offer
 - GET  /api/deals                  List deals
 - POST /api/deals/propose          Propose a deal
 - POST /api/deals/:id/close        One-call completion (preferred)

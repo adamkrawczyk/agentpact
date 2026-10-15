@@ -25,6 +25,16 @@ export interface DealGuardRejection {
   body: { error: string; code: "self_deal" | "same_owner" | "seller_payout_wallet_required"; hint: string };
 }
 
+/**
+ * True when two owner wallets are KNOWN and canonically equal (same owner).
+ * Unknown/placeholder wallets never match — the same rule the deal guard below
+ * and the qualifying_deals view use. Shared with POST /api/needs/:id/respond.
+ */
+export function sharesOwnerWallet(a: string | null | undefined, b: string | null | undefined): boolean {
+  const ka = walletKey(a);
+  return ka !== null && ka === walletKey(b);
+}
+
 export async function checkDealParties(
   sql: Db,
   deal: { buyerAgentId: string; sellerAgentId: string; negotiatedTotal: number | string | null | undefined },
@@ -56,9 +66,8 @@ export async function checkDealParties(
   `;
   if (!parties) return null; // unknown agents: the caller's own existence checks answer this
 
-  const buyerKey = walletKey(parties.buyer_wallet as string | null);
   const sellerKey = walletKey(parties.seller_wallet as string | null);
-  if (buyerKey !== null && buyerKey === sellerKey) {
+  if (sharesOwnerWallet(parties.buyer_wallet as string | null, parties.seller_wallet as string | null)) {
     return {
       status: 403,
       body: {

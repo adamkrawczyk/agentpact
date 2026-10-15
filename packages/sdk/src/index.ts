@@ -150,6 +150,33 @@ export interface CreateNeedInput {
   acceptedPaymentMethods?: PaymentMethod;
 }
 
+/** A seller's answer to an open need (POST /api/needs/:id/respond). No deal, no money. */
+export interface NeedResponse {
+  id: string;
+  needId: string;
+  offerId: string;
+  sellerAgentId: string;
+  message: string | null;
+  createdAt: string;
+  next?: string;
+}
+
+/** One row of GET /api/needs/:id/responses (need owner only). */
+export interface NeedResponseListItem {
+  id: string;
+  needId: string;
+  offerId: string | null;
+  sellerAgentId: string;
+  sellerHandle: string | null;
+  offerTitle: string | null;
+  offerPrice: number | string | null;
+  currency: string | null;
+  offerStatus: string | null;
+  message: string | null;
+  deliveryStatus: string;
+  createdAt: string;
+}
+
 export interface ProposeDealInput {
   offerId: string;
   needId: string;
@@ -397,6 +424,24 @@ class NeedsClient {
   async archive(id: string): Promise<Need> {
     return request<Need>(this.baseUrl, `/api/needs/${id}/archive`, {
       method: 'POST',
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  /** Seller: answer an open need with one of your own active offers. Creates no deal and moves no money. */
+  async respond(needId: string, input: { offerId: string; message?: string }): Promise<NeedResponse> {
+    return request<NeedResponse>(this.baseUrl, `/api/needs/${encodeURIComponent(needId)}/respond`, {
+      method: 'POST',
+      body: { offerId: input.offerId, message: input.message },
+      apiKey: this.apiKey,
+      timeout: this.timeout,
+    });
+  }
+
+  /** Need owner: list seller responses to your need. */
+  async listResponses(needId: string): Promise<NeedResponseListItem[]> {
+    return request<NeedResponseListItem[]>(this.baseUrl, `/api/needs/${encodeURIComponent(needId)}/responses`, {
       apiKey: this.apiKey,
       timeout: this.timeout,
     });

@@ -32,6 +32,8 @@ const VALID_EVENTS = [
   "milestone.completed",
   "feedback.received",
   "concierge.message",
+  // A seller answered one of your open needs (POST /api/needs/:id/respond).
+  "need.response",
   "seller.verified_offer",
   "webhook.test",
 ] as const;
@@ -53,13 +55,18 @@ function signPayload(payload: string, secret: string): string {
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000; // 1s, 2s, 4s
 
-async function deliverWebhook(
+/**
+ * Deliver one event to one webhook with retries. Resolves `true` when the
+ * receiver accepted it (2xx), `false` once every retry failed. Callers that
+ * need durable-delivery semantics (concierge outbox) branch on this.
+ */
+export async function deliverWebhook(
   db: ReturnType<typeof postgres>,
   webhook: { id: string; url: string; secret: string },
   agentId: string,
   eventType: string,
   payload: object,
-): Promise<void> {
+): Promise<boolean> {
   const body = JSON.stringify({
     event: eventType,
     timestamp: new Date().toISOString(),
@@ -94,7 +101,7 @@ async function deliverWebhook(
           SET status = 'sent', attempts = ${attempt}
           WHERE id = ${logId}
         `;
-        return;
+        return true;
       }
 
       const errorText = `HTTP ${response.status}: ${response.statusText}`;
@@ -124,6 +131,7 @@ async function deliverWebhook(
     SET status = 'failed'
     WHERE id = ${logId}
   `;
+  return false;
 }
 
 // ── Core dispatch function ───────────────────────────────────────────

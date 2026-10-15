@@ -59,6 +59,7 @@ function normalizePath(path: string): string {
 
 function isPublicGet(path: string): boolean {
   if (/^\/api\/deals\/[^/]+\/consultation-responses$/.test(path)) return false;
+  if (/^\/api\/needs\/[^/]+\/responses$/.test(path)) return false;
   return PUBLIC_GET_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 
@@ -92,7 +93,12 @@ function extractRoutes(source: string, file: string): Route[] {
     const path = normalizePath(match[3]);
     const before = source.slice(0, match.index);
     const line = before.split("\n").length;
-    const window = source.slice(match.index, Math.min(source.length, match.index + 1800));
+    // Stop the window at the next route registration so one handler's schemas
+    // are never attributed to the route above it.
+    const rest = source.slice(match.index + match[0].length);
+    const next = rest.search(/app\.(get|post|patch|put|delete)\s*\(/);
+    const end = next === -1 ? source.length : match.index + match[0].length + next;
+    const window = source.slice(match.index, Math.min(end, match.index + 1800));
     routes.push({
       method,
       path,
