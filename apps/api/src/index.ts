@@ -51,6 +51,7 @@ import { registerAuditOrdersRoutes } from './routes/audit-orders.js';
 import { registerVerifiedSellerWebhookRoutes } from './routes/verified-seller-webhook.js';
 import { registerPublicStatsRoutes } from './routes/public-stats.js';
 import telemetryPlugin from './plugins/telemetry.js';
+import { suggestRoutes, type KnownRoute } from './lib/route-suggest.js';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -275,6 +276,30 @@ app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message
     app.log.error({ err: error, requestId }, 'unhandled server error');
   }
   reply.code(statusCode).send({ error: message, code, requestId });
+});
+
+// ── ROUTE_NOT_FOUND (ah_1016): an unmatched path is a 404 that names the real
+// route, never a 401. Before this, the auth preHandler below also ran for
+// Fastify's not-found handler, so every guessed /api/* path answered "Missing
+// API key" and callers fixed the wrong thing (one external seller retried
+// POST /api/deals ~1.8k times; the route is POST /api/deals/propose). Routes
+// are collected via onRoute, which must be registered before any route.
+const knownRoutes: KnownRoute[] = [];
+app.addHook("onRoute", (opts) => {
+  const methods = Array.isArray(opts.method) ? opts.method : [opts.method];
+  for (const method of methods) {
+    if (opts.url.startsWith("/api/")) knownRoutes.push({ method: String(method), url: opts.url });
+  }
+});
+app.setNotFoundHandler((request, reply) => {
+  const path = request.url.split("?")[0] ?? request.url;
+  reply.code(404).send({
+    error: `Route ${request.method} ${path} not found`,
+    code: "ROUTE_NOT_FOUND",
+    requestId: request.id,
+    didYouMean: suggestRoutes(request.method, path, knownRoutes),
+    docs: "https://agentpact.xyz/llms.txt",
+  });
 });
 
 // Echo the request id back on every response so clients can include it in
@@ -1318,6 +1343,9 @@ registerWebhookRoutes(app, sql);
 registerConciergeRoutes(app, sql as unknown as Sql<Record<string, unknown>>);
 
 app.addHook("preHandler", async (request, reply) => {
+  // ah_1016: an unmatched route is answered by the not-found handler; auth
+  // here would turn every wrong path into 401 "Missing API key".
+  if (request.is404) return;
   const routePath = (request.url.split("?")[0] ?? request.url);
   // Issue #141 — keep the public-route whitelist in sync with the routes that
   // actually exist. `/api/config` was a phantom entry (no such route — the real
