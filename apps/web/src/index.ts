@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import { readFileSync, existsSync } from "fs";
 import { resolve } from "path";
 import { registerRouteModules } from "./routes/index.js";
+import { drainMsFromEnv, installGracefulShutdown, notifyPm2Ready } from "./process-lifecycle.js";
 
 /** GET /api/stats/public — every deal count comes from the qualifying_deals view. */
 type PublicStats = {
@@ -72,7 +73,12 @@ const PORT = Number(process.env.PORT ?? process.env.WEB_PORT ?? 3000);
 const HOST = process.env.WEB_HOST ?? "0.0.0.0";
 const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
 
-const app = Fastify({ logger: true });
+const app = Fastify({
+  logger: true,
+  // See apps/api/src/index.ts: during a zero-downtime reload the draining
+  // worker serves late keep-alive requests instead of answering 503.
+  return503OnClosing: false,
+});
 await app.register(cors, { origin: true });
 
 app.addHook('onSend', async (_request, reply, payload) => {
@@ -2042,8 +2048,25 @@ app.get("/verified-thank-you", async () => {
 
 await registerRouteModules(app, { page, escapeHtml, apiBase: API_BASE });
 
+// On SIGINT/SIGTERM: drain (keep serving, Connection: close on every
+// response so the proxy retires pooled sockets), then close and exit, so a
+// pm2 cluster reload hands over without dropping requests
+// (deploy/ecosystem.config.cjs, process-lifecycle.ts).
+let draining = false;
+app.addHook("onRequest", async (_request, reply) => {
+  if (draining) reply.header("connection", "close");
+});
+installGracefulShutdown(() => app.close(), {
+  drainMs: drainMsFromEnv(),
+  onDrainStart: () => {
+    draining = true;
+  },
+});
+
 app.listen({ port: PORT, host: HOST }).then(() => {
   console.log(`Web server listening on ${HOST}:${PORT}`);
+  // pm2 wait_ready: the old worker keeps serving until this arrives.
+  notifyPm2Ready();
 }).catch((error) => {
   app.log.error(error);
   process.exit(1);

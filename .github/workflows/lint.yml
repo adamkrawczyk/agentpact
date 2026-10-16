@@ -51,3 +51,6 @@ jobs:
 
       - name: Deploy preflight guard self-test
         run: bash scripts/deploy-preflight.test.sh
+
+      - name: pm2 apply (zero-downtime reload) self-test
+        run: bash scripts/pm2-apply.sh --self-test
