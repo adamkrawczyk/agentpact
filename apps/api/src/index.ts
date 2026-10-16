@@ -1,5 +1,5 @@
 
-import Fastify from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import postgres, { type Sql } from "postgres";
 import { randomUUID, createHash, createHmac } from "node:crypto";
@@ -51,7 +51,7 @@ import { registerAuditOrdersRoutes } from './routes/audit-orders.js';
 import { registerVerifiedSellerWebhookRoutes } from './routes/verified-seller-webhook.js';
 import { registerPublicStatsRoutes } from './routes/public-stats.js';
 import telemetryPlugin from './plugins/telemetry.js';
-import { suggestRoutes, type KnownRoute } from './lib/route-suggest.js';
+import { isSuggestible, suggestRoutes, type KnownRoute } from './lib/route-suggest.js';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -284,14 +284,23 @@ app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message
 // API key" and callers fixed the wrong thing (one external seller retried
 // POST /api/deals ~1.8k times; the route is POST /api/deals/propose). Routes
 // are collected via onRoute, which must be registered before any route.
+export const NOT_FOUND_PER_MINUTE = 30;
 const knownRoutes: KnownRoute[] = [];
 app.addHook("onRoute", (opts) => {
   const methods = Array.isArray(opts.method) ? opts.method : [opts.method];
   for (const method of methods) {
-    if (opts.url.startsWith("/api/")) knownRoutes.push({ method: String(method), url: opts.url });
+    if (isSuggestible(opts.url)) knownRoutes.push({ method: String(method), url: opts.url });
   }
 });
-app.setNotFoundHandler((request, reply) => {
+// Misses are throttled per IP (review round 1): rate-limit attaches to routes
+// via onRoute, so the not-found path had no limit at all. The limiter only
+// exists once the plugin is registered below; until then this is a no-op.
+let notFoundLimiter: ((request: FastifyRequest, reply: FastifyReply) => Promise<unknown>) | null = null;
+app.setNotFoundHandler({
+  preHandler: async (request: FastifyRequest, reply: FastifyReply) => {
+    if (notFoundLimiter) await notFoundLimiter(request, reply);
+  },
+}, (request, reply) => {
   const path = request.url.split("?")[0] ?? request.url;
   reply.code(404).send({
     error: `Route ${request.method} ${path} not found`,
@@ -1292,6 +1301,22 @@ await app.register(import('@fastify/rate-limit'), {
   timeWindow: '1 minute',
   allowList: ['127.0.0.1'],
   keyGenerator: (request) => request.headers['x-api-key'] as string || request.ip
+});
+// ah_1016: misses are keyed by CLIENT address only, so a rotating fake key
+// cannot reset the bucket. The API sits behind Cloudflare + a local proxy and
+// sets no trustProxy, so request.ip is the proxy for every caller; keying on
+// it would make one shared bucket. cf-connecting-ip is written by Cloudflare.
+// A spoofed header only escapes this limit; the suggester's work budget still
+// bounds the cost of each miss.
+notFoundLimiter = app.rateLimit({
+  max: NOT_FOUND_PER_MINUTE,
+  timeWindow: '1 minute',
+  keyGenerator: (request) => {
+    const cf = request.headers['cf-connecting-ip'];
+    const xff = request.headers['x-forwarded-for'];
+    const first = (Array.isArray(xff) ? xff[0] : xff)?.split(',')[0]?.trim();
+    return (typeof cf === 'string' && cf) || first || request.ip;
+  },
 });
 
 // ── Request timeout middleware (prevent hung requests from blocking the pool) ──

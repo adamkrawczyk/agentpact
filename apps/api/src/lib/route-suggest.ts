@@ -57,10 +57,36 @@ export const EXTRA_ROUTE_SEGMENT_COST = 0.3;
 export const EXTRA_PARAM_SEGMENT_COST = 0.5;
 export const MAX_SUGGESTION_COST = 1.5;
 
+// Operator/cron surfaces are never suggested to an anonymous caller. Their
+// handlers still enforce auth; this only keeps the 404 from advertising them.
+const INTERNAL_PREFIXES = ["/api/admin/", "/api/audit/", "/api/concierge/", "/api/autopilot/", "/api/verified/"];
+const INTERNAL_PATTERNS = [/\/fulfillment\/auto-complete$/, /^\/api\/disputes\/resolve-timeouts$/];
+
+export function isSuggestible(url: string): boolean {
+  if (!url.startsWith("/api/")) return false;
+  if (INTERNAL_PREFIXES.some((p) => url.startsWith(p))) return false;
+  return !INTERNAL_PATTERNS.some((re) => re.test(url));
+}
+
+// Work budget (review round 1, ah_1016): an anonymous miss must stay cheap, so
+// oversized paths get no suggestions instead of an edit-distance pass.
+export const MAX_PATH_LENGTH = 256;
+export const MAX_SEGMENTS = 10;
+export const MAX_SEGMENT_LENGTH = 48;
+
 export function suggestRoutes(method: string, path: string, routes: KnownRoute[], limit = 3): string[] {
+  const p = segments(path);
+  if (path.length > MAX_PATH_LENGTH || p.length > MAX_SEGMENTS || p.some((s) => s.length > MAX_SEGMENT_LENGTH)) {
+    return [];
+  }
   const seen = new Set<string>();
   return routes
-    .filter((r) => r.method !== "HEAD" && r.method !== "OPTIONS")
+    .filter((r) => r.method !== "HEAD" && r.method !== "OPTIONS" && isSuggestible(r.url))
+    // cheap length pre-filter: these can never score under MAX_SUGGESTION_COST
+    .filter((r) => {
+      const n = segments(r.url).length;
+      return p.length - n < 2 && n - p.length <= 5;
+    })
     .map((r) => ({ label: `${r.method.toUpperCase()} ${r.url}`, cost: routeCost(method, path, r) }))
     .filter((s) => s.cost > 0 && s.cost <= MAX_SUGGESTION_COST)
     .sort((a, b) => a.cost - b.cost || a.label.localeCompare(b.label))
