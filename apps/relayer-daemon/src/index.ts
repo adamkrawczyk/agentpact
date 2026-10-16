@@ -18,6 +18,10 @@ import {
 import { runAutoCloseSweep } from "./autoclose-sweeper.js";
 import { runSettlementSweep } from "./settlement-sweeper.js";
 import { runProposalExpirySweep } from "./proposal-expiry-sweeper.js";
+// Types only: the CCTP code (and @agentpact/payouts) is loaded lazily, only
+// when CCTP_ENABLED=true, so a disabled relay can never stop the existing
+// sweepers from booting.
+import type { CctpAlert, CctpSweeperDeps } from "./cctp-sweeper.js";
 
 interface SweeperHealth {
   cycles: number;
@@ -31,6 +35,17 @@ interface SweeperHealth {
   overlapSkips: number;
 }
 
+/** Cross-chain relay state for /health (M1). */
+interface CctpHealth {
+  enabled: boolean;
+  network: string | null;
+  /** cctp_transfers rows in `stuck` — each one needs a human. */
+  stuckCount: number;
+  oldestStuckAgeMs: number | null;
+  lastAlertAt: string | null;
+  lastAlert: CctpAlert | null;
+}
+
 interface DaemonHealth {
   ok: boolean;
   ackSweeper: SweeperHealth;
@@ -39,6 +54,8 @@ interface DaemonHealth {
   autocloseSweeper: SweeperHealth;
   settlementSweeper: SweeperHealth;
   proposalExpirySweeper: SweeperHealth;
+  cctpSweeper: SweeperHealth;
+  cctp: CctpHealth;
 }
 
 function freshHealth(): SweeperHealth {
@@ -76,6 +93,12 @@ export interface DaemonDeps {
   onStall?: (name: string, stalledMs: number) => void;
   sql: SqlClient;
   chain: ChainClient;
+  /**
+   * CCTP relay runtime. Scheduled only when config.cctpEnabled is true; the
+   * daemon supplies `alert` itself so every CCTP alert goes through the same
+   * structured error log (journal/pm2) the other sweepers use, and /health.
+   */
+  cctp?: Omit<CctpSweeperDeps, "alert">;
   log?: (level: "info" | "warn" | "error", msg: string, meta?: Record<string, unknown>) => void;
 }
 
@@ -91,12 +114,21 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
     autocloseSweeper: freshHealth(),
     settlementSweeper: freshHealth(),
     proposalExpirySweeper: freshHealth(),
+    cctpSweeper: freshHealth(),
+    cctp: {
+      enabled: config.cctpEnabled === true,
+      network: config.cctpEnabled === true ? (config.cctpNetwork ?? "testnet") : null,
+      stuckCount: 0,
+      oldestStuckAgeMs: null,
+      lastAlertAt: null,
+      lastAlert: null,
+    },
   };
 
-  type SweeperName = Exclude<keyof DaemonHealth, "ok">;
+  type SweeperName = Exclude<keyof DaemonHealth, "ok" | "cctp">;
   const SWEEPERS: SweeperName[] = [
     "ackSweeper", "schellingSweeper", "streamStaleSweeper",
-    "autocloseSweeper", "settlementSweeper", "proposalExpirySweeper",
+    "autocloseSweeper", "settlementSweeper", "proposalExpirySweeper", "cctpSweeper",
   ];
   const tickStallMs = config.tickStallMs ?? 60 * 60_000;
 
@@ -118,8 +150,9 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
   function recomputeOk() {
     const failures = SWEEPERS.reduce((n, k) => n + health[k].consecutiveFailures, 0);
     // Degraded on 3+ total consecutive failures across all sweepers, OR on
-    // any tick in flight past the stall threshold.
-    health.ok = failures < 3 && stalledSweepers().length === 0;
+    // any tick in flight past the stall threshold, OR on any stuck CCTP
+    // transfer: user funds waiting on a human must page, not sit in a table.
+    health.ok = failures < 3 && stalledSweepers().length === 0 && health.cctp.stuckCount === 0;
   }
 
   async function safeRun(name: SweeperName, fn: () => Promise<unknown>) {
@@ -186,6 +219,32 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
     config.proposalExpirySweepIntervalMs,
   );
 
+  // M1 — cross-chain relay. Off unless CCTP_ENABLED=true AND the runtime was
+  // built (entrypoint refuses to boot enabled without a gateway + key).
+  const cctpAlert = (a: CctpAlert) => {
+    health.cctp.lastAlertAt = new Date().toISOString();
+    health.cctp.lastAlert = a;
+    log("error", "cctp.alert", { ...a });
+  };
+  let cctpTimer: ReturnType<typeof setInterval> | null = null;
+  if (config.cctpEnabled === true) {
+    const cctp = deps.cctp;
+    if (!cctp) {
+      log("error", "cctpSweeper.not_wired", { reason: "CCTP_ENABLED=true but no CCTP runtime was supplied" });
+    } else {
+      cctpTimer = setInterval(
+        () => safeRun("cctpSweeper", async () => {
+          const { runCctpSweep } = await import("./cctp-sweeper.js");
+          const r = await runCctpSweep({ ...cctp, alert: cctpAlert });
+          health.cctp.stuckCount = r.stuck.count;
+          health.cctp.oldestStuckAgeMs = r.stuck.oldestStuckAgeMs;
+          return r;
+        }),
+        config.cctpSweepIntervalMs ?? 30_000,
+      );
+    }
+  }
+
   // Stall watchdog: a wedged tick must become visible AND self-heal. The
   // overlap guard alone would turn a hang into permanent silent skipping.
   let stallReported = false;
@@ -221,6 +280,7 @@ export function startDaemon(deps: DaemonDeps): { stop: () => Promise<void>; getH
       clearInterval(acTimer);
       clearInterval(setTimer);
       clearInterval(peTimer);
+      if (cctpTimer) clearInterval(cctpTimer);
       clearInterval(stallTimer);
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
@@ -423,8 +483,10 @@ if (isEntrypoint) {
     };
   }
 
+  const cctp = config.cctpEnabled ? await buildCctpRuntime(config, sql) : undefined;
+
   const { stop } = startDaemon({
-    config, sql, chain,
+    config, sql, chain, cctp,
     // A wedged tick cannot be un-wedged from inside the process. Exit non-zero
     // so pm2 (autorestart) brings up a fresh one; the stall is logged first.
     onStall: (name, ms) => {
@@ -438,4 +500,64 @@ if (isEntrypoint) {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+}
+
+/**
+ * Build the CCTP relay runtime, or refuse to boot. Enabled-but-misconfigured
+ * must crash loudly at start, never degrade into a daemon that silently
+ * relays nothing.
+ */
+async function buildCctpRuntime(config: Config, sql: SqlClient): Promise<Omit<CctpSweeperDeps, "alert">> {
+  const { cctpConstants, IrisClient, quoteForwardedBurn } = await import("@agentpact/payouts");
+  const { createViemCctpChain } = await import("./cctp-chain.js");
+  const { sqlCctpStore } = await import("./cctp-store.js");
+  const { httpBindingVerifier } = await import("./cctp-binding.js");
+  const { createPublicClient, http } = await import("viem");
+
+  if (!config.cctpGatewayAddress) throw new Error("CCTP_ENABLED=true requires CCTP_GATEWAY_ADDRESS");
+  if (!config.relayerPrivateKey) throw new Error("CCTP_ENABLED=true requires RELAYER_PRIVATE_KEY");
+  const c = cctpConstants(config.cctpNetwork);
+  const rpcChainId = await createPublicClient({ transport: http(config.baseRpcUrl) }).getChainId();
+  if (rpcChainId !== c.base.chainId) {
+    throw new Error(`CCTP_NETWORK=${config.cctpNetwork} expects Base chain ${c.base.chainId}, BASE_RPC_URL is chain ${rpcChainId}`);
+  }
+
+  const iris = new IrisClient({ baseUrl: config.irisBaseUrl ?? c.irisBaseUrl });
+  return {
+    store: sqlCctpStore(sql),
+    iris,
+    chain: createViemCctpChain({
+      rpcUrl: config.baseRpcUrl,
+      privateKey: config.relayerPrivateKey as `0x${string}`,
+      network: config.cctpNetwork,
+      gateway: config.cctpGatewayAddress as `0x${string}`,
+      messageTransmitter: c.base.messageTransmitterV2,
+      logLookbackBlocks: BigInt(config.cctpLogLookbackBlocks),
+      logChunkBlocks: BigInt(config.cctpLogChunkBlocks),
+    }),
+    verifyBinding: httpBindingVerifier({ apiBaseUrl: config.apiBaseUrl, adminApiKey: config.adminApiKey }),
+    quoteForwardFee: async (amount, destinationDomain) => {
+      // Solana: include ATA creation — a payout to an owner without a USDC
+      // account would otherwise fail at mint.
+      const fees = await iris.getBurnFees(c.base.domain, destinationDomain, { forward: true, includeRecipientSetup: destinationDomain === 5 });
+      if (!fees.forwardFee) throw new Error("Iris returned no forwarding fee");
+      const q = quoteForwardedBurn({ amount, destinationDomain, speed: config.cctpPayoutSpeed, tiers: fees.tiers, forwardFee: fees.forwardFee });
+      return { maxFee: q.maxFee, minFinalityThreshold: q.minFinalityThreshold };
+    },
+    config: {
+      gateway: config.cctpGatewayAddress as `0x${string}`,
+      maxPerTick: config.cctpMaxPerTick,
+      attestationTimeoutMs: config.cctpAttestationTimeoutMin * 60_000,
+      bindTimeoutMs: config.cctpBindTimeoutMin * 60_000,
+      forwardTimeoutMs: config.cctpForwardTimeoutMin * 60_000,
+      maxAttempts: config.cctpMaxAttempts,
+      retryBaseMs: config.cctpRetryBaseMs,
+      retryMaxMs: config.cctpRetryMaxMs,
+      txDropAfterMs: config.cctpTxDropAfterMin * 60_000,
+      receiptWaitMs: 60_000,
+      receiptPollMs: 3_000,
+      refundGraceMs: config.cctpRefundGraceSec * 1000,
+      leaseMs: 10 * 60_000,
+    },
+  };
 }

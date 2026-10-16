@@ -62,6 +62,32 @@ const schema = z.object({
   // settlement tick: 25 deals x (3 judge attempts x 20s + one 30s release
   // call) ~ 39 min. A threshold under that would kill healthy ticks.
   tickStallMs: z.coerce.number().int().positive().default(60 * 60_000),
+  // ── CCTP cross-chain relay (M1) ──────────────────────────────────────
+  // DEFAULT OFF, same literal-"true" rule as SETTLEMENT_AUTO_RELEASE: the
+  // string "false" must never coerce to enabled.
+  cctpEnabled: z
+    .string()
+    .optional()
+    .transform((v) => String(v ?? "").toLowerCase() === "true"),
+  cctpNetwork: z.enum(["testnet", "mainnet"]).default("testnet"),
+  cctpGatewayAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional(),
+  irisBaseUrl: z.string().url().optional(),
+  cctpSweepIntervalMs: z.coerce.number().int().positive().default(30_000),
+  cctpMaxPerTick: z.coerce.number().int().positive().default(20),
+  // Fast transfers attest in seconds; Standard from Ethereum takes ~15-20 min
+  // of L1 finality. 45 min means "something is wrong", not "slow".
+  cctpAttestationTimeoutMin: z.coerce.number().int().positive().default(45),
+  cctpBindTimeoutMin: z.coerce.number().int().positive().default(30),
+  cctpForwardTimeoutMin: z.coerce.number().int().positive().default(60),
+  cctpMaxAttempts: z.coerce.number().int().positive().default(5),
+  cctpRetryBaseMs: z.coerce.number().int().positive().default(60_000),
+  cctpRetryMaxMs: z.coerce.number().int().positive().default(30 * 60_000),
+  cctpTxDropAfterMin: z.coerce.number().int().positive().default(15),
+  cctpRefundGraceSec: z.coerce.number().int().nonnegative().default(300),
+  // Refunds and payouts are not latency-critical: Standard costs 0 bps.
+  cctpPayoutSpeed: z.enum(["fast", "standard"]).default("standard"),
+  cctpLogLookbackBlocks: z.coerce.number().int().positive().default(50_000),
+  cctpLogChunkBlocks: z.coerce.number().int().positive().default(5_000),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 
@@ -93,6 +119,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     proposalExpirySweepIntervalMs: env.PROPOSAL_EXPIRY_SWEEP_INTERVAL_MS,
     proposalExpiryDays: env.PROPOSAL_EXPIRY_DAYS,
     tickStallMs: env.RELAYER_TICK_STALL_MS,
+    cctpEnabled: env.CCTP_ENABLED,
+    cctpNetwork: env.CCTP_NETWORK,
+    cctpGatewayAddress: env.CCTP_GATEWAY_ADDRESS,
+    irisBaseUrl: env.CCTP_IRIS_BASE_URL,
+    cctpSweepIntervalMs: env.CCTP_SWEEP_INTERVAL_MS,
+    cctpMaxPerTick: env.CCTP_MAX_PER_TICK,
+    cctpAttestationTimeoutMin: env.CCTP_ATTESTATION_TIMEOUT_MIN,
+    cctpBindTimeoutMin: env.CCTP_BIND_TIMEOUT_MIN,
+    cctpForwardTimeoutMin: env.CCTP_FORWARD_TIMEOUT_MIN,
+    cctpMaxAttempts: env.CCTP_MAX_ATTEMPTS,
+    cctpRetryBaseMs: env.CCTP_RETRY_BASE_MS,
+    cctpRetryMaxMs: env.CCTP_RETRY_MAX_MS,
+    cctpTxDropAfterMin: env.CCTP_TX_DROP_AFTER_MIN,
+    cctpRefundGraceSec: env.CCTP_REFUND_GRACE_SEC,
+    cctpPayoutSpeed: env.CCTP_PAYOUT_SPEED,
+    cctpLogLookbackBlocks: env.CCTP_LOG_LOOKBACK_BLOCKS,
+    cctpLogChunkBlocks: env.CCTP_LOG_CHUNK_BLOCKS,
     logLevel: env.LOG_LEVEL,
   });
 }

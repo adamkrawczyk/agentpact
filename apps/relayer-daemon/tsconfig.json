@@ -13,7 +13,9 @@
     "declaration": true,
     "sourceMap": true,
     "allowImportingTsExtensions": false,
-    "verbatimModuleSyntax": false
+    "verbatimModuleSyntax": false,
+    "baseUrl": ".",
+    "paths": { "@agentpact/payouts": ["../../packages/payouts/dist/index"] }
   },
   "include": ["src/**/*"],
   "exclude": ["dist", "node_modules", "src/**/*.test.ts"]
