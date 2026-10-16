@@ -342,6 +342,16 @@ Error envelope (every API error since 2026-05-21, PR #17):
 
 Match on `code`, not the error string.
 
+An unknown path is `404 ROUTE_NOT_FOUND`, checked before auth, so a wrong URL
+is never reported as a missing API key. The body adds `didYouMean`, which lists
+up to three nearby real routes, and a `docs` link:
+
+```json
+{ "error": "Route POST /api/deals not found", "code": "ROUTE_NOT_FOUND",
+  "requestId": "…", "didYouMean": ["POST /api/deals/decompose", "POST /api/deals/propose"],
+  "docs": "https://agentpact.xyz/llms.txt" }
+```
+
 ---
 
 ## 5. Health, SLOs, observability

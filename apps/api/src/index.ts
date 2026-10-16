@@ -1,5 +1,5 @@
 
-import Fastify from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import postgres, { type Sql } from "postgres";
 import { randomUUID, createHash, createHmac } from "node:crypto";
@@ -51,6 +51,7 @@ import { registerAuditOrdersRoutes } from './routes/audit-orders.js';
 import { registerVerifiedSellerWebhookRoutes } from './routes/verified-seller-webhook.js';
 import { registerPublicStatsRoutes } from './routes/public-stats.js';
 import telemetryPlugin from './plugins/telemetry.js';
+import { isSuggestible, suggestRoutes, type KnownRoute } from './lib/route-suggest.js';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const HOST = process.env.API_HOST ?? "0.0.0.0";
@@ -275,6 +276,39 @@ app.setErrorHandler((error: { validation?: unknown; statusCode?: number; message
     app.log.error({ err: error, requestId }, 'unhandled server error');
   }
   reply.code(statusCode).send({ error: message, code, requestId });
+});
+
+// ── ROUTE_NOT_FOUND (ah_1016): an unmatched path is a 404 that names the real
+// route, never a 401. Before this, the auth preHandler below also ran for
+// Fastify's not-found handler, so every guessed /api/* path answered "Missing
+// API key" and callers fixed the wrong thing (one external seller retried
+// POST /api/deals ~1.8k times; the route is POST /api/deals/propose). Routes
+// are collected via onRoute, which must be registered before any route.
+export const NOT_FOUND_PER_MINUTE = 30;
+const knownRoutes: KnownRoute[] = [];
+app.addHook("onRoute", (opts) => {
+  const methods = Array.isArray(opts.method) ? opts.method : [opts.method];
+  for (const method of methods) {
+    if (isSuggestible(opts.url)) knownRoutes.push({ method: String(method), url: opts.url });
+  }
+});
+// Misses are throttled per IP (review round 1): rate-limit attaches to routes
+// via onRoute, so the not-found path had no limit at all. The limiter only
+// exists once the plugin is registered below; until then this is a no-op.
+let notFoundLimiter: ((request: FastifyRequest, reply: FastifyReply) => Promise<unknown>) | null = null;
+app.setNotFoundHandler({
+  preHandler: async (request: FastifyRequest, reply: FastifyReply) => {
+    if (notFoundLimiter) await notFoundLimiter(request, reply);
+  },
+}, (request, reply) => {
+  const path = request.url.split("?")[0] ?? request.url;
+  reply.code(404).send({
+    error: `Route ${request.method} ${path} not found`,
+    code: "ROUTE_NOT_FOUND",
+    requestId: request.id,
+    didYouMean: suggestRoutes(request.method, path, knownRoutes),
+    docs: "https://agentpact.xyz/llms.txt",
+  });
 });
 
 // Echo the request id back on every response so clients can include it in
@@ -1268,6 +1302,22 @@ await app.register(import('@fastify/rate-limit'), {
   allowList: ['127.0.0.1'],
   keyGenerator: (request) => request.headers['x-api-key'] as string || request.ip
 });
+// ah_1016: misses are keyed by CLIENT address only, so a rotating fake key
+// cannot reset the bucket. The API sits behind Cloudflare + a local proxy and
+// sets no trustProxy, so request.ip is the proxy for every caller; keying on
+// it would make one shared bucket. cf-connecting-ip is written by Cloudflare.
+// A spoofed header only escapes this limit; the suggester's work budget still
+// bounds the cost of each miss.
+notFoundLimiter = app.rateLimit({
+  max: NOT_FOUND_PER_MINUTE,
+  timeWindow: '1 minute',
+  keyGenerator: (request) => {
+    const cf = request.headers['cf-connecting-ip'];
+    const xff = request.headers['x-forwarded-for'];
+    const first = (Array.isArray(xff) ? xff[0] : xff)?.split(',')[0]?.trim();
+    return (typeof cf === 'string' && cf) || first || request.ip;
+  },
+});
 
 // ── Request timeout middleware (prevent hung requests from blocking the pool) ──
 const REQUEST_TIMEOUT_MS = 30_000; // 30s hard limit per request
@@ -1318,6 +1368,9 @@ registerWebhookRoutes(app, sql);
 registerConciergeRoutes(app, sql as unknown as Sql<Record<string, unknown>>);
 
 app.addHook("preHandler", async (request, reply) => {
+  // ah_1016: an unmatched route is answered by the not-found handler; auth
+  // here would turn every wrong path into 401 "Missing API key".
+  if (request.is404) return;
   const routePath = (request.url.split("?")[0] ?? request.url);
   // Issue #141 — keep the public-route whitelist in sync with the routes that
   // actually exist. `/api/config` was a phantom entry (no such route — the real
