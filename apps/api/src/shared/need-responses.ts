@@ -33,8 +33,11 @@ export const NEED_RESPONSES_PER_HOUR = 10;
 
 /**
  * Statuses of a concierge row that still count as a "live" response. A row
- * the relay gave up on ('failed') or skipped never reached the owner, so the
- * seller may answer again.
+ * the relay gave up on ('failed') or skipped usually never reached the owner,
+ * so the seller may answer again. Exception: a 'failed' row that at least one
+ * of the owner's webhooks already accepted (a `sent` notification_log entry
+ * carrying its responseId) was delivered, so the duplicate check in
+ * POST /api/needs/:id/respond still treats it as live (issue #178).
  */
 export const LIVE_RESPONSE_STATUSES = ["queued", "sending", "sent"] as const;
 
