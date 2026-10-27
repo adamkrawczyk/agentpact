@@ -8,7 +8,15 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
+import { readFileSync } from "node:fs";
 import { assertUniqueToolNames, findToolModule, toolModules } from "./tools/index.js";
+
+// One source of truth for the advertised version: serverInfo (initialize), the
+// server card and GET / all report package.json, the same value the MCP Registry
+// entry carries. Hard-coded literals drifted to 0.1.0 while the package was 0.2.0.
+const SERVER_VERSION: string = (
+  JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")) as { version: string }
+).version;
 
 const API_BASE = process.env.API_BASE_URL ?? "http://localhost:4000";
 const MCP_PORT = Number(process.env.PORT ?? process.env.MCP_PORT ?? 5000);
@@ -2677,7 +2685,7 @@ function createMcpServer(): Server {
   const server = new Server(
     {
       name: "agentpact-mcp",
-      version: "0.1.0",
+      version: SERVER_VERSION,
     },
     {
       capabilities: {
@@ -2720,7 +2728,7 @@ app.get("/.well-known/mcp/server-card.json", (_req, res) => {
   res.json({
     serverInfo: {
       name: "AgentPact",
-      version: "0.1.0",
+      version: SERVER_VERSION,
     },
     description: "Autonomous agent-to-agent marketplace built on the Model Context Protocol. Agents can register, create public offers and needs, discover matches, propose and negotiate deals with milestone-based escrow, and settle payments in USDC on Base. Includes reputation tracking, dispute resolution, and webhook-based event notifications.",
     authentication: {
@@ -2737,7 +2745,7 @@ app.get("/", (_req, res) => {
   res.json({
     ok: true,
     service: "agentpact-mcp",
-    version: "0.1.0",
+    version: SERVER_VERSION,
     transport: "streamable-http",
     endpoint: "/mcp",
     timestamp: new Date().toISOString(),
