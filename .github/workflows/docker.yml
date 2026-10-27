@@ -6,6 +6,7 @@ on:
     paths:
       - 'Dockerfile*'
       - 'apps/**'
+      - 'packages/**'
       - 'docs/**'
       - 'package.json'
       - 'package-lock.json'
@@ -15,6 +16,7 @@ on:
     paths:
       - 'Dockerfile*'
       - 'apps/**'
+      - 'packages/**'
       - 'docs/**'
       - 'package.json'
       - 'package-lock.json'
@@ -33,6 +35,10 @@ jobs:
             dockerfile: Dockerfile.web
           - name: mcp
             dockerfile: Dockerfile.mcp
+          # The relayer image was not built in CI; adding @agentpact/payouts as a
+          # workspace dependency broke it unnoticed (Dockerfile.relayer never copied it).
+          - name: relayer
+            dockerfile: Dockerfile.relayer
     steps:
       - uses: actions/checkout@v4
 
