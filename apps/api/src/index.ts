@@ -211,6 +211,11 @@ export const app = Fastify({
   },
   requestIdHeader: "x-request-id",
   requestIdLogLabel: "requestId",
+  // Zero-downtime reload (deploy/ecosystem.config.cjs): while an old worker
+  // drains, a request that still arrives on one of its keep-alive sockets is
+  // served normally (with Connection: close) instead of answered 503. The
+  // worker is fully functional until close() finishes.
+  return503OnClosing: false,
 });
 
 // Registered immediately after Fastify() and BEFORE any route: Fastify binds
