@@ -1,0 +1,41 @@
+name: contracts
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'contracts/**'
+      - 'hardhat.config.cjs'
+      - 'packages/escrow/**'
+      - 'scripts/deploy-cctp-gateway*.ts'
+      - 'scripts/export-cctp-gateway-abi.ts'
+      - '.github/workflows/contracts.yml'
+  workflow_dispatch: {}
+
+jobs:
+  hardhat:
+    name: hardhat tests (+ Base fork)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Hardhat unit + invariant tests
+        env:
+          CCTP_FORK_TEST: '0'
+        run: npx hardhat test
+
+      - name: Base mainnet fork test (CCTP gateway vs live Circle contracts; read-only, skips if RPC unreachable)
+        run: npx hardhat test contracts/test/AgentPactCctpGateway.fork.test.cjs
+
+      - name: Deploy script guards
+        run: node --import tsx --test scripts/deploy-cctp-gateway.test.ts
